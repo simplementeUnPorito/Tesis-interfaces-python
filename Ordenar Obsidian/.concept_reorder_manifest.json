@@ -1,0 +1,186 @@
+[
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/1D Wave Equation.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/02 Wave Mathematics/1D Wave Equation.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Adquisición de Datos.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/07 Acquisition and Processing/Adquisición de Datos.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Angular Frequency.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/02 Wave Mathematics/Angular Frequency.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Attenuation.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/00 Foundations/Attenuation.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Body Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/Body Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Dispersion Relation.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/03 Wave Propagation/Dispersion Relation.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Dispersive Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/03 Wave Propagation/Dispersive Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Elastic Half Space.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/01 Elasticity and Continuum Mechanics/Elastic Half Space.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Elastic Wave Potentials.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/03 Wave Propagation/Elastic Wave Potentials.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Elasticity.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/01 Elasticity and Continuum Mechanics/Elasticity.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Fourier Integral.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/02 Wave Mathematics/Fourier Integral.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Geometric Dispersion.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/05 Dispersion/Geometric Dispersion.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Group Velocity.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/03 Wave Propagation/Group Velocity.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Hyperbolic Partial Differential Equations.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/02 Wave Mathematics/Hyperbolic Partial Differential Equations.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Hyperbolic Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/02 Wave Mathematics/Hyperbolic Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Inversión.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/08 Inversion and Interpretation/Inversión.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Lamb’s Problem.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/03 Wave Propagation/Lamb’s Problem.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Layered Media.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/06 Media and Stratification/Layered Media.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Linear Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/00 Foundations/Linear Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Love Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/Love Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Material Dispersion.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/05 Dispersion/Material Dispersion.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Mode Conversion.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/03 Wave Propagation/Mode Conversion.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Mode Superposition.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/03 Wave Propagation/Mode Superposition.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Métodos Sísmicos Invasivos.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/07 Acquisition and Processing/Métodos Sísmicos Invasivos.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Métodos Sísmicos No Invasivos.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/07 Acquisition and Processing/Métodos Sísmicos No Invasivos.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/P-waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/P-waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Phase Velocity.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/03 Wave Propagation/Phase Velocity.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Porous Media.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/06 Media and Stratification/Porous Media.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Procesamiento de Señales.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/07 Acquisition and Processing/Procesamiento de Señales.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Rayleigh Eigenproblem.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/Rayleigh Eigenproblem.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Rayleigh Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/Rayleigh Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/S-Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/S-Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Scholte Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/Scholte Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Strain Tensor.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/01 Elasticity and Continuum Mechanics/Strain Tensor.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Stress Tensor.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/01 Elasticity and Continuum Mechanics/Stress Tensor.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Surface Water Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/Surface Water Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Surface Wave Modes.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/Surface Wave Modes.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Surface Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/Surface Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Vertically Inhomogeneous Media.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/06 Media and Stratification/Vertically Inhomogeneous Media.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Viscoelastic Media.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/06 Media and Stratification/Viscoelastic Media.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Water Waves.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/04 Body and Surface Waves/Water Waves.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Wave Dispersion.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/03 Wave Propagation/Wave Dispersion.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Wave Superposition.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/02 Wave Mathematics/Wave Superposition.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Wave.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/00 Foundations/Wave.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/Wavenumber.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/02 Wave Mathematics/Wavenumber.md"
+  },
+  {
+    "from": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/d’Alembert Solution.md",
+    "to": "/home/elias-alvarez/GitHub/Tesis/Obsidian Vault/Notes/Surface Wave Methods/Concepts/02 Wave Mathematics/d’Alembert Solution.md"
+  }
+]
