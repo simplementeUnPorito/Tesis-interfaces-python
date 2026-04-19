@@ -25,32 +25,36 @@ class ChannelFilter:
     """Real-time causal filter for one data channel."""
 
     def __init__(self):
-        self._sos = None     # SOS matrix (IIR path, preferred)
-        self._b   = None     # FIR coefficients
-        self._zi  = None     # Filter state
-        self._mode = 'none'  # 'none', 'fir', 'iir'
+        self._sos   = None     # SOS matrix (IIR path, preferred)
+        self._b     = None     # FIR coefficients
+        self._zi    = None     # Filter state
+        self._mode  = 'none'   # 'none', 'fir', 'iir'
+        self._fresh = True     # True = zi has never been run (may scale by x[0])
 
     # ── Filter design / loading ───────────────────────────────────────────────
 
     def set_fir(self, coeffs):
         """Load FIR filter from h[n] coefficient array."""
-        self._b    = np.asarray(coeffs, dtype=np.float64)
+        self._b     = np.asarray(coeffs, dtype=np.float64)
         # Convert to SOS for uniform processing path
-        self._sos  = signal.tf2sos(self._b, [1.0])
-        self._zi   = signal.sosfilt_zi(self._sos)
-        self._mode = 'fir'
+        self._sos   = signal.tf2sos(self._b, [1.0])
+        self._zi    = signal.sosfilt_zi(self._sos)
+        self._mode  = 'fir'
+        self._fresh = True
 
     def set_iir_ba(self, b, a):
         """Load IIR filter from b/a coefficient arrays (converts to SOS internally)."""
-        self._sos  = signal.tf2sos(b, a)
-        self._zi   = signal.sosfilt_zi(self._sos)
-        self._mode = 'iir'
+        self._sos   = signal.tf2sos(b, a)
+        self._zi    = signal.sosfilt_zi(self._sos)
+        self._mode  = 'iir'
+        self._fresh = True
 
     def set_iir_sos(self, sos):
         """Load IIR filter from second-order-sections matrix (most numerically stable)."""
-        self._sos  = np.asarray(sos, dtype=np.float64)
-        self._zi   = signal.sosfilt_zi(self._sos)
-        self._mode = 'iir'
+        self._sos   = np.asarray(sos, dtype=np.float64)
+        self._zi    = signal.sosfilt_zi(self._sos)
+        self._mode  = 'iir'
+        self._fresh = True
 
     def set_notch(self, freq_hz: float, Q: float, fs: float):
         """Design and load a notch (band-stop) filter."""
@@ -76,14 +80,16 @@ class ChannelFilter:
     def reset(self):
         """Clear filter state (use after loading new coefficients or on reconnect)."""
         if self._sos is not None:
-            self._zi = signal.sosfilt_zi(self._sos)
+            self._zi    = signal.sosfilt_zi(self._sos)
+            self._fresh = True
 
     def clear(self):
         """Remove the filter entirely (pass-through mode)."""
-        self._sos  = None
-        self._b    = None
-        self._zi   = None
-        self._mode = 'none'
+        self._sos   = None
+        self._b     = None
+        self._zi    = None
+        self._mode  = 'none'
+        self._fresh = True
 
     # ── Real-time processing ──────────────────────────────────────────────────
 
@@ -96,11 +102,19 @@ class ChannelFilter:
         if self._sos is None or len(x) == 0:
             return x.copy()
 
-        # Scale zi by first sample to reduce startup transient
         if self._zi is None:
-            self._zi = signal.sosfilt_zi(self._sos)
+            self._zi    = signal.sosfilt_zi(self._sos)
+            self._fresh = True
 
-        y, self._zi = signal.sosfilt(self._sos, x, zi=self._zi * x[0])
+        # Scale zi by x[0] only on the first call to reduce the startup transient.
+        # On subsequent calls zi is the live filter state and must not be scaled.
+        if self._fresh:
+            zi_in       = self._zi * x[0]
+            self._fresh = False
+        else:
+            zi_in = self._zi
+
+        y, self._zi = signal.sosfilt(self._sos, x, zi=zi_in)
         return y
 
     @property
@@ -139,12 +153,20 @@ def design_fir_lowpass(f_cutoff: float, fs: float, n_taps: int = 63) -> np.ndarr
     return firwin(n_taps, f_cutoff, window='hamming', fs=fs)
 
 
-def design_fir_notch(f_notch: float, fs: float, n_taps: int = 63) -> np.ndarray:
-    """Design a FIR notch filter (band-stop around f_notch ± 1 Hz)."""
+def design_fir_notch(f_notch: float, fs: float, n_taps: int = 255) -> np.ndarray:
+    """Design a FIR notch filter centered at f_notch.
+
+    Windowed FIR transition bandwidth ≈ 8·fs/N.  For meaningful stop-band
+    attenuation the stop-band width must exceed that minimum.  We use
+    bw = max(20.0, f_notch * 0.33) to ensure ≥ 20 dB with N ≥ 127.
+    Default n_taps=255 (PSoC firmware maximum).
+    """
     from scipy.signal import firwin
-    bw = max(2.0, f_notch * 0.05)   # ±2 Hz or ±5% of f_notch, whichever larger
-    return firwin(n_taps, [f_notch - bw/2, f_notch + bw/2],
-                  window='hamming', pass_zero=True, fs=fs)
+    # Stop-band width must comfortably exceed the filter's resolution
+    bw = max(20.0, f_notch * 0.33)
+    f_lo = max(1.0, f_notch - bw / 2)
+    f_hi = min(fs / 2 - 1.0, f_notch + bw / 2)
+    return firwin(n_taps, [f_lo, f_hi], window='hamming', pass_zero=True, fs=fs)
 
 
 def coeffs_to_q15(coeffs_float) -> list[int]:
