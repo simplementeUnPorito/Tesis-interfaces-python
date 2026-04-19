@@ -22,9 +22,11 @@ import tty
 # Asegurar que los imports de protocolo funcionen
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from protocol       import parse_packet, PKT_DATA_HEADER, PKT_DATA_SIZE
+from protocol       import parse_packet, PKT_DATA_HEADER, PKT_DATA_SIZE, \
+                           cmd_load_fir, cmd_fir_clear, cmd_start
 from debug_protocol import parse_state_packet, STATE_HEADER, STATE_PKT_LEN, \
                            parse_debug_packet, DBG_HEADER
+from digital_filters import design_fir_lowpass, coeffs_to_q15
 
 TEST_DURATION = 5.0     # segundos de recepción
 MIN_PACKET_RATE = 0.75  # al menos 75% de los paquetes esperados deben llegar
@@ -73,7 +75,22 @@ def run_test() -> bool:
 
     time.sleep(0.2)  # dar tiempo al simulador
 
-    # ── 4. Enviar CMD_START (BB 01 00) ──────────────────────────────────────
+    # ── 4a. Enviar CMD_LOAD_FIR (filtro pasa-bajos 20 Hz, 63 taps) ──────────
+    try:
+        fs      = 1500.0
+        coeffs  = design_fir_lowpass(20.0, fs, n_taps=63)
+        fir_cmd = cmd_load_fir(coeffs)
+        os.write(fd, fir_cmd)
+        print(f"[TEST] CMD_LOAD_FIR enviado ({len(coeffs_to_q15(coeffs))} taps, "
+              f"{len(fir_cmd)} bytes total)", flush=True)
+        time.sleep(0.05)
+    except OSError as e:
+        print(f"[TEST] FAIL: No se pudo escribir CMD_LOAD_FIR: {e}")
+        os.close(fd)
+        sim_proc.terminate()
+        return False
+
+    # ── 4b. Enviar CMD_START (BB 01 00) ─────────────────────────────────────
     try:
         os.write(fd, bytes([0xBB, 0x01, 0x00]))
         print("[TEST] CMD_START enviado")

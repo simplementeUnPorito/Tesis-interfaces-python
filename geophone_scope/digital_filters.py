@@ -129,3 +129,25 @@ def make_highpass(f_cutoff: float, fs: float, order: int = 4) -> ChannelFilter:
     f = ChannelFilter()
     f.set_highpass(f_cutoff, fs, order)
     return f
+
+
+# ── PSoC FIR firmware helpers ─────────────────────────────────────────────────
+
+def design_fir_lowpass(f_cutoff: float, fs: float, n_taps: int = 63) -> np.ndarray:
+    """Design a windowed FIR lowpass (Kaiser window) — returns float64 coefficients."""
+    from scipy.signal import firwin
+    return firwin(n_taps, f_cutoff, window='hamming', fs=fs)
+
+
+def design_fir_notch(f_notch: float, fs: float, n_taps: int = 63) -> np.ndarray:
+    """Design a FIR notch filter (band-stop around f_notch ± 1 Hz)."""
+    from scipy.signal import firwin
+    bw = max(2.0, f_notch * 0.05)   # ±2 Hz or ±5% of f_notch, whichever larger
+    return firwin(n_taps, [f_notch - bw/2, f_notch + bw/2],
+                  window='hamming', pass_zero=True, fs=fs)
+
+
+def coeffs_to_q15(coeffs_float) -> list[int]:
+    """Convert float coefficients in [-1,1] to Q1.15 int16 list."""
+    return [max(-32768, min(32767, int(round(c * 32767.0))))
+            for c in coeffs_float]

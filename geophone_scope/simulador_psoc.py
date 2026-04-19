@@ -39,6 +39,8 @@ CMD_VDAC_LOAD  = 0x06
 CMD_SET_DEBUG  = 0x07
 CMD_SET_DBG_CH = 0x08
 CMD_GET_STATE  = 0x09
+CMD_LOAD_FIR   = 0x0A
+CMD_FIR_CLEAR  = 0x0B
 
 # Tamaños de paquete
 PKT_DATA_SIZE  = 12
@@ -68,6 +70,10 @@ class PSoCSimulator:
 
         # Generación de señal: tiempo acumulado (seg)
         self.t = 0.0
+
+        # Estado del FIR simulado
+        self.fir_coeffs = []   # list of int16 Q1.15
+        self.fir_loaded = False
 
         # Máquina de estados RX
         self._rx_state    = 'WAIT_MARKER'
@@ -188,6 +194,17 @@ class PSoCSimulator:
             print(f"[SIM] CMD_VDAC_LOAD → {len(payload)} bytes", flush=True)
         elif cmd == CMD_GET_STATE:
             pass
+        elif cmd == CMD_LOAD_FIR:
+            import struct as _struct
+            n_taps = len(payload) // 2
+            self.fir_coeffs = [_struct.unpack_from('<h', payload, i*2)[0]
+                               for i in range(n_taps)]
+            self.fir_loaded = True
+            print(f"[SIM] CMD_LOAD_FIR → {n_taps} taps cargados", flush=True)
+        elif cmd == CMD_FIR_CLEAR:
+            self.fir_coeffs = []
+            self.fir_loaded = False
+            print(f"[SIM] CMD_FIR_CLEAR → FIR desactivado", flush=True)
 
         # Confirmar siempre con paquete de estado
         self._write(self._make_state_pkt())
@@ -204,7 +221,7 @@ class PSoCSimulator:
             self._rx_state = 'WAIT_LEN'
 
         elif self._rx_state == 'WAIT_LEN':
-            if self._rx_cmd == CMD_VDAC_LOAD:
+            if self._rx_cmd in (CMD_VDAC_LOAD, CMD_LOAD_FIR):
                 self._rx_len_hi = b
                 self._rx_state  = 'WAIT_LEN2'
             elif b == 0:

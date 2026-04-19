@@ -30,6 +30,8 @@ CMD_VDAC_LOAD   = 0x06
 CMD_SET_DEBUG   = 0x07
 CMD_SET_DBG_CH  = 0x08
 CMD_GET_STATE   = 0x09
+CMD_LOAD_FIR    = 0x0A   # 2-byte length + Q1.15 int16 coefficients (2 bytes each)
+CMD_FIR_CLEAR   = 0x0B   # disable FIR, pass-through mode
 
 # ── Debug channel constants ───────────────────────────────────────────────────
 
@@ -168,3 +170,29 @@ def cmd_set_debug_ch(ch: int) -> bytes:
 
 def cmd_get_state() -> bytes:
     return bytes([CMD_MARKER, CMD_GET_STATE, 0])
+
+
+def cmd_load_fir(coeffs_float) -> bytes:
+    """
+    Build CMD_LOAD_FIR frame from float coefficients.
+
+    coeffs_float : sequence of floats in [-1.0, 1.0].  Max 255 taps.
+    Converts to Q1.15 int16 (multiply by 32767 and round), then packs as
+    little-endian pairs.  Frame: [BB][0A][len_hi][len_lo][c0_lo][c0_hi]...
+    """
+    import struct as _struct
+    taps = list(coeffs_float)[:255]
+    n    = len(taps)
+    if n == 0:
+        return cmd_fir_clear()
+    payload = bytearray()
+    for c in taps:
+        q = max(-32768, min(32767, int(round(c * 32767.0))))
+        payload += _struct.pack('<h', q)
+    plen = len(payload)
+    return bytes([CMD_MARKER, CMD_LOAD_FIR, (plen >> 8) & 0xFF, plen & 0xFF]) + bytes(payload)
+
+
+def cmd_fir_clear() -> bytes:
+    """Disable software FIR on PSoC — post_digital reverts to raw DFB output."""
+    return bytes([CMD_MARKER, CMD_FIR_CLEAR, 0])
