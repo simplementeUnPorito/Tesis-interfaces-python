@@ -53,7 +53,7 @@ class SerialWorker(QThread):
             self._ser = serial.Serial(
                 self._port, self._baudrate,
                 timeout=0.05,
-                write_timeout=1.0
+                write_timeout=2.0
             )
             log(f"[USB] Puerto abierto OK — {self._port}")
             self.connected.emit()

@@ -109,10 +109,20 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(6, 4, 6, 4)
 
-        lay.addWidget(QLabel("Puerto USB:"))
+        lay.addWidget(QLabel("Puerto:"))
         self._port_combo = QComboBox()
         self._port_combo.setMinimumWidth(200)
         lay.addWidget(self._port_combo)
+
+        lay.addWidget(QLabel("Baudios:"))
+        self._baud_combo = QComboBox()
+        self._baud_combo.addItems(["9600", "19200", "38400", "57600",
+                                   "115200", "230400", "460800", "921600"])
+        self._baud_combo.setCurrentText("115200")
+        self._baud_combo.setToolTip(
+            "Para USB CDC el baudrate es ignorado por el hardware.\n"
+            "Selecciona el baudrate solo si conectas via UART.")
+        lay.addWidget(self._baud_combo)
 
         self._btn_autodetect = QPushButton("Auto-detectar PSoC")
         self._btn_autodetect.clicked.connect(self._autodetect_port)
@@ -591,8 +601,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Sin puerto", "Seleccioná un puerto COM primero.")
                 self._btn_connect.setChecked(False)
                 return
-            log(f"[GUI] CLICK Conectar → port={port}")
-            self._worker.set_port(port)
+            baud = int(self._baud_combo.currentText())
+            log(f"[GUI] CLICK Conectar → port={port} baud={baud}")
+            self._worker.set_port(port, baud)
             self._worker.start()
         else:
             log("[GUI] CLICK Desconectar")
