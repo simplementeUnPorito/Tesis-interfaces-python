@@ -30,6 +30,7 @@ def ricker(sigma_s: float = 0.1, fs: float = 3000.0,
     sigma_s: standard deviation of the Gaussian envelope (seconds)
     fs:      VDAC update rate (Hz), default 3000
     """
+    sigma_s = max(sigma_s, 1.0 / fs)   # guard: at least one sample period
     t = np.arange(0, 1.0, 1.0 / fs)
     t = t - t[-1] / 2.0        # Center around zero
     u = t / sigma_s
@@ -44,6 +45,7 @@ def gauss3(sigma_s: float = 0.1, fs: float = 3000.0,
     Third derivative of a Gaussian (Berlage-style seismic pulse).
     sigma_s: standard deviation in seconds.
     """
+    sigma_s = max(sigma_s, 1.0 / fs)   # guard: at least one sample period
     t = np.arange(0, 1.0, 1.0 / fs)
     t = t - t[-1] / 2.0
     u = t / sigma_s

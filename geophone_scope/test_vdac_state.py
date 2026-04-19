@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vdac_generator import (ricker, gauss3, sine, chirp, impulse, silence,
                              from_array, _to_vdac)
-from protocol import cmd_vdac_load
+from protocol import cmd_vdac_load, cmd_load_fir
 from debug_protocol import parse_state_packet, STATE_HEADER, STATE_PKT_LEN
 
 
@@ -228,6 +228,42 @@ def run():
     raw = _make_state_pkt(bad_fixed=True)
     if parse_state_packet(raw) is not None:
         r.fail("No rechazó byte fijo incorrecto")
+    results.append(r)
+
+    # ── 16. ricker/gauss3 con sigma_s=0 → sin crash, salida en [0,255] ───────
+    r = Result("ricker(sigma_s=0) y gauss3(sigma_s=0) → sin crash, valores en [0,255]")
+    for name, fn in [('ricker', ricker), ('gauss3', gauss3)]:
+        try:
+            out = fn(sigma_s=0, fs=100.0)
+            if any(v < 0 or v > 255 for v in out):
+                r.fail(f"{name}(sigma_s=0): valores fuera de [0,255]")
+            if len(out) != 100:
+                r.fail(f"{name}(sigma_s=0): len={len(out)} esperado 100")
+        except Exception as e:
+            r.fail(f"{name}(sigma_s=0): {type(e).__name__}: {e}")
+    results.append(r)
+
+    # ── 17. cmd_load_fir con NaN → coeficiente mapeado a 0 (sin crash) ───────
+    r = Result("cmd_load_fir([NaN, inf]) → mapeados a 0 en Q1.15, sin ValueError")
+    try:
+        b = cmd_load_fir([float('nan'), float('inf'), float('-inf'), 0.5])
+        if len(b) < 4:
+            r.fail("Frame demasiado corto")
+        else:
+            # Verify NaN/inf → 0, 0.5 → 16384
+            from protocol import cmd_load_fir as clf
+            import struct as _s
+            # Coefficients: [0, 0, 0, 16384]
+            c0 = _s.unpack_from('<h', b, 4)[0]
+            c1 = _s.unpack_from('<h', b, 6)[0]
+            c2 = _s.unpack_from('<h', b, 8)[0]
+            c3 = _s.unpack_from('<h', b, 10)[0]
+            if c0 != 0: r.fail(f"NaN → {c0} (esperado 0)")
+            if c1 != 0: r.fail(f"inf → {c1} (esperado 0)")
+            if c2 != 0: r.fail(f"-inf → {c2} (esperado 0)")
+            if abs(c3 - 16384) > 1: r.fail(f"0.5 → {c3} (esperado ~16384)")
+    except Exception as e:
+        r.fail(f"{type(e).__name__}: {e}")
     results.append(r)
 
     return results
