@@ -75,6 +75,10 @@ class UartWorker(QThread):
                 return
 
             plen = buf[2]
+            if plen > 32:
+                # Firmware never exceeds 2 bytes payload; large value = corruption
+                del buf[:1]
+                continue
             pkt_size = 4 + plen   # header + event + len + payload + crc
 
             if len(buf) < pkt_size:
