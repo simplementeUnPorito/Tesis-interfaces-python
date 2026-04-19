@@ -122,7 +122,13 @@ class SerialWorker(QThread):
                 elif buf[0] == DBG_HEADER:
                     if len(buf) < 4:
                         break
-                    plen     = buf[2]
+                    plen = buf[2]
+                    if plen > 32:
+                        # Firmware never sends > 2 payload bytes; large plen = corruption
+                        log(f"[USB] 0xDD plen={plen} > 32 — dropping header byte")
+                        pkt_bad += 1
+                        del buf[:1]
+                        continue
                     pkt_size = 4 + plen
                     if len(buf) < pkt_size:
                         break

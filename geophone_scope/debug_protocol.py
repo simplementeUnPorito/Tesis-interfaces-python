@@ -27,6 +27,8 @@ _EVENTS = {
     0x40: ("ERROR", "DMA error",            ["chain_id"]),
     0x41: ("ERROR", "ADC lost lock",        []),
     0x50: ("INFO",  "VDAC sequence loaded", ["len_hi", "len_lo"]),
+    0x51: ("INFO",  "FIR filter loaded",    ["n_taps"]),
+    0x52: ("INFO",  "FIR disabled",         []),
     0x60: ("INFO",  "ADC config changed",   ["adc_cfg", "buf_gain"]),
 }
 
@@ -35,6 +37,7 @@ _CMD_NAMES  = {
     0x01: "START", 0x02: "STOP", 0x03: "SET_MUX_IN", 0x04: "SET_MUX_OUT",
     0x05: "SET_ADC", 0x06: "VDAC_LOAD", 0x07: "SET_DEBUG",
     0x08: "SET_DBG_CH", 0x09: "GET_STATE",
+    0x0A: "LOAD_FIR", 0x0B: "FIR_CLEAR",
 }
 _CHAIN_NAMES = {0: "A (ADC→Filter)", 1: "B (ADC→RAM)", 2: "C (Filter→RAM)", 3: "D (SAR→RAM)"}
 
@@ -98,6 +101,9 @@ def _format_payload(event: int, payload: bytes, fields: list) -> str:
     if event == 0x50 and len(payload) >= 2:
         n = (payload[0] << 8) | payload[1]
         return f"{n} samples"
+
+    if event == 0x51 and len(payload) >= 1:
+        return f"{payload[0]} taps"
 
     # Generic fallback
     return " ".join(f"{b:02X}" for b in payload)

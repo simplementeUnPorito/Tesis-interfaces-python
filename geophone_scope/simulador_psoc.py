@@ -196,15 +196,24 @@ class PSoCSimulator:
             pass
         elif cmd == CMD_LOAD_FIR:
             import struct as _struct
+            if len(payload) < 2 or (len(payload) & 1) != 0:
+                # Payload inválido (vacío o impar) → ignorar, como el firmware
+                print(f"[SIM] CMD_LOAD_FIR → payload inválido ({len(payload)} B), ignorado", flush=True)
+                self._write(self._make_state_pkt())
+                return
             n_taps = len(payload) // 2
             self.fir_coeffs = [_struct.unpack_from('<h', payload, i*2)[0]
                                for i in range(n_taps)]
             self.fir_loaded = True
             print(f"[SIM] CMD_LOAD_FIR → {n_taps} taps cargados", flush=True)
+            # Emitir evento DBG 0x51 (FIR_LOADED) con n_taps
+            self._write(self._make_debug_pkt(0x51, bytes([n_taps])))
         elif cmd == CMD_FIR_CLEAR:
             self.fir_coeffs = []
             self.fir_loaded = False
             print(f"[SIM] CMD_FIR_CLEAR → FIR desactivado", flush=True)
+            # Emitir evento DBG 0x52 (FIR_CLEAR)
+            self._write(self._make_debug_pkt(0x52))
 
         # Confirmar siempre con paquete de estado
         self._write(self._make_state_pkt())
