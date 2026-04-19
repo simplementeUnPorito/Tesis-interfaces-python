@@ -71,9 +71,11 @@ class PSoCSimulator:
         # Generación de señal: tiempo acumulado (seg)
         self.t = 0.0
 
-        # Estado del FIR simulado
-        self.fir_coeffs = []   # list of int16 Q1.15
+        # Estado del FIR simulado (replica exacta del firmware PSoC)
+        self.fir_coeffs = []         # list of int16 Q1.15
         self.fir_loaded = False
+        self.fir_delay  = [0] * 256  # circular delay line (int32)
+        self.fir_head   = 0          # uint8 head index (wraps at 256)
 
         # Máquina de estados RX
         self._rx_state    = 'WAIT_MARKER'
@@ -101,26 +103,40 @@ class PSoCSimulator:
         raw_v    = 0.08 * math.sin(2 * math.pi * f_signal * self.t) + \
                    0.03 * math.sin(2 * math.pi * f_noise  * self.t)
 
-        # Post-filtro analógico: 10 Hz puro con atenuación del ruido
-        analog_v = 0.075 * math.sin(2 * math.pi * f_signal * self.t)
-
-        # Post-filtro digital: señal aún más limpia (notch elimina 60 Hz)
-        digital_v = 0.074 * math.sin(2 * math.pi * f_signal * self.t)
+        # Post-filtro analógico: 10 Hz dominante + residual de 60 Hz (hardware DFB
+        # atenúa ~40 dB, pero deja una huella detectable para que el FIR la elimine)
+        analog_v = 0.075 * math.sin(2 * math.pi * f_signal * self.t) + \
+                   0.003 * math.sin(2 * math.pi * f_noise  * self.t)
 
         # Conversión a enteros PSoC
-        SAR_FS  = 2048      # 12-bit signed, ±2048 counts = ±1.024 V
+        SAR_FS   = 2048      # 12-bit signed, ±2048 counts = ±1.024 V
         SAR_VREF = 1.024
-        ADC_FS  = 65536     # 17-bit signed (usamos 16-bit para centrado)
-        VFS     = 6.144     # Rango efectivo CFG4 con BufGain=8: 6.144/8=0.768V pero usamos full
+        ADC_FS   = 65536     # 17-bit signed (usamos 16-bit para centrado)
+        VFS      = 6.144
 
-        raw_i    = int(raw_v    / SAR_VREF * SAR_FS)
+        raw_i    = int(raw_v   / SAR_VREF * SAR_FS)
         raw_i    = max(-SAR_FS, min(SAR_FS - 1, raw_i))
 
-        analog_i = int(analog_v  / VFS * (ADC_FS // 2))
+        analog_i = int(analog_v / VFS * (ADC_FS // 2))
         analog_i = max(-(ADC_FS // 2), min(ADC_FS // 2 - 1, analog_i))
 
-        digital_i = int(digital_v / VFS * (ADC_FS // 2))
-        digital_i = max(-(ADC_FS // 2), min(ADC_FS // 2 - 1, digital_i))
+        if self.fir_loaded and self.fir_coeffs:
+            # Replica exacta del algoritmo PSoC: MAC int64, >>15, saturación ±24bit
+            self.fir_delay[self.fir_head] = analog_i
+            acc = 0
+            for k, c in enumerate(self.fir_coeffs):
+                idx = (self.fir_head - k) & 0xFF
+                acc += c * self.fir_delay[idx]
+            self.fir_head = (self.fir_head + 1) & 0xFF
+            result = acc >> 15
+            if   result >  0x7FFFFF: result =  0x7FFFFF
+            elif result < -0x800000: result = -0x800000
+            digital_i = result
+        else:
+            # Sin FIR: señal sintética ligeramente más limpia que la analógica
+            digital_v = 0.074 * math.sin(2 * math.pi * f_signal * self.t)
+            digital_i = int(digital_v / VFS * (ADC_FS // 2))
+            digital_i = max(-(ADC_FS // 2), min(ADC_FS // 2 - 1, digital_i))
 
         flags     = (self.vdac_mode & 0x01) | ((self.filter_sel & 0x01) << 1)
         # gain_byte: high nibble = log2(buf_gain), low nibble = cfg
@@ -202,6 +218,8 @@ class PSoCSimulator:
                 self._write(self._make_state_pkt())
                 return
             n_taps = len(payload) // 2
+            self.fir_delay  = [0] * 256   # clear delay line on reload
+            self.fir_head   = 0
             self.fir_coeffs = [_struct.unpack_from('<h', payload, i*2)[0]
                                for i in range(n_taps)]
             self.fir_loaded = True
@@ -210,6 +228,8 @@ class PSoCSimulator:
             self._write(self._make_debug_pkt(0x51, bytes([n_taps])))
         elif cmd == CMD_FIR_CLEAR:
             self.fir_coeffs = []
+            self.fir_delay  = [0] * 256
+            self.fir_head   = 0
             self.fir_loaded = False
             print(f"[SIM] CMD_FIR_CLEAR → FIR desactivado", flush=True)
             # Emitir evento DBG 0x52 (FIR_CLEAR)
@@ -259,12 +279,17 @@ class PSoCSimulator:
 
     def rx_thread(self):
         """Lee comandos del puerto virtual de forma no bloqueante."""
+        import errno as _errno
         while True:
             try:
                 data = os.read(self.master_fd, 256)
                 for b in data:
                     self._parse_rx_byte(b)
-            except OSError:
+            except OSError as e:
+                if e.errno == _errno.EIO:
+                    # No slave connected yet (or temporarily disconnected)
+                    time.sleep(0.005)
+                    continue
                 break
 
     # ── Loop TX ──────────────────────────────────────────────────────────────
