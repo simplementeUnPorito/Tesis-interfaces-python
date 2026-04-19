@@ -24,6 +24,7 @@ from PyQt5.QtGui import QFont, QColor, QTextCharFormat, QTextCursor
 import protocol as proto
 import vdac_generator as vdacgen
 from serial_worker import SerialWorker
+from uart_worker import UartWorker
 from digital_filters import ChannelFilter
 from debug_protocol import format_event, DBG_CH_USB
 from app_logger import log, log_path
@@ -72,6 +73,11 @@ class MainWindow(QMainWindow):
         self._worker.connected.connect(self._on_connected)
         self._worker.disconnected.connect(self._on_disconnected)
         self._worker.error.connect(self._on_error)
+
+        # UART debug worker (KitProg UART channel)
+        self._uart = UartWorker()
+        self._uart.debug_event.connect(self._on_debug_event)
+        self._uart.error.connect(lambda m: self._append_debug_line(f"[E] UART: {m}", "ERROR"))
 
         self._build_ui()
 
@@ -349,7 +355,32 @@ class MainWindow(QMainWindow):
         w = QWidget()
         lay = QVBoxLayout(w)
 
-        # Debug control row (USB-only, no UART)
+        # UART debug connection
+        grp_uart = QGroupBox("UART debug (KitProg USB-UART)")
+        gu = QGridLayout(grp_uart)
+
+        gu.addWidget(QLabel("Puerto UART:"), 0, 0)
+        self._uart_combo = QComboBox()
+        self._uart_combo.setMinimumWidth(160)
+        gu.addWidget(self._uart_combo, 0, 1)
+
+        gu.addWidget(QLabel("Baudios UART:"), 1, 0)
+        self._uart_baud_combo = QComboBox()
+        self._uart_baud_combo.addItems(["9600", "19200", "38400", "57600", "115200", "230400"])
+        self._uart_baud_combo.setCurrentText("115200")
+        gu.addWidget(self._uart_baud_combo, 1, 1)
+
+        self._btn_uart = QPushButton("Conectar UART")
+        self._btn_uart.setCheckable(True)
+        self._btn_uart.toggled.connect(self._toggle_uart)
+        self._btn_uart.setStyleSheet(
+            "QPushButton:checked { background-color: #8E44AD; color: white; }"
+            "QPushButton { background-color: #555; color: white; padding: 3px 8px; }")
+        gu.addWidget(self._btn_uart, 2, 0, 1, 2)
+
+        lay.addWidget(grp_uart)
+
+        # Debug control row (USB CDC)
         grp_ctrl = QGroupBox("Control de debug (vía USB CDC)")
         gc = QGridLayout(grp_ctrl)
 
@@ -362,13 +393,19 @@ class MainWindow(QMainWindow):
             "QPushButton { background-color: #555; color: white; padding: 3px 8px; }")
         gc.addWidget(self._btn_debug_en, 0, 1)
 
-        gc.addWidget(QLabel("Pedir estado:"), 1, 0)
+        gc.addWidget(QLabel("Canal debug:"), 1, 0)
+        self._debug_ch_combo = QComboBox()
+        self._debug_ch_combo.addItems(["USB", "UART", "Ambos"])
+        self._debug_ch_combo.currentIndexChanged.connect(self._on_debug_ch_changed)
+        gc.addWidget(self._debug_ch_combo, 1, 1)
+
+        gc.addWidget(QLabel("Pedir estado:"), 2, 0)
         btn_state = QPushButton("CMD_GET_STATE")
         btn_state.clicked.connect(lambda: (
             log("[GUI] CLICK CMD_GET_STATE"),
             self._worker.send(proto.cmd_get_state())
         ))
-        gc.addWidget(btn_state, 1, 1)
+        gc.addWidget(btn_state, 2, 1)
 
         lay.addWidget(grp_ctrl)
 
@@ -576,14 +613,17 @@ class MainWindow(QMainWindow):
 
     def _toggle_uart(self, checked: bool):
         if checked:
-            text = self._uart_combo.currentText()
-            port = self._uart_combo.currentData() or text.split()[0]
+            port = self._uart_combo.currentData()
+            if not port:
+                text = self._uart_combo.currentText()
+                port = text.split()[0] if text else None
             if not port:
                 QMessageBox.warning(self, "Sin puerto UART", "Seleccioná el puerto UART primero.")
                 self._btn_uart.setChecked(False)
                 return
-            log(f"[GUI] CLICK Conectar UART → port={port}")
-            self._uart.set_port(port)
+            baud = int(self._uart_baud_combo.currentText())
+            log(f"[GUI] CLICK Conectar UART → port={port} baud={baud}")
+            self._uart.set_port(port, baud)
             self._uart.start()
             self._btn_uart.setText("Desconectar UART")
         else:
