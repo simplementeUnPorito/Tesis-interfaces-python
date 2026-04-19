@@ -187,7 +187,7 @@ def cmd_load_fir(coeffs_float) -> bytes:
         return cmd_fir_clear()
     payload = bytearray()
     for c in taps:
-        q = max(-32768, min(32767, int(round(c * 32767.0))))
+        q = max(-32768, min(32767, int(round(c * 32768.0))))
         payload += _struct.pack('<h', q)
     plen = len(payload)
     return bytes([CMD_MARKER, CMD_LOAD_FIR, (plen >> 8) & 0xFF, plen & 0xFF]) + bytes(payload)

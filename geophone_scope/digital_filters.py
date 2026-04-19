@@ -148,6 +148,7 @@ def design_fir_notch(f_notch: float, fs: float, n_taps: int = 63) -> np.ndarray:
 
 
 def coeffs_to_q15(coeffs_float) -> list[int]:
-    """Convert float coefficients in [-1,1] to Q1.15 int16 list."""
-    return [max(-32768, min(32767, int(round(c * 32767.0))))
+    """Convert float coefficients in [-1,1] to Q1.15 int16 list.
+    Scale factor is 2^15 = 32768: -1.0 → -32768 (exact), +1.0 → 32767 (saturated)."""
+    return [max(-32768, min(32767, int(round(c * 32768.0))))
             for c in coeffs_float]
