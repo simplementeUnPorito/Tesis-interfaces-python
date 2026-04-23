@@ -1,0 +1,57 @@
+04:09:09.302 [INFO] Log file: C:\Github\Tesis\src\python\geophone_scope - Copy\logs\scope_min_20260420_040909.log
+04:09:09.302 [INFO] ============================================================
+04:09:09.302 [INFO] scope_min.py arrancando
+04:09:09.302 [INFO] ============================================================
+04:09:09.302 [INFO] [USB] Buscando dispositivo Cypress (VID=0x04B4)...
+04:09:09.308 [INFO] [USB] Puertos encontrados: 1
+04:09:09.309 [INFO] [USB]   COM7 | VID=0x04b4 | PID=0xf139 | desc=KitProg USB-UART (COM7)
+04:09:09.309 [INFO] [USB] -> Cypress encontrado en COM7
+04:09:09.309 [INFO] Usando puerto: COM7
+04:09:09.321 [INFO] [GUI] Iniciando ScopeWindow, puerto=COM7
+04:09:09.321 [INFO] [GUI] Construyendo UI...
+04:09:09.491 [INFO] [GUI] UI construida OK
+04:09:09.491 [INFO] [GUI] Creando SerialWorker para COM7
+04:09:09.491 [INFO] [serial] Abriendo puerto COM7 ...
+04:09:09.491 [INFO] [GUI] SerialWorker iniciado
+04:09:09.492 [INFO] [GUI] Timer de refresh iniciado (80ms)
+04:09:09.492 [INFO] [GUI] ScopeWindow lista
+04:09:09.684 [INFO] [GUI] app.exec_() — entrando en event loop Qt
+04:09:09.685 [INFO] [serial] Puerto abierto: Serial<id=0x15bed6e0910, open=True>(port='COM7', baudrate=9600, bytesize=8, parity='N', stopbits=1, timeout=0.1, xonxoff=False, rtscts=False, dsrdtr=False)
+04:09:09.685 [INFO] [serial] Entrando en loop de lectura...
+04:09:12.138 [INFO] [GUI] Click MuxIn -> 1
+04:09:12.138 [INFO] [serial] Encolando TX CMD_MUX_IN sel=1: bb0101
+04:09:12.195 [INFO] [serial] TX CMD_MUX_IN sel=1: bb0101
+04:09:12.195 [DEBUG] [serial] TX OK: 3 bytes escritos
+04:09:24.377 [INFO] [GUI] Freq cambiada a 150.0 Hz (freq_dh=1500)
+04:09:24.377 [INFO] [serial] Encolando TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:09:24.381 [INFO] [serial] TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:09:24.382 [DEBUG] [serial] TX OK: 4 bytes escritos
+04:09:51.927 [INFO] [GUI] Freq cambiada a 150.0 Hz (freq_dh=1500)
+04:09:51.927 [INFO] [serial] Encolando TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:09:51.948 [INFO] [serial] TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:09:51.949 [DEBUG] [serial] TX OK: 4 bytes escritos
+04:10:43.257 [INFO] [GUI] Freq cambiada a 150.0 Hz (freq_dh=1500)
+04:10:43.258 [INFO] [serial] Encolando TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:10:43.358 [INFO] [serial] TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:10:43.358 [DEBUG] [serial] TX OK: 4 bytes escritos
+04:10:53.845 [INFO] [GUI] Freq cambiada a 150.0 Hz (freq_dh=1500)
+04:10:53.845 [INFO] [serial] Encolando TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:10:53.930 [INFO] [serial] TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:10:53.931 [DEBUG] [serial] TX OK: 4 bytes escritos
+04:11:06.314 [INFO] [GUI] Freq cambiada a 150.0 Hz (freq_dh=1500)
+04:11:06.314 [INFO] [serial] Encolando TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:11:06.352 [INFO] [serial] TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:11:06.353 [DEBUG] [serial] TX OK: 4 bytes escritos
+04:11:12.051 [INFO] [GUI] Freq cambiada a 150.0 Hz (freq_dh=1500)
+04:11:12.051 [INFO] [serial] Encolando TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:11:12.127 [INFO] [serial] TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+04:11:12.128 [DEBUG] [serial] TX OK: 4 bytes escritos
+04:11:13.005 [INFO] [GUI] Cerrando ventana...
+04:11:13.005 [INFO] [serial] Encolando TX CMD_STOP (close): bb05
+04:11:13.005 [INFO] [serial] Solicitando parada del worker...
+04:11:13.108 [INFO] [serial] TX CMD_STOP (close): bb05
+04:11:13.109 [DEBUG] [serial] TX OK: 2 bytes escritos
+04:11:13.114 [INFO] [serial] Loop de lectura terminado.
+04:11:13.115 [INFO] [serial] Puerto cerrado.
+04:11:13.115 [INFO] [GUI] Worker terminado, cerrando.
+04:11:13.122 [INFO] [GUI] app.exec_() retorno con codigo 0

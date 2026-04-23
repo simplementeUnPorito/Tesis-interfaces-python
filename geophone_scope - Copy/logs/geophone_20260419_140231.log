@@ -1,0 +1,58 @@
+14:02:33.627  [APP] Inicio — log en: C:\Github\Tesis\src\python\geophone_scope\logs\geophone_20260419_140231.log
+14:02:36.763  [GUI] CLICK Conectar → port=COM3 baud=115200
+14:02:36.763  [USB] Abriendo COM3 @ 115200
+14:02:36.766  [USB] Puerto abierto OK — COM3
+14:02:36.766  [GUI] Conectado USB — enviando cmd_start + cmd_get_state
+14:02:36.767  [GUI] CLICK Iniciar streaming → cmd_start
+14:02:36.767  [USB] TX: bb0100
+14:02:38.767  [USB] TX ERROR: Write timeout
+14:02:38.768  [USB] TX: bb0100
+14:02:40.777  [USB] TX ERROR: Write timeout
+14:02:40.777  [USB] TX: bb0900
+14:02:42.779  [USB] TX ERROR: Write timeout
+14:02:51.197  [GUI] CLICK Debug channel → 2
+14:02:51.198  [USB] TX: bb080102
+14:02:53.208  [USB] TX ERROR: Write timeout
+14:02:53.229  [GUI] CLICK Debug channel → 1
+14:02:53.230  [USB] TX: bb080101
+14:02:55.239  [USB] TX ERROR: Write timeout
+14:03:01.368  [GUI] CLICK Conectar UART → port=COM3 baud=115200
+14:03:06.095  [GUI] CLICK Desconectar UART
+14:03:09.827  [GUI] CLICK Conectar UART → port=COM7 baud=115200
+14:03:11.736  [GUI] CLICK Debug enable → True
+14:03:11.736  [USB] TX: bb070101
+14:03:13.743  [USB] TX ERROR: Write timeout
+14:03:13.763  [GUI] CLICK Debug enable → False
+14:03:13.763  [USB] TX: bb070100
+14:03:15.766  [USB] TX ERROR: Write timeout
+14:03:15.768  [GUI] CLICK Debug enable → True
+14:03:15.768  [USB] TX: bb070101
+14:03:17.776  [USB] TX ERROR: Write timeout
+14:03:17.778  [GUI] CLICK Debug enable → False
+14:03:17.778  [USB] TX: bb070100
+14:03:19.781  [USB] TX ERROR: Write timeout
+14:03:19.784  [GUI] CLICK Debug enable → True
+14:03:19.784  [USB] TX: bb070101
+14:03:21.787  [USB] TX ERROR: Write timeout
+14:03:21.790  [GUI] CLICK Debug enable → False
+14:03:21.790  [USB] TX: bb070100
+14:03:23.805  [USB] TX ERROR: Write timeout
+14:03:23.807  [GUI] CLICK Debug enable → True
+14:03:23.807  [USB] TX: bb070101
+14:03:25.817  [USB] TX ERROR: Write timeout
+14:03:25.820  [GUI] CLICK Debug enable → False
+14:03:25.820  [USB] TX: bb070100
+14:03:27.820  [USB] TX ERROR: Write timeout
+14:03:27.823  [GUI] CLICK Debug enable → True
+14:03:27.823  [USB] TX: bb070101
+14:03:29.837  [USB] TX ERROR: Write timeout
+14:03:29.840  [GUI] CLICK Debug enable → False
+14:03:29.840  [USB] TX: bb070100
+14:03:31.848  [USB] TX ERROR: Write timeout
+14:30:10.993  [APP] Cerrando aplicación
+14:30:10.996  [USB] TX: bb0200
+14:30:12.996  [USB] TX ERROR: Write timeout
+14:30:13.028  [USB] Sesión terminada — total_bytes=0 data=0 state=0 dbg=0 bad=0 garbage=0
+14:30:13.036  [GUI] Desconectado USB
+14:30:13.037  [GUI] CLICK Desconectar
+14:30:13.037  [GUI] CLICK Detener streaming → cmd_stop

@@ -1,0 +1,56 @@
+01:05:34.954 [INFO] Log file: C:\Github\Tesis\src\python\geophone_scope - Copy\logs\scope_min_20260420_010534.log
+01:05:34.955 [INFO] ============================================================
+01:05:34.955 [INFO] scope_min.py arrancando
+01:05:34.955 [INFO] ============================================================
+01:05:34.955 [INFO] [USB] Buscando dispositivo Cypress (VID=0x04B4)...
+01:05:34.961 [INFO] [USB] Puertos encontrados: 1
+01:05:34.961 [INFO] [USB]   COM3 | VID=0x04b4 | PID=0xf232 | desc=USB Serial Device (COM3)
+01:05:34.961 [INFO] [USB] -> Cypress encontrado en COM3
+01:05:34.961 [INFO] Usando puerto: COM3
+01:05:34.972 [INFO] [GUI] Iniciando ScopeWindow, puerto=COM3
+01:05:34.973 [INFO] [GUI] Construyendo UI...
+01:05:35.141 [INFO] [GUI] UI construida OK
+01:05:35.141 [INFO] [GUI] Creando SerialWorker para COM3
+01:05:35.141 [INFO] [serial] Abriendo puerto COM3 ...
+01:05:35.141 [INFO] [GUI] SerialWorker iniciado
+01:05:35.142 [INFO] [GUI] Timer de refresh iniciado (80ms)
+01:05:35.142 [INFO] [GUI] ScopeWindow lista
+01:05:35.340 [INFO] [serial] Puerto abierto: Serial<id=0x2289a19a2f0, open=True>(port='COM3', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=0.1, xonxoff=False, rtscts=False, dsrdtr=False)
+01:05:35.340 [INFO] [GUI] app.exec_() — entrando en event loop Qt
+01:05:35.340 [INFO] [serial] Entrando en loop de lectura...
+01:05:37.119 [INFO] [GUI] Click START
+01:05:37.119 [INFO] [serial] Encolando TX CMD_START: bb04
+01:05:37.185 [INFO] [serial] TX CMD_START: bb04
+01:05:37.186 [DEBUG] [serial] TX OK: 2 bytes escritos
+01:05:40.139 [INFO] [GUI] Click MuxIn -> 1
+01:05:40.139 [INFO] [serial] Encolando TX CMD_MUX_IN sel=1: bb0101
+01:05:40.234 [INFO] [serial] TX CMD_MUX_IN sel=1: bb0101
+01:05:40.235 [DEBUG] [serial] TX OK: 3 bytes escritos
+01:05:41.127 [INFO] [GUI] Click STOP
+01:05:41.127 [INFO] [serial] Encolando TX CMD_STOP: bb05
+01:05:41.213 [INFO] [serial] TX CMD_STOP: bb05
+01:05:41.213 [DEBUG] [serial] TX OK: 2 bytes escritos
+01:05:43.908 [INFO] [GUI] Click MuxOut -> 1
+01:05:43.908 [INFO] [serial] Encolando TX CMD_MUX_OUT sel=1: bb0201
+01:05:43.921 [INFO] [serial] TX CMD_MUX_OUT sel=1: bb0201
+01:05:43.921 [DEBUG] [serial] TX OK: 3 bytes escritos
+01:05:44.808 [INFO] [GUI] Click MuxOut -> 0
+01:05:44.808 [INFO] [serial] Encolando TX CMD_MUX_OUT sel=0: bb0200
+01:05:44.899 [INFO] [serial] TX CMD_MUX_OUT sel=0: bb0200
+01:05:44.899 [DEBUG] [serial] TX OK: 3 bytes escritos
+01:05:47.247 [INFO] [GUI] Freq cambiada a 1.0 Hz (freq_dh=10)
+01:05:47.247 [INFO] [serial] Encolando TX CMD_FREQ freq=1.0Hz dh=10: bb03000a
+01:05:47.296 [INFO] [serial] TX CMD_FREQ freq=1.0Hz dh=10: bb03000a
+01:05:47.297 [DEBUG] [serial] TX OK: 4 bytes escritos
+01:06:46.825 [ERROR] [serial] Error de lectura: ClearCommError failed (PermissionError(13, 'The device does not recognize the command.', None, 22))
+01:06:46.826 [INFO] [serial] Loop de lectura terminado.
+01:06:46.826 [INFO] [serial] Puerto cerrado.
+01:07:01.274 [INFO] [GUI] Freq cambiada a 1.0 Hz (freq_dh=10)
+01:07:01.274 [WARNING] [serial] TX ignorado (puerto no abierto): CMD_FREQ freq=1.0Hz dh=10
+01:07:09.014 [INFO] [GUI] Cerrando ventana...
+01:07:09.014 [WARNING] [serial] TX ignorado (puerto no abierto): CMD_STOP (close)
+01:07:09.014 [INFO] [serial] Solicitando parada del worker...
+01:07:09.015 [INFO] [GUI] Worker terminado, cerrando.
+01:07:09.015 [INFO] [GUI] Freq cambiada a 1.0 Hz (freq_dh=10)
+01:07:09.015 [WARNING] [serial] TX ignorado (puerto no abierto): CMD_FREQ freq=1.0Hz dh=10
+01:07:09.019 [INFO] [GUI] app.exec_() retorno con codigo 0

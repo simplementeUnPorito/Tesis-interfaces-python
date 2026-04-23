@@ -1,0 +1,49 @@
+19:00:14.615 [INFO] Log file: C:\Github\Tesis\src\python\geophone_scope - Copy\logs\scope_min_20260419_190014.log
+19:00:14.616 [INFO] ============================================================
+19:00:14.616 [INFO] scope_min.py arrancando
+19:00:14.616 [INFO] ============================================================
+19:00:14.616 [INFO] Puerto forzado por argumento: COM3
+19:00:14.616 [INFO] Usando puerto: COM3
+19:00:14.627 [INFO] [GUI] Iniciando ScopeWindow, puerto=COM3
+19:00:14.627 [INFO] [GUI] Construyendo UI...
+19:00:14.793 [INFO] [GUI] UI construida OK
+19:00:14.793 [INFO] [GUI] Creando SerialWorker para COM3
+19:00:14.794 [INFO] [serial] Abriendo puerto COM3 ...
+19:00:14.794 [INFO] [GUI] SerialWorker iniciado
+19:00:14.795 [INFO] [GUI] Timer de refresh iniciado (80ms)
+19:00:14.795 [INFO] [GUI] ScopeWindow lista
+19:00:14.978 [INFO] [serial] Puerto abierto: Serial<id=0x1e8dd0df940, open=True>(port='COM3', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=0.1, xonxoff=False, rtscts=False, dsrdtr=False)
+19:00:14.978 [INFO] [GUI] app.exec_() — entrando en event loop Qt
+19:00:14.979 [INFO] [serial] Entrando en loop de lectura...
+19:00:20.216 [INFO] [GUI] Click MuxIn -> 1
+19:00:20.216 [INFO] [serial] TX CMD_MUX_IN sel=1: bb0101
+19:00:20.216 [DEBUG] [serial] TX OK: 3 bytes escritos
+19:00:39.874 [INFO] [GUI] Freq cambiada a 19.0 Hz (freq_dh=190)
+19:00:39.875 [INFO] [serial] TX CMD_FREQ freq=19.0Hz dh=190: bb0300be
+19:00:40.878 [ERROR] [serial] TX TIMEOUT — puerto ocupado?
+19:00:54.706 [INFO] [GUI] Freq cambiada a 13.3 Hz (freq_dh=133)
+19:00:54.707 [INFO] [serial] TX CMD_FREQ freq=13.3Hz dh=133: bb030085
+19:00:55.708 [ERROR] [serial] TX TIMEOUT — puerto ocupado?
+19:00:58.870 [INFO] [GUI] Freq cambiada a 13.3 Hz (freq_dh=133)
+19:00:58.871 [INFO] [serial] TX CMD_FREQ freq=13.3Hz dh=133: bb030085
+19:00:59.872 [ERROR] [serial] TX TIMEOUT — puerto ocupado?
+19:01:07.013 [INFO] [GUI] Click MuxIn -> 0
+19:01:07.013 [INFO] [serial] TX CMD_MUX_IN sel=0: bb0100
+19:01:08.022 [ERROR] [serial] TX TIMEOUT — puerto ocupado?
+19:01:09.311 [INFO] [GUI] Click MuxIn -> 1
+19:01:09.311 [INFO] [serial] TX CMD_MUX_IN sel=1: bb0101
+19:01:10.317 [ERROR] [serial] TX TIMEOUT — puerto ocupado?
+19:01:12.713 [INFO] [GUI] Click START
+19:01:12.714 [INFO] [serial] TX CMD_START: bb04
+19:01:13.717 [ERROR] [serial] TX TIMEOUT — puerto ocupado?
+19:01:22.881 [INFO] [GUI] Click STOP
+19:01:22.882 [INFO] [serial] TX CMD_STOP: bb05
+19:01:23.893 [ERROR] [serial] TX TIMEOUT — puerto ocupado?
+19:01:29.068 [INFO] [GUI] Cerrando ventana...
+19:01:29.068 [INFO] [serial] TX CMD_STOP (close): bb05
+19:01:30.076 [ERROR] [serial] TX TIMEOUT — puerto ocupado?
+19:01:30.077 [INFO] [serial] Solicitando parada del worker...
+19:01:30.097 [INFO] [serial] Loop de lectura terminado.
+19:01:30.097 [INFO] [serial] Puerto cerrado.
+19:01:30.097 [INFO] [GUI] Worker terminado, cerrando.
+19:01:30.104 [INFO] [GUI] app.exec_() retorno con codigo 0

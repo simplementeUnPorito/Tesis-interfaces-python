@@ -1,0 +1,35 @@
+05:06:57.185 [INFO] Log file: C:\Github\Tesis\src\python\geophone_scope - Copy\logs\scope_min_20260420_050657.log
+05:06:57.185 [INFO] ============================================================
+05:06:57.185 [INFO] scope_min.py arrancando
+05:06:57.185 [INFO] ============================================================
+05:06:57.185 [INFO] [USB] Buscando dispositivo Cypress (VID=0x04B4)...
+05:06:57.193 [INFO] [USB] Puertos encontrados: 1
+05:06:57.193 [INFO] [USB]   COM7 | VID=0x04b4 | PID=0xf139 | desc=KitProg USB-UART (COM7)
+05:06:57.193 [INFO] [USB] -> Cypress encontrado en COM7
+05:06:57.193 [INFO] Usando puerto: COM7
+05:06:57.208 [INFO] [GUI] Iniciando ScopeWindow, puerto=COM7
+05:06:57.208 [INFO] [GUI] Construyendo UI...
+05:06:57.401 [INFO] [GUI] UI construida OK
+05:06:57.401 [INFO] [GUI] Creando SerialWorker para COM7
+05:06:57.402 [INFO] [serial] Abriendo puerto COM7 ...
+05:06:57.402 [INFO] [GUI] SerialWorker iniciado
+05:06:57.402 [INFO] [GUI] Timer de refresh iniciado (80ms)
+05:06:57.402 [INFO] [GUI] ScopeWindow lista
+05:06:57.608 [INFO] [GUI] app.exec_() — entrando en event loop Qt
+05:06:57.608 [INFO] [serial] Puerto abierto: Serial<id=0x23a582a2d70, open=True>(port='COM7', baudrate=9600, bytesize=8, parity='N', stopbits=1, timeout=0.1, xonxoff=False, rtscts=False, dsrdtr=False)
+05:06:57.608 [INFO] [serial] Entrando en loop de lectura...
+05:06:59.054 [INFO] [GUI] Freq cambiada a 1.0 Hz (freq_dh=10)
+05:06:59.054 [INFO] [serial] Encolando TX CMD_FREQ freq=1.0Hz dh=10: bb03000a
+05:06:59.128 [INFO] [serial] TX CMD_FREQ freq=1.0Hz dh=10: bb03000a
+05:06:59.129 [DEBUG] [serial] TX OK: 4 bytes escritos
+05:07:02.637 [INFO] [GUI] Cerrando ventana...
+05:07:02.638 [INFO] [serial] Encolando TX CMD_STOP (close): bb05
+05:07:02.638 [INFO] [serial] Solicitando parada del worker...
+05:07:02.720 [INFO] [serial] TX CMD_STOP (close): bb05
+05:07:02.720 [DEBUG] [serial] TX OK: 2 bytes escritos
+05:07:02.726 [INFO] [serial] Loop de lectura terminado.
+05:07:02.727 [INFO] [serial] Puerto cerrado.
+05:07:02.727 [INFO] [GUI] Worker terminado, cerrando.
+05:07:02.728 [INFO] [GUI] Freq cambiada a 1.0 Hz (freq_dh=10)
+05:07:02.728 [WARNING] [serial] TX ignorado (puerto no abierto): CMD_FREQ freq=1.0Hz dh=10
+05:07:02.741 [INFO] [GUI] app.exec_() retorno con codigo 0

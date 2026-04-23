@@ -1,0 +1,34 @@
+05:15:59.683 [INFO] Log file: C:\Github\Tesis\src\python\geophone_scope - Copy\logs\scope_min_20260420_051559.log
+05:15:59.683 [INFO] ============================================================
+05:15:59.683 [INFO] scope_min.py arrancando
+05:15:59.683 [INFO] ============================================================
+05:15:59.684 [INFO] [USB] Buscando dispositivo Cypress (VID=0x04B4)...
+05:15:59.690 [INFO] [USB] Puertos encontrados: 1
+05:15:59.690 [INFO] [USB]   COM7 | VID=0x04b4 | PID=0xf139 | desc=KitProg USB-UART (COM7)
+05:15:59.690 [INFO] [USB] -> Cypress encontrado en COM7
+05:15:59.690 [INFO] Usando puerto: COM7
+05:15:59.703 [INFO] [GUI] Iniciando ScopeWindow, puerto=COM7
+05:15:59.703 [INFO] [GUI] Construyendo UI...
+05:15:59.875 [INFO] [GUI] UI construida OK
+05:15:59.875 [INFO] [GUI] Creando SerialWorker para COM7
+05:15:59.876 [INFO] [serial] Abriendo puerto COM7 ...
+05:15:59.876 [INFO] [GUI] SerialWorker iniciado
+05:15:59.876 [INFO] [GUI] Timer de refresh iniciado (80ms)
+05:15:59.876 [INFO] [GUI] ScopeWindow lista
+05:16:00.080 [INFO] [serial] Puerto abierto (intento 1): Serial<id=0x1eb7f95ac80, open=True>(port='COM7', baudrate=9600, bytesize=8, parity='N', stopbits=1, timeout=0.1, xonxoff=False, rtscts=False, dsrdtr=False)
+05:16:00.080 [INFO] [GUI] app.exec_() — entrando en event loop Qt
+05:16:00.080 [INFO] [serial] Entrando en loop de lectura...
+05:16:05.885 [INFO] [GUI] Freq cambiada a 150.0 Hz (freq_dh=1500)
+05:16:05.886 [INFO] [serial] Encolando TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+05:16:05.963 [INFO] [serial] TX CMD_FREQ freq=150.0Hz dh=1500: bb0305dc
+05:16:05.963 [DEBUG] [serial] TX OK: 4 bytes escritos
+05:16:19.541 [INFO] [GUI] Freq cambiada a 100.0 Hz (freq_dh=1000)
+05:16:19.542 [INFO] [serial] Encolando TX CMD_FREQ freq=100.0Hz dh=1000: bb0303e8
+05:16:19.577 [INFO] [serial] TX CMD_FREQ freq=100.0Hz dh=1000: bb0303e8
+05:16:19.577 [DEBUG] [serial] TX OK: 4 bytes escritos
+05:16:49.400 [INFO] [GUI] Cerrando ventana...
+05:16:49.400 [INFO] [serial] Solicitando parada del worker...
+05:16:49.421 [INFO] [serial] Loop de lectura terminado.
+05:16:49.421 [INFO] [serial] Puerto cerrado.
+05:16:49.422 [INFO] [GUI] Worker terminado, cerrando.
+05:16:49.434 [INFO] [GUI] app.exec_() retorno con codigo 0

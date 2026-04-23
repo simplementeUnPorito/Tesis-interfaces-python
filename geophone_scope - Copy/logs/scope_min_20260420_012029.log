@@ -1,0 +1,61 @@
+01:20:29.909 [INFO] Log file: C:\Github\Tesis\src\python\geophone_scope - Copy\logs\scope_min_20260420_012029.log
+01:20:29.910 [INFO] ============================================================
+01:20:29.910 [INFO] scope_min.py arrancando
+01:20:29.910 [INFO] ============================================================
+01:20:29.910 [INFO] [USB] Buscando dispositivo Cypress (VID=0x04B4)...
+01:20:29.916 [INFO] [USB] Puertos encontrados: 1
+01:20:29.916 [INFO] [USB]   COM3 | VID=0x04b4 | PID=0xf232 | desc=USB Serial Device (COM3)
+01:20:29.916 [INFO] [USB] -> Cypress encontrado en COM3
+01:20:29.916 [INFO] Usando puerto: COM3
+01:20:29.928 [INFO] [GUI] Iniciando ScopeWindow, puerto=COM3
+01:20:29.929 [INFO] [GUI] Construyendo UI...
+01:20:30.097 [INFO] [GUI] UI construida OK
+01:20:30.097 [INFO] [GUI] Creando SerialWorker para COM3
+01:20:30.098 [INFO] [serial] Abriendo puerto COM3 ...
+01:20:30.098 [INFO] [GUI] SerialWorker iniciado
+01:20:30.098 [INFO] [GUI] Timer de refresh iniciado (80ms)
+01:20:30.098 [INFO] [GUI] ScopeWindow lista
+01:20:30.310 [INFO] [serial] Puerto abierto: Serial<id=0x2073a754dc0, open=True>(port='COM3', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=0.1, xonxoff=False, rtscts=False, dsrdtr=False)
+01:20:30.310 [INFO] [GUI] app.exec_() — entrando en event loop Qt
+01:20:30.310 [INFO] [serial] Entrando en loop de lectura...
+01:20:32.219 [INFO] [GUI] Click START
+01:20:32.219 [INFO] [serial] Encolando TX CMD_START: bb04
+01:20:32.262 [INFO] [serial] TX CMD_START: bb04
+01:20:32.262 [DEBUG] [serial] TX OK: 2 bytes escritos
+01:20:32.371 [DEBUG] [serial] RX 2 bytes: bb04
+01:20:32.372 [DEBUG] [serial] Sin header 0xAA, descartando 2 bytes: bb04
+01:20:39.473 [INFO] [GUI] Freq cambiada a 1.0 Hz (freq_dh=10)
+01:20:39.473 [INFO] [serial] Encolando TX CMD_FREQ freq=1.0Hz dh=10: bb03000a
+01:20:39.561 [INFO] [serial] TX CMD_FREQ freq=1.0Hz dh=10: bb03000a
+01:20:39.562 [DEBUG] [serial] TX OK: 4 bytes escritos
+01:20:39.581 [INFO] [GUI] Click STOP
+01:20:39.581 [INFO] [serial] Encolando TX CMD_STOP: bb05
+01:20:39.671 [INFO] [serial] TX CMD_STOP: bb05
+01:20:39.672 [DEBUG] [serial] TX OK: 2 bytes escritos
+01:20:39.672 [DEBUG] [serial] RX 4 bytes: bb03000a
+01:20:39.673 [DEBUG] [serial] Sin header 0xAA, descartando 4 bytes: bb03000a
+01:20:39.673 [INFO] [serial] Stats: 0 pkts, 6 bytes rx
+01:20:39.780 [DEBUG] [serial] RX 2 bytes: bb05
+01:20:39.780 [DEBUG] [serial] Sin header 0xAA, descartando 2 bytes: bb05
+01:20:40.406 [INFO] [GUI] Click START
+01:20:40.407 [INFO] [serial] Encolando TX CMD_START: bb04
+01:20:40.431 [INFO] [serial] TX CMD_START: bb04
+01:20:40.431 [DEBUG] [serial] TX OK: 2 bytes escritos
+01:20:40.539 [DEBUG] [serial] RX 2 bytes: bb04
+01:20:40.539 [DEBUG] [serial] Sin header 0xAA, descartando 2 bytes: bb04
+01:20:41.317 [INFO] [GUI] Click STOP
+01:20:41.317 [INFO] [serial] Encolando TX CMD_STOP: bb05
+01:20:41.411 [INFO] [serial] TX CMD_STOP: bb05
+01:20:41.411 [DEBUG] [serial] TX OK: 2 bytes escritos
+01:20:41.520 [DEBUG] [serial] RX 2 bytes: bb05
+01:20:41.521 [DEBUG] [serial] Sin header 0xAA, descartando 2 bytes: bb05
+01:21:38.324 [ERROR] [serial] Error de lectura: ClearCommError failed (PermissionError(13, 'The device does not recognize the command.', None, 22))
+01:21:38.324 [INFO] [serial] Loop de lectura terminado.
+01:21:38.324 [INFO] [serial] Puerto cerrado.
+01:24:01.423 [INFO] [GUI] Click START
+01:24:01.424 [WARNING] [serial] TX ignorado (puerto no abierto): CMD_START
+01:24:10.965 [INFO] [GUI] Cerrando ventana...
+01:24:10.965 [WARNING] [serial] TX ignorado (puerto no abierto): CMD_STOP (close)
+01:24:10.965 [INFO] [serial] Solicitando parada del worker...
+01:24:10.965 [INFO] [GUI] Worker terminado, cerrando.
+01:24:10.971 [INFO] [GUI] app.exec_() retorno con codigo 0
