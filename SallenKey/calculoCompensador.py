@@ -131,9 +131,9 @@ wLow    = 2*np.pi*fLow
 
 zeta_des = wn/(2*wLow)  
 Ra = 40e3
-Rb = 600e3
-Rf = 50e3
-TOP_N = 10   # cuántas combinaciones mostrar
+Rb = 0e3
+Rf = 47e3
+TOP_N = 15   # cuántas combinaciones mostrar
 # ════════════════════════════════════════════════════════════
 
 print("="*72)
