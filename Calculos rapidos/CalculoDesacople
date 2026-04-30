@@ -1,0 +1,215 @@
+# -*- coding: utf-8 -*-
+import sys
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
+import sympy as sp
+import numpy as np
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+from scipy.signal import TransferFunction, bode
+
+# ─────────────────────────────────────────────────────────────────────
+# 1. MODELO SIMBÓLICO — geófono con desacople AC
+#
+# Circuito:  EMF = G*s*Z  con resistencia interna Rs
+#            C en serie (bloquea DC)  →  Rp carga a GND
+#
+# Mecánica:  m*s²*Z + b*s*Z + k*Z + G*I = -m*A
+# Eléctrica: G*s*Z = (Rs + Rp + 1/(C*s)) * I
+# Salida:    Vp = Rp * I
+#
+# H(s) = Vp/A tiene 3 polos:
+#   - un par complejo conjugado (~resonancia mecánica del geófono)
+#   - un polo real negativo (~frecuencia de corte del desacople AC)
+# ─────────────────────────────────────────────────────────────────────
+
+# Símbolos con prefijo _ para no colisionar con ningún nombre numérico posterior
+_s, _m, _b, _k, _G, _Rs, _Rp, _C = sp.symbols('s m b k G Rs Rp C', positive=True)
+_Z, _I, _A = sp.symbols('Z I A')
+
+eq_mech = sp.Eq(_m*_s**2*_Z + _b*_s*_Z + _k*_Z + _G*_I, -_m*_A)
+eq_elec = sp.Eq(_G*_s*_Z - (_Rs + _Rp)*_I - _I/(_C*_s), 0)
+
+sol = sp.solve((eq_mech, eq_elec), (_Z, _I))
+
+Vp_sym = sol[_I] * _Rp
+H_sym  = sp.cancel(Vp_sym / _A)        # forma canónica p(s)/q(s)
+
+H_num_sym, H_den_sym = sp.fraction(H_sym)
+
+print("=" * 62)
+print("  H(s) = Vp / Aceleración  (geofono + desacople AC)")
+print("=" * 62)
+sp.pprint(H_sym)
+print("=" * 62)
+
+# ─────────────────────────────────────────────────────────────────────
+# 2. PARÁMETROS DEL GEÓFONO
+#    Nombres geo_* para no colisionar con los símbolos _m, _b, _k ...
+# ─────────────────────────────────────────────────────────────────────
+geo_fn  = 10          # Hz  — frecuencia natural
+geo_m   = 0.011       # kg  — masa sismica
+geo_wn  = 2*np.pi*geo_fn
+geo_k   = geo_m * geo_wn**2          # N/m  — rigidez
+geo_hi  = 0.25                        # —     — factor de amortiguamiento
+geo_b   = 2*geo_m*geo_hi*geo_wn      # Ns/m — amortiguamiento viscoso
+geo_G   = 28.0        # V·s/m — constante electromecánica
+geo_Rs  = 375.0       # Ω    — resistencia de bobina
+
+# ─────────────────────────────────────────────────────────────────────
+# 3. EVALUACIÓN NUMÉRICA
+# ─────────────────────────────────────────────────────────────────────
+def evaluar_TF(Rp_val, C_val):
+    """Sustituye Rp y C (+ parámetros del geofono) en H(s).
+    Retorna (num_coeffs, den_coeffs) como listas de floats."""
+    subs = {
+        _m: geo_m, _b: geo_b, _k: geo_k,
+        _G: geo_G, _Rs: geo_Rs,
+        _Rp: Rp_val, _C: C_val
+    }
+    nc = [float(c) for c in sp.Poly(H_num_sym.subs(subs), _s).all_coeffs()]
+    dc = [float(c) for c in sp.Poly(H_den_sym.subs(subs), _s).all_coeffs()]
+    return nc, dc
+
+def clasificar_polos(den_coeffs):
+    """
+    Clasifica los polos del denominador en:
+      - polo_real: el polo real de menor |magnitud| → frecuencia de corte AC
+      - polos_mec: par complejo conjugado → resonancia del geofono
+    """
+    polos = np.roots(den_coeffs)
+    reales    = sorted(polos[np.isreal(polos)].real,    key=abs)
+    complejos = polos[np.iscomplex(polos)]
+
+    polo_real = reales[0] if len(reales) > 0 else None
+    polo_mec  = complejos[0] if len(complejos) >= 2 else None
+    return polo_real, polo_mec
+
+def frecuencia_corte(Rp_val, C_val):
+    """Frecuencia de corte AC [Hz] del polo real de menor magnitud."""
+    _, dc = evaluar_TF(Rp_val, C_val)
+    polo_real, _ = clasificar_polos(dc)
+    if polo_real is not None:
+        return abs(polo_real) / (2*np.pi)
+    return np.nan
+
+# ─────────────────────────────────────────────────────────────────────
+# 4. OPTIMIZACIÓN
+#
+# Objetivo: colocar el polo de desacople lo más cerca posible de
+#           f_corte_obj, con el C más pequeño posible y Rp razonable.
+#
+# Aproximación analítica del polo real:
+#   f_corte ≈ 1 / (2π * C * (Rs + Rp))
+# → para f_corte_obj dado, la solución analítica exacta (sin acoplamiento G)
+#   es simplemente un hiperboloide en el plano (Rp, C).
+#   La optimización numérica tiene en cuenta el acoplamiento mecánico.
+# ─────────────────────────────────────────────────────────────────────
+f_corte_obj = 0.01      # Hz — objetivo de frecuencia de corte AC
+
+def objetivo_opt(params):
+    Rp_v, C_v = params
+    if Rp_v <= 0 or C_v <= 0:
+        return 1e20
+    try:
+        fc = frecuencia_corte(Rp_v, C_v)
+        if np.isnan(fc):
+            return 1e20
+        # Error cuadratico relativo al objetivo
+        err = ((fc - f_corte_obj) / f_corte_obj)**2
+        # Penalizar C grande (preferir ceramicos o electroliticos pequenos)
+        pen_C  = 0.1 * (C_v * 1e6)         # [uF]
+        # Penalizar Rp muy grande (ruido termico) o muy pequeno (carga el geofono)
+        pen_Rp = 0.01 * np.log10(Rp_v / geo_Rs)**2
+        return err + pen_C + pen_Rp
+    except Exception:
+        return 1e20
+
+# Rp: 1 kohm a 10 Mohm  |  C: 100 nF a 10 mF
+bounds = [(1e3, 10e6), (100e-9, 10e-3)]
+
+best = None
+for Rp0 in [1e3, 10e3, 100e3, 1e6]:
+    for C0 in [1e-6, 10e-6, 100e-6, 1e-3]:
+        res = minimize(objetivo_opt, [Rp0, C0], bounds=bounds,
+                       method='L-BFGS-B',
+                       options={'ftol': 1e-14, 'gtol': 1e-10, 'maxiter': 500})
+        if best is None or res.fun < best.fun:
+            best = res
+
+Rp_opt = best.x[0]
+C_opt  = best.x[1]
+fc_real  = frecuencia_corte(Rp_opt, C_opt)
+fc_aprox = 1 / (2*np.pi * C_opt * (geo_Rs + Rp_opt))
+
+def fmt_cap(c):
+    if c >= 1e-3: return f"{c*1e3:.2f} mF"
+    if c >= 1e-6: return f"{c*1e6:.2f} uF"
+    if c >= 1e-9: return f"{c*1e9:.1f} nF"
+    return f"{c*1e12:.0f} pF"
+
+def fmt_res(r):
+    if r >= 1e6: return f"{r/1e6:.2f} Mohm"
+    if r >= 1e3: return f"{r/1e3:.2f} kohm"
+    return f"{r:.1f} ohm"
+
+print(f"\n--- Optimizacion (objetivo f_corte = {f_corte_obj} Hz) ---")
+print(f"  Rp optimo   : {fmt_res(Rp_opt)}")
+print(f"  C optimo    : {fmt_cap(C_opt)}")
+print(f"  f_corte AC  : {fc_real:.4f} Hz  (polo real exacto)")
+print(f"  f_corte AC  ~ {fc_aprox:.4f} Hz  (aprox. 1/(2*pi*C*(Rs+Rp)))")
+
+# ─────────────────────────────────────────────────────────────────────
+# 5. ANÁLISIS DE POLOS
+# ─────────────────────────────────────────────────────────────────────
+nc, dc = evaluar_TF(Rp_opt, C_opt)
+polo_real, polo_mec = clasificar_polos(dc)
+
+f0_mec, zeta_mec = None, None
+if polo_mec is not None:
+    wn_mec   = abs(polo_mec)
+    f0_mec   = wn_mec / (2*np.pi)
+    zeta_mec = -np.real(polo_mec) / wn_mec
+
+print(f"\n--- Polos del sistema completo ---")
+for p in np.roots(dc):
+    if np.isreal(p):
+        fc_p = abs(p.real) / (2*np.pi)
+        print(f"  Polo real      : s = {p.real:+.4f}  ->  f_corte = {fc_p:.4f} Hz  [desacople AC]")
+    elif np.imag(p) > 0:   # solo mostrar uno de cada par conjugado
+        f_p = abs(p) / (2*np.pi)
+        z_p = -np.real(p) / abs(p)
+        print(f"  Par conjugado  : s = {p.real:+.4f} +/- j{abs(p.imag):.4f}  "
+              f"->  f0 = {f_p:.4f} Hz,  zeta = {z_p:.4f}  [mecanica]")
+
+# ─────────────────────────────────────────────────────────────────────
+# 6. DIAGRAMA DE BODE
+# ─────────────────────────────────────────────────────────────────────
+sys_tf = TransferFunction(nc, dc)
+w, mag, phase = bode(sys_tf, n=5000)
+f_hz = w / (2*np.pi)
+
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 8), sharex=True)
+
+ax1.semilogx(f_hz, mag, 'b', linewidth=1.5)
+ax1.set_ylabel('Magnitud (dB)')
+titulo = f'Respuesta Vp/Aceleracion — Geofono + desacople AC\n'
+if f0_mec:
+    titulo += f'f0={f0_mec:.2f} Hz, zeta={zeta_mec:.3f} | '
+titulo += f'f_corte={fc_real:.3f} Hz | Rp={fmt_res(Rp_opt)}, C={fmt_cap(C_opt)}'
+ax1.set_title(titulo)
+ax1.grid(True, which='both', ls=':', alpha=0.6)
+ax1.axvline(fc_real, color='orange', ls='--', lw=1.5,
+            label=f'f_corte = {fc_real:.3f} Hz')
+if f0_mec:
+    ax1.axvline(f0_mec, color='r', ls='--', lw=1.5,
+                label=f'f0 = {f0_mec:.2f} Hz')
+ax1.legend()
+
+ax2.semilogx(f_hz, phase, 'g', linewidth=1.5)
+ax2.set_xlabel('Frecuencia (Hz)')
+ax2.set_ylabel('Fase (grados)')
+ax2.grid(True, which='both', ls=':', alpha=0.6)
+
+plt.tight_layout()
+plt.show()
