@@ -339,8 +339,8 @@ def grupo4_mfb_parcial(f0_des, gamma1, omega0, target_num, lam):
 f0_des      = 10      # Hz — frecuencia natural del geófono
 gamma0      = 0.25    # damping inicial del geófono (γ₀)
 gamma1      = 10/0.1     # target damping (γ₁ > γ₀)
-TOP_N       = 15      # resultados a mostrar por grupo
-lambda_cost = 0.5     # peso de la calidad de componentes en err_total
+TOP_N       = 30      # resultados a mostrar por grupo
+lambda_cost = 1     # peso de la calidad de componentes en err_total
 # ════════════════════════════════════════════════════════════
 
 omega0     = 2*np.pi*f0_des
