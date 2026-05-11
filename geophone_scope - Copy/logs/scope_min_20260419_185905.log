@@ -1,6 +1,0 @@
-18:59:05.575 [INFO] Log file: C:\Github\Tesis\src\python\geophone_scope - Copy\logs\scope_min_20260419_185905.log
-18:59:05.575 [INFO] ============================================================
-18:59:05.575 [INFO] scope_min.py arrancando
-18:59:05.575 [INFO] ============================================================
-18:59:05.575 [INFO] [USB] Buscando dispositivo Cypress (VID=0x04B4)...
-18:59:05.581 [INFO] [USB] Puertos encontrados: 1

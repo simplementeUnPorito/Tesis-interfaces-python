@@ -1,8 +1,0 @@
-01:24:14.387 [INFO] Log file: C:\Github\Tesis\src\python\geophone_scope - Copy\logs\scope_min_20260420_012414.log
-01:24:14.387 [INFO] ============================================================
-01:24:14.388 [INFO] scope_min.py arrancando
-01:24:14.388 [INFO] ============================================================
-01:24:14.388 [INFO] [USB] Buscando dispositivo Cypress por UART (COM port)...
-01:24:14.393 [INFO] [USB] Puertos encontrados: 0
-01:24:14.393 [WARNING] [USB] No se encontro puerto COM
-01:24:14.393 [ERROR] No se encontro dispositivo Cypress. Usa: python scope_min.py COMx
