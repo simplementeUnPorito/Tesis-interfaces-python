@@ -1,200 +1,193 @@
-"""
-protocol.py — PSoC binary packet protocol parser and command builders.
+"""protocol.py — Packet encoding and decoding for the geophone ESP32 protocol."""
 
-Packet types (PSoC -> PC):
-  0xAA — 12-byte data sample
-  0xCC — 10-byte state/config confirmation
-  0xDD — N-byte debug event  (see debug_protocol.py)
-
-Command frame (PC -> PSoC): [0xBB][CMD][LEN][payload...]
-  VDAC_LOAD exception:       [0xBB][0x06][len_hi][len_lo][data...]
-"""
+from __future__ import annotations
 
 import struct
+from dataclasses import dataclass, field
+from typing import Optional
 
-# ── Packet / frame constants ──────────────────────────────────────────────────
-
-PKT_DATA_HEADER  = 0xAA
-PKT_STATE_HEADER = 0xCC
-CMD_MARKER       = 0xBB
-PKT_DATA_SIZE    = 12
-
-# ── Command codes ─────────────────────────────────────────────────────────────
-
-CMD_START       = 0x01
-CMD_STOP        = 0x02
-CMD_SET_MUX_IN  = 0x03
-CMD_SET_MUX_OUT = 0x04
-CMD_SET_ADC     = 0x05   # replaces old CMD_SET_GAIN; payload: [cfg][buf_gain]
-CMD_VDAC_LOAD   = 0x06
-CMD_SET_DEBUG   = 0x07
-CMD_SET_DBG_CH  = 0x08
-CMD_GET_STATE   = 0x09
-CMD_LOAD_FIR    = 0x0A   # 2-byte length + Q1.15 int16 coefficients (2 bytes each)
-CMD_FIR_CLEAR   = 0x0B   # disable FIR, pass-through mode
-
-# ── Debug channel constants ───────────────────────────────────────────────────
-
-DBG_CH_USB  = 0
-DBG_CH_UART = 1
-DBG_CH_BOTH = 2
-
-# ── ADC config tables ─────────────────────────────────────────────────────────
-
-# Base input range at PSoC Creator-configured buffer gain (8 for CFG2-4, 1 for CFG1)
-CONFIG_BASE_RANGE = {1: 0.512, 2: 1.024, 3: 2.048, 4: 6.144}
-CONFIG_BASE_GAIN  = {1: 1,     2: 8,     3: 8,     4: 8    }
-
-CONFIG_LABEL = {
-    1: "CFG1  ±0.512 V  (18-bit)",
-    2: "CFG2  ±1.024 V  (17-bit)",
-    3: "CFG3  ±2.048 V  (17-bit)",
-    4: "CFG4  ±6.144 V  (17-bit)",
-}
-
-ADC_BITS      = 17   # 17-bit for CFG2-4 (use same for CFG1 which is 18-bit — conservative)
-ADC_FULLSCALE = 2 ** (ADC_BITS - 1)
-
-SAR_VREF      = 1.024
-SAR_BITS      = 12
-SAR_FULLSCALE = 2 ** (SAR_BITS - 1)
-
-# Flags
-FLAG_MUX_IN  = 0x01
-FLAG_MUX_OUT = 0x02
+import config
 
 
-def effective_fullscale(cfg: int, buf_gain: int) -> float:
-    """Effective ±V range at the physical input pins."""
-    base  = CONFIG_BASE_RANGE.get(cfg, 6.144)
-    bgain = CONFIG_BASE_GAIN.get(cfg, 8)
-    return base * bgain / max(buf_gain, 1)
+@dataclass
+class Packet:
+    """Parsed 6-byte packet from master (0x56 header)."""
+
+    node_id: int
+    ptype: int          # type byte (PTYPE_* constants)
+    b2: int             # payload byte 2 (MSB)
+    b1: int             # payload byte 1
+    b0: int             # payload byte 0 (LSB)
+    value24u: int = field(init=False)  # unsigned 24-bit from b2,b1,b0
+    value24: int = field(init=False)  # signed 24-bit from b2,b1,b0
+
+    def __post_init__(self) -> None:
+        raw = (self.b2 << 16) | (self.b1 << 8) | self.b0
+        self.value24u = raw
+        # Sign-extend 24-bit to Python int
+        if raw & 0x80_0000:
+            raw -= 0x100_0000
+        self.value24 = raw
+
+    # ── Convenience properties ───────────────────────────────────────────────
+
+    @property
+    def is_data(self) -> bool:
+        return self.ptype == config.PTYPE_DATA
+
+    @property
+    def is_heartbeat(self) -> bool:
+        return self.ptype == config.PTYPE_HEARTBEAT
+
+    @property
+    def is_ack(self) -> bool:
+        return self.ptype == config.PTYPE_ACK
+
+    @property
+    def is_ready(self) -> bool:
+        return self.ptype == config.PTYPE_READY
+
+    @property
+    def is_latency(self) -> bool:
+        return self.ptype == config.PTYPE_LATENCY
+
+    @property
+    def is_status(self) -> bool:
+        return self.ptype == config.PTYPE_STATUS
+
+    # Heartbeat fields
+    @property
+    def hb_pga(self) -> int:
+        """PGA code from a heartbeat packet."""
+        return self.b2
+
+    @property
+    def hb_vdac(self) -> int:
+        """VDAC byte from a heartbeat packet."""
+        return self.b1
+
+    @property
+    def hb_master_state(self) -> int:
+        """Master state from a heartbeat packet."""
+        return self.b0
+
+    # ACK fields
+    @property
+    def ack_cmd(self) -> int:
+        return self.b2
+
+    @property
+    def ack_val(self) -> int:
+        return self.b1
+
+    # READY
+    @property
+    def ready_n_slaves(self) -> int:
+        """Number of slaves ready (from READY packet, node_id=0xFF)."""
+        return self.b2
+
+    # STATUS / HELLO
+    @property
+    def status_is_master(self) -> bool:
+        return self.node_id == 0xFF
+
+    @property
+    def status_espnow_ok(self) -> int:
+        return self.b2
+
+    @property
+    def status_ap_ch(self) -> int:
+        return self.b1
+
+    @property
+    def hello_psoc_ok(self) -> bool:
+        """PSoC status from a slave HELLO packet."""
+        return bool(self.b1)
+
+    @property
+    def hello_mac_sub(self) -> int:
+        """MAC sub-type (0x02/0x03/0x04) for MAC byte pairs."""
+        return self.b2
+
+    @property
+    def hello_mac_hi(self) -> int:
+        """High MAC byte of the pair."""
+        return self.b1
+
+    @property
+    def hello_mac_lo(self) -> int:
+        """Low MAC byte of the pair."""
+        return self.b0
+
+    def __repr__(self) -> str:
+        return (
+            f"Packet(node={self.node_id:#04x} type={self.ptype:#04x} "
+            f"b=[{self.b2:#04x},{self.b1:#04x},{self.b0:#04x}] val={self.value24})"
+        )
 
 
-def parse_gain_byte(b: int) -> tuple[int, int]:
-    """Decode byte 10 of data packet → (cfg:1-4, buf_gain:1/2/4/8)."""
-    cfg      = b & 0x0F
-    buf_gain = 1 << ((b >> 4) & 0x03)
-    return cfg, buf_gain
+# ── Encoding (PC → Master) ───────────────────────────────────────────────────
+
+def encode_std(cmd: int, param: int) -> bytes:
+    """Encode a standard 4-byte command: [0xAB][cmd][param][cmd^param]."""
+    cs = (cmd ^ param) & 0xFF
+    return bytes([config.CMD_HEADER, cmd & 0xFF, param & 0xFF, cs])
 
 
-# ── Data packet parser ────────────────────────────────────────────────────────
-
-def _sign_extend_24(val: int) -> int:
-    return val - 0x1000000 if (val & 0x800000) else val
-
-
-def _calc_crc(data: bytes) -> int:
-    crc = 0
-    for b in data:
-        crc ^= b
-    return crc
+def encode_std16(cmd: int, value16: int) -> bytes:
+    """Encode a 5-byte set-N command: [0xAB][cmd][n_lo][n_hi][cmd^n_lo^n_hi]."""
+    value16 = int(value16) & 0xFFFF
+    n_lo = value16 & 0xFF
+    n_hi = (value16 >> 8) & 0xFF
+    cs = (cmd ^ n_lo ^ n_hi) & 0xFF
+    return bytes([config.CMD_HEADER, cmd & 0xFF, n_lo, n_hi, cs])
 
 
-def parse_packet(raw: bytes) -> dict | None:
-    """
-    Parse a 12-byte PSoC data packet (header 0xAA).
-    Returns a dict with converted values, or None on error.
-    """
-    if len(raw) < PKT_DATA_SIZE or raw[0] != PKT_DATA_HEADER:
+def encode_directed(node_id: int, sub_cmd: int, param: int) -> bytes:
+    """Encode a 6-byte directed slave command: [0xAB][0xBD][node_id][sub_cmd][param][cs]."""
+    node_id = node_id & 0xFF
+    sub_cmd = sub_cmd & 0xFF
+    param   = param   & 0xFF
+    cs = (node_id ^ sub_cmd ^ param) & 0xFF
+    return bytes([config.CMD_HEADER, config.CMD_DIRECTED, node_id, sub_cmd, param, cs])
+
+
+# ── Decoding (Master → PC) ───────────────────────────────────────────────────
+
+def decode_packet(buf: bytes | bytearray) -> Optional[Packet]:
+    """Parse exactly 6 bytes into a Packet. Returns None on bad header/length."""
+    if len(buf) < config.PKT_LEN:
         return None
-    if _calc_crc(raw[:11]) != raw[11]:
+    if buf[0] != config.PKT_HEADER:
         return None
-
-    flags     = raw[1]
-    raw_input = struct.unpack_from('<h', raw, 2)[0]
-
-    analog_val   = raw[4] | (raw[5] << 8) | (raw[6] << 16)
-    digital_val  = raw[7] | (raw[8] << 8) | (raw[9] << 16)
-    analog_s     = _sign_extend_24(analog_val)
-    digital_s    = _sign_extend_24(digital_val)
-
-    cfg, buf_gain = parse_gain_byte(raw[10])
-    vfs = effective_fullscale(cfg, buf_gain)
-
-    mux_in = flags & FLAG_MUX_IN
-    raw_input_v = (raw_input / SAR_FULLSCALE * SAR_VREF
-                   if mux_in == 0
-                   else raw_input / 128.0 * vfs)
-
-    return {
-        "raw_input":    raw_input_v,
-        "post_analog":  analog_s  / ADC_FULLSCALE * vfs,
-        "post_digital": digital_s / ADC_FULLSCALE * vfs,
-        "raw_analog":   analog_s,
-        "raw_digital":  digital_s,
-        "adc_cfg":      cfg,
-        "buf_gain":     buf_gain,
-        "vfs":          vfs,
-        "mux_in":       mux_in,
-        "mux_out":      (flags & FLAG_MUX_OUT) >> 1,
-    }
+    return Packet(
+        node_id=buf[1],
+        ptype=buf[2],
+        b2=buf[3],
+        b1=buf[4],
+        b0=buf[5],
+    )
 
 
-# ── Command builders ──────────────────────────────────────────────────────────
-
-def cmd_start() -> bytes:
-    return bytes([CMD_MARKER, CMD_START, 0])
-
-def cmd_stop() -> bytes:
-    return bytes([CMD_MARKER, CMD_STOP, 0])
-
-def cmd_set_mux_in(source: int) -> bytes:
-    return bytes([CMD_MARKER, CMD_SET_MUX_IN, 1, source & 0xFF])
-
-def cmd_set_mux_out(output: int) -> bytes:
-    return bytes([CMD_MARKER, CMD_SET_MUX_OUT, 1, output & 0xFF])
-
-def cmd_set_adc(cfg: int, buf_gain: int) -> bytes:
+def find_and_decode(buf: bytearray) -> tuple[list[Packet], bytearray]:
     """
-    cfg: 1-4 (ADC_DelSig config)
-    buf_gain: 1, 2, 4, or 8  (forced to 1 by firmware if cfg==1)
+    Consume all complete 6-byte packets from a raw byte buffer.
+
+    Scans for PKT_HEADER (0x56), extracts every aligned 6-byte frame,
+    and returns (packets, remaining_buf). Discards framing garbage.
     """
-    return bytes([CMD_MARKER, CMD_SET_ADC, 2, cfg & 0xFF, buf_gain & 0xFF])
-
-def cmd_vdac_load(sequence: list[int]) -> bytes:
-    """
-    sequence: list of int (0-255), up to 3000 samples.
-    Frame: [BB][06][len_hi][len_lo][data...]  — no embedded length in payload.
-    """
-    n   = min(len(sequence), 3000)
-    seq = bytes(sequence[:n])
-    return bytes([CMD_MARKER, CMD_VDAC_LOAD, (n >> 8) & 0xFF, n & 0xFF]) + seq
-
-def cmd_set_debug(enable: bool) -> bytes:
-    return bytes([CMD_MARKER, CMD_SET_DEBUG, 1, 1 if enable else 0])
-
-def cmd_set_debug_ch(ch: int) -> bytes:
-    """ch: DBG_CH_USB=0, DBG_CH_UART=1, DBG_CH_BOTH=2"""
-    return bytes([CMD_MARKER, CMD_SET_DBG_CH, 1, ch & 0xFF])
-
-def cmd_get_state() -> bytes:
-    return bytes([CMD_MARKER, CMD_GET_STATE, 0])
-
-
-def cmd_load_fir(coeffs_float) -> bytes:
-    """
-    Build CMD_LOAD_FIR frame from float coefficients.
-
-    coeffs_float : sequence of floats in [-1.0, 1.0].  Max 255 taps.
-    Converts to Q1.15 int16 (multiply by 32767 and round), then packs as
-    little-endian pairs.  Frame: [BB][0A][len_hi][len_lo][c0_lo][c0_hi]...
-    """
-    import struct as _struct
-    taps = list(coeffs_float)[:255]
-    n    = len(taps)
-    if n == 0:
-        return cmd_fir_clear()
-    import math as _math
-    payload = bytearray()
-    for c in taps:
-        # Guard: NaN/inf → 0 (silence) rather than crashing
-        q = max(-32768, min(32767, int(round(c * 32768.0)) if _math.isfinite(c) else 0))
-        payload += _struct.pack('<h', q)
-    plen = len(payload)
-    return bytes([CMD_MARKER, CMD_LOAD_FIR, (plen >> 8) & 0xFF, plen & 0xFF]) + bytes(payload)
-
-
-def cmd_fir_clear() -> bytes:
-    """Disable software FIR on PSoC — post_digital reverts to raw DFB output."""
-    return bytes([CMD_MARKER, CMD_FIR_CLEAR, 0])
+    packets: list[Packet] = []
+    i = 0
+    while i < len(buf):
+        # Find next header byte
+        if buf[i] != config.PKT_HEADER:
+            i += 1
+            continue
+        # Need at least 6 bytes from here
+        if i + config.PKT_LEN > len(buf):
+            break
+        pkt = decode_packet(buf[i : i + config.PKT_LEN])
+        if pkt is not None:
+            packets.append(pkt)
+        i += config.PKT_LEN
+    return packets, buf[i:]
