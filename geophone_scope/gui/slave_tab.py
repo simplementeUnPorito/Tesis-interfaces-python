@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
-    QSpinBox,
+    QSpinBox,   # usado por notch spinboxes
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -41,16 +41,17 @@ class SlaveTab(QWidget):
     """
 
     # ── Signals ───────────────────────────────────────────────────────────────
-    alias_changed:   pyqtSignal = pyqtSignal(int, str)     # ch_index, alias
-    vdac_changed:    pyqtSignal = pyqtSignal(int, int)     # ch_index, vdac_byte
-    pgavdac_changed: pyqtSignal = pyqtSignal(int, int)     # ch_index, pga_code
-    pga_changed:     pyqtSignal = pyqtSignal(int, int)     # ch_index, pga_code
-    fir_apply:       pyqtSignal = pyqtSignal(int, str)     # ch_index, cmd_str
-    fir_remove:      pyqtSignal = pyqtSignal(int)          # ch_index
+    alias_changed:    pyqtSignal = pyqtSignal(int, str)     # ch_index, alias
+    vdac_changed:     pyqtSignal = pyqtSignal(int, int)     # ch_index, vdac_byte
+    pgavdac_changed:  pyqtSignal = pyqtSignal(int, int)     # ch_index, pga_code
+    pga_changed:      pyqtSignal = pyqtSignal(int, int)     # ch_index, pga_code
+    fir_apply:        pyqtSignal = pyqtSignal(int, str)     # ch_index, cmd_str
+    fir_remove:       pyqtSignal = pyqtSignal(int)          # ch_index
     dc_remove_toggled: pyqtSignal = pyqtSignal(int, bool)  # ch_index, enabled
-    test_requested:  pyqtSignal = pyqtSignal(int)          # ch_index
-    ver_requested:   pyqtSignal = pyqtSignal(int)          # ch_index
-    notch_toggled:   pyqtSignal = pyqtSignal(int, bool)    # ch_index, enabled
+    test_requested:   pyqtSignal = pyqtSignal(int)          # ch_index
+    ver_requested:    pyqtSignal = pyqtSignal(int)          # ch_index
+    send_all_requested: pyqtSignal = pyqtSignal(int)        # ch_index
+    notch_toggled:    pyqtSignal = pyqtSignal(int, bool)    # ch_index, enabled
     notch_mu_changed: pyqtSignal = pyqtSignal(int, float)  # ch_index, mu
     notch_harm_changed: pyqtSignal = pyqtSignal(int, int)  # ch_index, n_harm
     latency_requested: pyqtSignal = pyqtSignal(int)        # ch_index
@@ -63,6 +64,10 @@ class SlaveTab(QWidget):
         super().__init__(parent)
         self.ch_index = ch_index
         self._pgavdac_code = 0
+        self._vdac_byte    = 128
+        self._prev_pga_code = 0
+        self._gain_target_v: dict[int, float] = {}   # pga_code → último Target V
+        self._fir_active   = False
         self._vref_values = self._build_vref_values()
         self._debug_worker: Optional[DebugPortWorker] = None
         self._build_ui()
@@ -86,12 +91,16 @@ class SlaveTab(QWidget):
         grp_id = QGroupBox("Identificación")
         form_id = QFormLayout(grp_id)
 
-        self.ef_alias = QLineEdit()
-        self.ef_alias.setPlaceholderText(f"Alias Esclavo {self.ch_index}…")
-        self.ef_alias.textChanged.connect(
-            lambda txt: self.alias_changed.emit(self.ch_index, txt.strip())
+        self.dd_type = QComboBox()
+        self.dd_type.addItems(["Hammer", "Geo1", "Geo2"])
+        _defaults = {1: "Hammer", 2: "Geo1", 3: "Geo2"}
+        _di = self.dd_type.findText(_defaults.get(self.ch_index, "Geo1"))
+        if _di >= 0:
+            self.dd_type.setCurrentIndex(_di)
+        self.dd_type.currentTextChanged.connect(
+            lambda txt: self.alias_changed.emit(self.ch_index, txt)
         )
-        form_id.addRow("Alias:", self.ef_alias)
+        form_id.addRow("Tipo:", self.dd_type)
 
         self.lbl_mac = QLabel("—")
         self.lbl_mac.setStyleSheet("font-family: monospace; font-size: 9px; color: #888;")
@@ -101,16 +110,6 @@ class SlaveTab(QWidget):
         # ── VDAC group ────────────────────────────────────────────────────────
         grp_vdac = QGroupBox("VRef DC (VDAC)")
         form_v = QFormLayout(grp_vdac)
-
-        row_byte = QHBoxLayout()
-        self.spn_vdac = QSpinBox()
-        self.spn_vdac.setRange(config.VDAC_MIN, config.VDAC_MAX)
-        self.spn_vdac.setValue(128)
-        self.lbl_vdac_v = QLabel(f"{128 * config.VDAC_STEP:.3f} V")
-        self.spn_vdac.valueChanged.connect(self._on_vdac_spin_changed)
-        row_byte.addWidget(self.spn_vdac)
-        row_byte.addWidget(self.lbl_vdac_v)
-        form_v.addRow("VDAC byte:", row_byte)
 
         row_target = QHBoxLayout()
         self.ef_target_v = QDoubleSpinBox()
@@ -134,8 +133,14 @@ class SlaveTab(QWidget):
         row_target.addWidget(btn_plus)
         form_v.addRow("Target V:", row_target)
 
+        row_pgavdac = QHBoxLayout()
         self.lbl_pgavdac = QLabel("PGAvdac: 1x (auto)")
-        form_v.addRow(self.lbl_pgavdac)
+        self.lbl_vdac_dot = QLabel("●")
+        self.lbl_vdac_dot.setStyleSheet("color: grey; font-size: 14px;")
+        self.lbl_vdac_dot.setToolTip("VDAC sin confirmar")
+        row_pgavdac.addWidget(self.lbl_pgavdac, 1)
+        row_pgavdac.addWidget(self.lbl_vdac_dot)
+        form_v.addRow(row_pgavdac)
         vbox.addWidget(grp_vdac)
 
         # ── PGA group ─────────────────────────────────────────────────────────
@@ -165,9 +170,9 @@ class SlaveTab(QWidget):
             "FIR command: lp/hp/bp/bs, firls(...), remez(...), firwin(...), firwin2(...), or b=[...]"
         )
         row_fir_cmd.addWidget(self.ef_fir, 1)
-        btn_apply_fir = QPushButton("Apply")
-        btn_apply_fir.clicked.connect(self._on_fir_apply)
-        row_fir_cmd.addWidget(btn_apply_fir)
+        self.btn_apply_fir = QPushButton("Apply")
+        self.btn_apply_fir.clicked.connect(self._on_fir_toggle)
+        row_fir_cmd.addWidget(self.btn_apply_fir)
         vbox_fir.addLayout(row_fir_cmd)
 
         row_fir_dc = QHBoxLayout()
@@ -175,12 +180,12 @@ class SlaveTab(QWidget):
         self.cb_dc_remove.toggled.connect(
             lambda v: self.dc_remove_toggled.emit(self.ch_index, v)
         )
-        btn_remove_fir = QPushButton("Remove filter")
-        btn_remove_fir.clicked.connect(lambda: self.fir_remove.emit(self.ch_index))
+        self.lbl_dc_val = QLabel("DC: --")
+        self.lbl_dc_val.setStyleSheet("font-size: 9px; color: #888;")
         self.lbl_fir_status = QLabel("No filter")
         self.lbl_fir_status.setStyleSheet("font-size: 9px;")
         row_fir_dc.addWidget(self.cb_dc_remove)
-        row_fir_dc.addWidget(btn_remove_fir)
+        row_fir_dc.addWidget(self.lbl_dc_val)
         row_fir_dc.addWidget(self.lbl_fir_status, 1)
         vbox_fir.addLayout(row_fir_dc)
         vbox.addWidget(grp_fir)
@@ -193,10 +198,19 @@ class SlaveTab(QWidget):
         self.btn_test = QPushButton(f"Test Slave {self.ch_index}")
         self.btn_test.setEnabled(False)
         self.btn_test.clicked.connect(lambda: self.test_requested.emit(self.ch_index))
+        self.spn_test_secs = QDoubleSpinBox()
+        self.spn_test_secs.setRange(0.5, 10.0)
+        self.spn_test_secs.setValue(1.5)
+        self.spn_test_secs.setSingleStep(0.5)
+        self.spn_test_secs.setDecimals(1)
+        self.spn_test_secs.setSuffix(" s")
+        self.spn_test_secs.setFixedWidth(68)
+        self.spn_test_secs.setToolTip("Duración del test")
         self.lbl_health_dot = QLabel("●")
         self.lbl_health_dot.setStyleSheet("color: grey; font-size: 16px;")
         self.lbl_health_txt = QLabel("No test")
         row_test.addWidget(self.btn_test)
+        row_test.addWidget(self.spn_test_secs)
         row_test.addWidget(self.lbl_health_dot)
         row_test.addWidget(self.lbl_health_txt, 1)
         vbox_test.addLayout(row_test)
@@ -210,6 +224,11 @@ class SlaveTab(QWidget):
         row_ver.addWidget(btn_ver)
         row_ver.addWidget(btn_latency)
         vbox_test.addLayout(row_ver)
+
+        btn_send_all = QPushButton("⬆ Enviar configuración")
+        btn_send_all.setToolTip("Envía PGAvdac, VDAC y PGA de una sola vez")
+        btn_send_all.clicked.connect(lambda: self.send_all_requested.emit(self.ch_index))
+        vbox_test.addWidget(btn_send_all)
         vbox.addWidget(grp_test)
 
         # ── Stats group ───────────────────────────────────────────────────────
@@ -300,10 +319,15 @@ class SlaveTab(QWidget):
         gain = config.GAIN_CODES[pga_code]
         return float(vdac_byte) * config.VDAC_STEP * gain
 
+    # Ganancia máxima del PGAvdac — valores más altos añaden demasiado ruido
+    _PGAVDAC_MAX_GAIN = 8
+
     @staticmethod
     def _build_vref_values() -> list[tuple[float, int, int]]:
         values: list[tuple[float, int, int]] = []
         for pga_code, gain in enumerate(config.GAIN_CODES):
+            if gain > SlaveTab._PGAVDAC_MAX_GAIN:
+                continue
             for byte in range(config.VDAC_MIN, config.VDAC_MAX + 1):
                 values.append((byte * config.VDAC_STEP * gain, byte, pga_code))
         values.sort(key=lambda item: (item[0], config.GAIN_CODES[item[2]], item[1]))
@@ -311,37 +335,29 @@ class SlaveTab(QWidget):
 
     def _set_vref_widgets(self, vdac_byte: int, pga_code: int) -> None:
         self._pgavdac_code = pga_code
+        self._vdac_byte    = vdac_byte
         target_v = self._vref_output_v(vdac_byte, pga_code)
-
-        self.spn_vdac.blockSignals(True)
-        self.spn_vdac.setValue(vdac_byte)
-        self.spn_vdac.blockSignals(False)
 
         self.ef_target_v.blockSignals(True)
         self.ef_target_v.setValue(target_v)
         self.ef_target_v.blockSignals(False)
 
-        self.lbl_vdac_v.setText(f"{vdac_byte * config.VDAC_STEP:.3f} V")
         step_v = config.VDAC_STEP * config.GAIN_CODES[pga_code]
         self.lbl_pgavdac.setText(
             f"PGAvdac: {config.GAIN_NAMES[pga_code]} (auto, step {step_v:.3f} V)"
         )
 
     def _apply_vref_setting(self, vdac_byte: int, pga_code: int) -> None:
-        old_byte = self.spn_vdac.value()
-        old_pga = self._pgavdac_code
+        old_byte = self._vdac_byte
+        old_pga  = self._pgavdac_code
         self._set_vref_widgets(vdac_byte, pga_code)
         if pga_code != old_pga:
             self.pgavdac_changed.emit(self.ch_index, pga_code)
         if vdac_byte != old_byte:
             self.vdac_changed.emit(self.ch_index, vdac_byte)
 
-    def _on_vdac_spin_changed(self, value: int) -> None:
-        self._set_vref_widgets(value, self._pgavdac_code)
-        self.vdac_changed.emit(self.ch_index, value)
-
     def _adjust_vref(self, delta: int) -> None:
-        current = self._vref_output_v(self.spn_vdac.value(), self._pgavdac_code)
+        current = self._vref_output_v(self._vdac_byte, self._pgavdac_code)
         eps = 1e-12
         if delta > 0:
             candidates = [item for item in self._vref_values if item[0] > current + eps]
@@ -359,10 +375,12 @@ class SlaveTab(QWidget):
 
     @staticmethod
     def _calc_vdac(target_v: float) -> tuple[int, int]:
-        """Return the closest representable (vdac_byte, pgavdac_code)."""
+        """Return the closest representable (vdac_byte, pgavdac_code) within gain limit."""
         target_v = max(0.0, target_v)
         best: tuple[float, float, int, int] | None = None
         for pcode, gain in enumerate(config.GAIN_CODES):
+            if gain > SlaveTab._PGAVDAC_MAX_GAIN:
+                continue
             byte = round(target_v / (gain * config.VDAC_STEP))
             byte = min(config.VDAC_MAX, max(config.VDAC_MIN, byte))
             actual = byte * config.VDAC_STEP * gain
@@ -376,12 +394,21 @@ class SlaveTab(QWidget):
         return byte, pcode
 
     def _on_pga_changed(self, index: int) -> None:
+        # Guardar Target V del gain anterior y restaurar el del nuevo
+        self._gain_target_v[self._prev_pga_code] = self.ef_target_v.value()
+        if index in self._gain_target_v:
+            byte, pcode = self._calc_vdac(self._gain_target_v[index])
+            self._apply_vref_setting(byte, pcode)
+        self._prev_pga_code = index
         self.lbl_pga_actual.setText(f"Current: {config.GAIN_NAMES[index]}")
         self.pga_changed.emit(self.ch_index, index)
 
-    def _on_fir_apply(self) -> None:
-        cmd = self.ef_fir.text().strip()
-        self.fir_apply.emit(self.ch_index, cmd)
+    def _on_fir_toggle(self) -> None:
+        if self._fir_active:
+            self.fir_remove.emit(self.ch_index)
+        else:
+            cmd = self.ef_fir.text().strip()
+            self.fir_apply.emit(self.ch_index, cmd)
 
     def _refresh_dbg_ports(self) -> None:
         current = self.dd_dbg_port.currentText()
@@ -428,10 +455,12 @@ class SlaveTab(QWidget):
     # ── Slots called by main_window ──────────────────────────────────────────
 
     def set_alias(self, alias: str) -> None:
-        """Set alias text without triggering the changed signal."""
-        self.ef_alias.blockSignals(True)
-        self.ef_alias.setText(alias)
-        self.ef_alias.blockSignals(False)
+        """Select the matching type in the dropdown without triggering the signal."""
+        self.dd_type.blockSignals(True)
+        idx = self.dd_type.findText(alias)
+        if idx >= 0:
+            self.dd_type.setCurrentIndex(idx)
+        self.dd_type.blockSignals(False)
 
     def set_connected(self, connected: bool) -> None:
         """Enable/disable test button based on master connection."""
@@ -459,8 +488,28 @@ class SlaveTab(QWidget):
         else:
             self.lbl_psoc.setText("PSoC: not detected")
 
+    def set_vdac_lock(self, state: int) -> None:
+        """state: 0=unknown, 1=ok, 2=pending."""
+        if state == 1:
+            self.lbl_vdac_dot.setStyleSheet("color: #21a33a; font-size: 14px;")
+            self.lbl_vdac_dot.setToolTip("VDAC confirmado por PSoC")
+        elif state == 2:
+            self.lbl_vdac_dot.setStyleSheet("color: #d71920; font-size: 14px;")
+            self.lbl_vdac_dot.setToolTip("VDAC pendiente")
+        else:
+            self.lbl_vdac_dot.setStyleSheet("color: grey; font-size: 14px;")
+            self.lbl_vdac_dot.setToolTip("VDAC sin confirmar")
+
+    def set_dc_value(self, v: Optional[float]) -> None:
+        if v is None:
+            self.lbl_dc_val.setText("DC: --")
+        else:
+            self.lbl_dc_val.setText(f"DC: {v * 1000:.1f} mV")
+
     def set_fir_status(self, status: str) -> None:
         self.lbl_fir_status.setText(status)
+        self._fir_active = (status != "No filter")
+        self.btn_apply_fir.setText("Remove" if self._fir_active else "Apply")
 
     def set_health(self, health: int) -> None:
         """health: 0=unknown, 1=ok, 2=fail."""
@@ -474,14 +523,24 @@ class SlaveTab(QWidget):
             self.lbl_health_dot.setStyleSheet("color: grey; font-size: 16px;")
             self.lbl_health_txt.setText("No test")
 
+    @property
+    def vdac_byte(self) -> int:
+        return self._vdac_byte
+
+    def get_gain_target_v(self) -> dict[int, float]:
+        return dict(self._gain_target_v)
+
+    def set_gain_target_v(self, mapping: dict[int, float]) -> None:
+        self._gain_target_v.update(mapping)
+
     def set_vdac(self, byte_val: int) -> None:
-        """Update VDAC spinner without re-emitting (to avoid feedback loop)."""
+        """Update VDAC without re-emitting (to avoid feedback loop)."""
         self._set_vref_widgets(byte_val, self._pgavdac_code)
 
     def set_pgavdac(self, code: int) -> None:
         """Update PGAvdac state without re-emitting."""
         if 0 <= code < len(config.GAIN_CODES):
-            self._set_vref_widgets(self.spn_vdac.value(), code)
+            self._set_vref_widgets(self._vdac_byte, code)
 
     def set_pga(self, code: int) -> None:
         """Update PGA dropdown without re-emitting."""

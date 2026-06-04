@@ -10,6 +10,7 @@ from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -142,23 +143,26 @@ class StreamTab(QWidget):
         self.btn_start_stop.clicked.connect(self._on_start_stop)
         vbox_stream.addWidget(self.btn_start_stop)
 
-        row_batches = QHBoxLayout()
-        row_batches.addWidget(QLabel("Batches:"))
-        self.spn_batches = QSpinBox()
-        self.spn_batches.setRange(1, 65535)
-        self.spn_batches.setValue(80)
-        self.spn_batches.valueChanged.connect(self._update_batch_info)
-        row_batches.addWidget(self.spn_batches)
-        row_batches.addStretch()
-        vbox_stream.addLayout(row_batches)
+        row_secs = QHBoxLayout()
+        row_secs.addWidget(QLabel("Duración:"))
+        self.spn_secs = QDoubleSpinBox()
+        self.spn_secs.setRange(0.1, 15.0)
+        self.spn_secs.setValue(2.4)
+        self.spn_secs.setSingleStep(0.5)
+        self.spn_secs.setDecimals(1)
+        self.spn_secs.setSuffix(" s")
+        self.spn_secs.valueChanged.connect(self._update_batch_info)
+        self.spn_secs.valueChanged.connect(self._update_mem_warn)
+        row_secs.addWidget(self.spn_secs)
+        row_secs.addStretch()
+        vbox_stream.addLayout(row_secs)
 
-        self.lbl_batch_info = QLabel("80 bat → 2400 smp ≈ 2.4 s")
+        self.lbl_batch_info = QLabel("")
         self.lbl_batch_info.setStyleSheet("font-size: 9px;")
         vbox_stream.addWidget(self.lbl_batch_info)
 
         self.lbl_mem_warn = QLabel("")
         vbox_stream.addWidget(self.lbl_mem_warn)
-        self.spn_batches.valueChanged.connect(self._update_mem_warn)
 
         row_chk = QHBoxLayout()
         self.cb_debug = QCheckBox("Debug")
@@ -250,8 +254,8 @@ class StreamTab(QWidget):
         vbox.addWidget(grp_disp)
 
         vbox.addStretch(1)
-        self._update_batch_info(self.spn_batches.value())
-        self._update_mem_warn(self.spn_batches.value())
+        self._update_batch_info()
+        self._update_mem_warn()
         self.update_channel_visibility(self.spn_slaves.value())
 
     # ── Internal handlers ─────────────────────────────────────────────────────
@@ -278,26 +282,30 @@ class StreamTab(QWidget):
         n = self.spn_slaves.value() or (config.MAX_NODES - 1)
         self.arm_requested.emit(n)
 
+    def batches_value(self) -> int:
+        """Convierte segundos al batch count más cercano."""
+        return max(1, round(self.spn_secs.value() * config.FS / config.SAMPLES_PER_BATCH))
+
     def _on_start_stop(self) -> None:
         if self._streaming:
             self.stop_requested.emit()
         else:
-            n = self.spn_batches.value()
-            self.start_requested.emit(n)
+            self.start_requested.emit(self.batches_value())
 
     def _on_save(self) -> None:
         name = self.ef_save_name.text().strip() or config.DEFAULT_SAVE_NAME
         self.save_requested.emit(name)
 
-    def _update_batch_info(self, n: int) -> None:
+    def _update_batch_info(self, _: float = 0.0) -> None:
+        n = self.batches_value()
         smp = n * config.SAMPLES_PER_BATCH
         dur = smp / config.FS
-        self.lbl_batch_info.setText(f"{n} bat → {smp} smp ≈ {dur:.1f} s")
+        self.lbl_batch_info.setText(f"→ {n} bat / {smp} smp / {dur:.1f} s")
         if hasattr(self, "spn_disp_secs") and hasattr(self, "spn_max_buf_secs"):
             self._sync_display_limits(n)
 
-    def _update_mem_warn(self, n: int) -> None:
-        # SampleBytes = 10 bytes + 4 bytes timestamp per batch; ESP32 heap ~80 KB
+    def _update_mem_warn(self, _: float = 0.0) -> None:
+        n = self.batches_value()
         store_kb = (n * config.SAMPLES_PER_BATCH * 10 + n * 4) // 1024
         if store_kb > 80:
             self.lbl_mem_warn.setText(

@@ -12,7 +12,8 @@ import config
 
 
 # Global pyqtgraph appearance settings (applied once at import time)
-pg.setConfigOptions(antialias=False, useOpenGL=False, background="k", foreground="w")
+pg.setConfigOptions(antialias=False, useOpenGL=False, background="k", foreground="w",
+                    leftButtonPan=True)
 
 
 class PlotArea(QWidget):
@@ -55,13 +56,19 @@ class PlotArea(QWidget):
 
     def set_active_nodes(self, node_indices: list[int]) -> None:
         """
-        Show only the given node indices (0-based, matching NodeData.node_index).
-
-        Hides all other plots and relays out the visible ones to fill the panel.
+        Show only the given node indices in the specified order (Hammer→Geo1→Geo2).
+        Reorders the layout widgets to match.
         """
         self._n_active = len(node_indices)
-        for i, pw in enumerate(self._plots):
-            pw.setVisible(i in node_indices)
+        # Quitar todos del layout sin destruirlos
+        for pw in self._plots:
+            self._layout.removeWidget(pw)
+            pw.setVisible(False)
+        # Re-añadir en el orden deseado
+        for idx in node_indices:
+            if 0 <= idx < len(self._plots):
+                self._layout.addWidget(self._plots[idx])
+                self._plots[idx].setVisible(True)
 
     def update_plots(
         self,
@@ -168,3 +175,8 @@ class PlotArea(QWidget):
 
         # Initially hide the master slot (index 0); master is gateway only
         self._plots[0].setVisible(False)
+
+        # Acoplar solo el eje X entre plots de esclavos (Y independiente por ganancias)
+        ref = self._plots[1]
+        for pw in self._plots[2:]:
+            pw.setXLink(ref)

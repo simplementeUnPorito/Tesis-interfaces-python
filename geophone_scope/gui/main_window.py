@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         self._discover_expected = 0
         self._drift_probe_t0: dict[int, float] = {}
         self._mac_partial: dict[int, dict[int, int]] = {}   # node → {sub→bytes}
+        self._test_timers:  dict[int, QTimer]        = {}   # ch_index → timer activo
         self._loading_settings = False
         self._dark_mode  = True
         self._settings = QSettings("Tesis", "Geophone Scope")
@@ -172,7 +173,8 @@ class MainWindow(QMainWindow):
         st.disp_secs_changed.connect(self._on_disp_secs_changed)
         st.max_buf_secs_changed.connect(self._on_max_buf_secs_changed)
         st.dd_port.currentTextChanged.connect(self._save_settings)
-        st.spn_batches.valueChanged.connect(self._save_settings)
+        st.spn_secs.valueChanged.connect(self._save_settings)
+        st.spn_secs.valueChanged.connect(self._on_capture_secs_changed)
         st.ef_save_name.textChanged.connect(self._save_settings)
 
         # ── Wire SlaveTab signals ─────────────────────────────────────────────
@@ -192,6 +194,8 @@ class MainWindow(QMainWindow):
             slave_tab.latency_requested.connect(self._on_latency_probe)
             slave_tab.dd_dbg_port.currentTextChanged.connect(self._save_settings)
             slave_tab.ef_fir.textChanged.connect(self._save_settings)
+            slave_tab.spn_test_secs.valueChanged.connect(self._on_capture_secs_changed)
+            slave_tab.send_all_requested.connect(self._on_send_all)
 
         # Initial plot visibility
         self._update_plot_visibility()
@@ -362,6 +366,8 @@ class MainWindow(QMainWindow):
                 expected = pending[0] if pending else self._data[node_idx].pga_code
                 gain = config.GAIN_NAMES[expected] if 0 <= expected < len(config.GAIN_NAMES) else str(expected)
                 self._logger.log_human(f"S{node_idx} PGA sin lock: {gain}")
+        if ack_cmd == config.SUBCMD_VDAC and 1 <= node_idx <= len(self._slave_tabs):
+            self._slave_tabs[node_idx - 1].set_vdac_lock(1 if ack_val else 2)
         self._logger.log_machine(
             f"ACK node={node_idx} cmd={ack_cmd:#04x} val={ack_val}"
         )
@@ -494,6 +500,8 @@ class MainWindow(QMainWindow):
                 nd.format_latency_stats(),
                 nd.psoc_ok,
             )
+            dc_v = float(np.mean(nd.raw_buf)) if len(nd.raw_buf) > 10 else None
+            self._slave_tabs[i - 1].set_dc_value(dc_v)
             self._stream_tab.set_node_data_text(
                 i,
                 f"{config.NODE_NAMES[i]}: {nd.batch_count} bat ({nd.total_samples} smp)",
@@ -515,6 +523,15 @@ class MainWindow(QMainWindow):
         self._send(encode_directed(node_idx, sub_cmd, param))
 
     # ── Stream / sync callbacks ───────────────────────────────────────────────
+
+    def _on_capture_secs_changed(self, secs: float) -> None:
+        """Sincroniza el valor de segundos entre el stream tab y todos los slave tabs."""
+        for w in [self._stream_tab.spn_secs] + [st.spn_test_secs for st in self._slave_tabs]:
+            if abs(w.value() - secs) > 1e-6:
+                w.blockSignals(True)
+                w.setValue(self._clamp_f(secs, w.minimum(), w.maximum()))
+                w.blockSignals(False)
+        self._save_settings()
 
     @pyqtSlot(int)
     def _on_arm(self, n_slaves: int) -> None:
@@ -625,6 +642,8 @@ class MainWindow(QMainWindow):
     def _on_vdac_changed(self, ch_index: int, vdac_byte: int) -> None:
         self._data[ch_index].vdac_byte = vdac_byte
         self._save_settings()
+        if 1 <= ch_index <= len(self._slave_tabs):
+            self._slave_tabs[ch_index - 1].set_vdac_lock(2)  # pendiente
         if not self._connected:
             return
         self._directed(ch_index, config.SUBCMD_VDAC, vdac_byte)
@@ -675,9 +694,19 @@ class MainWindow(QMainWindow):
                 self._slave_tabs[ch_index - 1].set_fir_status(status[:80])
             return
         nd.filt_b   = b
-        nd.filt_zi  = None
         nd.filt_cmd = cmd_str
+
+        # Aplicar el filtro a las muestras actuales en buffer
         nd.filt_buf.clear()
+        if nd.raw_buf:
+            arr = np.array(nd.raw_buf, dtype=np.float64)
+            filtered, nd.filt_zi = signal_proc.fir_filter(b, arr, None)
+            if nd.dc_remove and len(arr) > 1:
+                filtered = filtered - float(np.mean(arr))
+            nd.filt_buf.extend(filtered.astype(np.float32).tolist())
+        else:
+            nd.filt_zi = None
+
         self._save_settings()
         n_taps = len(b)
         status = f"{n_taps} taps  {cmd_str}"
@@ -742,6 +771,22 @@ class MainWindow(QMainWindow):
     def _on_test(self, ch_index: int) -> None:
         if not self._connected:
             return
+
+        # Segunda pulsación mientras el test está corriendo → cancelar y dar por OK
+        if ch_index in self._test_timers:
+            self._test_timers.pop(ch_index).stop()
+            try:
+                self._directed(ch_index, config.SUBCMD_DEBUG, 0)
+            except Exception:
+                pass
+            nd = self._data[ch_index]
+            nd.health = 1
+            if ch_index <= len(self._slave_tabs):
+                self._slave_tabs[ch_index - 1].set_health(1)
+            self._logger.log_human(f"Test Slave {ch_index}: OK (cancelado)")
+            self._logger.log_machine(f"TEST_CANCEL ch={ch_index}")
+            return
+
         self._logger.log_human(f"Test Slave {ch_index} requested")
         self._logger.log_machine(f"TEST ch={ch_index}")
         nd = self._prepare_node_capture(ch_index)
@@ -751,11 +796,11 @@ class MainWindow(QMainWindow):
             self._slave_tabs[ch_index - 1].set_health(0)
         init_count = nd.batch_count
         self._cmd16(config.CMD_SET_RECLEN, 0)
-        # Enable debug stream from this slave briefly
         self._directed(ch_index, config.SUBCMD_DEBUG, 1)
         self._cmd(config.CMD_STREAM, 1)
 
         def _check() -> None:
+            self._test_timers.pop(ch_index, None)
             gained = nd.batch_count - init_count
             ok = gained >= 3
             nd.health = 1 if ok else 2
@@ -767,25 +812,46 @@ class MainWindow(QMainWindow):
             else:
                 self._logger.log_human(f"Test Slave {ch_index}: OK ({gained} batches)")
             self._logger.log_machine(f"TEST_RESULT ch={ch_index} batches={gained} ok={int(ok)}")
-            # Turn off debug
             try:
                 self._directed(ch_index, config.SUBCMD_DEBUG, 0)
             except Exception:
                 pass
 
-        # Schedule check after 1.5 s
-        QTimer.singleShot(1500, _check)
+        test_ms = 1500
+        if ch_index <= len(self._slave_tabs):
+            test_ms = int(self._slave_tabs[ch_index - 1].spn_test_secs.value() * 1000)
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(_check)
+        timer.start(test_ms)
+        self._test_timers[ch_index] = timer
 
     @pyqtSlot(int)
     def _on_ver(self, ch_index: int) -> None:
         if not self._connected:
             return
-        n = self._stream_tab.spn_batches.value()
+        n = self._stream_tab.batches_value()
         self._prepare_node_capture(ch_index)
         self._cmd16(config.CMD_SET_RECLEN, n)
         self._directed(ch_index, config.SUBCMD_VER, 1)
         self._logger.log_human(f"VER Slave {ch_index} n={n} batches")
         self._logger.log_machine(f"VER ch={ch_index} n={n}")
+
+    @pyqtSlot(int)
+    def _on_send_all(self, ch_index: int) -> None:
+        """Envía PGAvdac, VDAC y PGA de una sola vez para configuración rápida."""
+        if not self._connected:
+            return
+        nd = self._data[ch_index]
+        st = self._slave_tabs[ch_index - 1] if ch_index <= len(self._slave_tabs) else None
+        self._directed(ch_index, config.SUBCMD_PGAVDAC, nd.pgavdac)
+        self._directed(ch_index, config.SUBCMD_VDAC,    nd.vdac_byte)
+        self._directed(ch_index, config.SUBCMD_PGA,     nd.pga_code)
+        if st:
+            st.set_pga_lock(2)
+            st.set_vdac_lock(2)
+        self._logger.log_human(f"S{ch_index} Enviar todo: pgavdac={nd.pgavdac} vdac={nd.vdac_byte} pga={nd.pga_code}")
+        self._logger.log_machine(f"SEND_ALL ch={ch_index} pgavdac={nd.pgavdac} vdac={nd.vdac_byte} pga={nd.pga_code}")
 
     @pyqtSlot(int)
     def _on_latency_probe(self, ch_index: int) -> None:
@@ -849,7 +915,7 @@ class MainWindow(QMainWindow):
         if port and port != "(no ports)":
             s.setValue("stream/usb_port", port)
         s.setValue("stream/n_slaves", st.spn_slaves.value())
-        s.setValue("stream/batches", st.spn_batches.value())
+        s.setValue("stream/secs", st.spn_secs.value())
         s.setValue("stream/debug_enabled", st.cb_debug.isChecked())
         s.setValue("stream/multi_start", st.cb_multi.isChecked())
         s.setValue("stream/save_name", st.ef_save_name.text().strip())
@@ -870,7 +936,9 @@ class MainWindow(QMainWindow):
             s.setValue(prefix + "notch_enabled", slave_tab.cb_notch.isChecked())
             s.setValue(prefix + "notch_mu", slave_tab.spn_notch_mu.value())
             s.setValue(prefix + "notch_harm", slave_tab.spn_notch_harm.value())
-            s.setValue(prefix + "vdac_byte", slave_tab.spn_vdac.value())
+            s.setValue(prefix + "vdac_byte", slave_tab.vdac_byte)
+            for code, val in slave_tab.get_gain_target_v().items():
+                s.setValue(prefix + f"gain_target_v/{code}", float(val))
             s.setValue(prefix + "pgavdac_code", slave_tab._pgavdac_code)
             s.setValue(prefix + "pga_code", slave_tab.dd_pga.currentIndex())
 
@@ -890,8 +958,8 @@ class MainWindow(QMainWindow):
             n_slaves = self._setting_int("stream/n_slaves", st.spn_slaves.value())
             st.spn_slaves.setValue(self._clamp(n_slaves, st.spn_slaves.minimum(), st.spn_slaves.maximum()))
 
-            batches = self._setting_int("stream/batches", st.spn_batches.value())
-            st.spn_batches.setValue(self._clamp(batches, st.spn_batches.minimum(), st.spn_batches.maximum()))
+            cap_secs = self._setting_float("stream/secs", st.spn_secs.value())
+            st.spn_secs.setValue(self._clamp_f(cap_secs, st.spn_secs.minimum(), st.spn_secs.maximum()))
 
             st.cb_debug.setChecked(self._setting_bool("stream/debug_enabled", st.cb_debug.isChecked()))
             st.cb_multi.setChecked(self._setting_bool("stream/multi_start", st.cb_multi.isChecked()))
@@ -903,7 +971,7 @@ class MainWindow(QMainWindow):
             max_buf_secs = self._setting_int("stream/max_buf_secs", st.spn_max_buf_secs.value())
             st.spn_disp_secs.setValue(self._clamp(disp_secs, st.spn_disp_secs.minimum(), st.spn_disp_secs.maximum()))
             st.spn_max_buf_secs.setValue(self._clamp(max_buf_secs, st.spn_max_buf_secs.minimum(), st.spn_max_buf_secs.maximum()))
-            st._sync_display_limits(st.spn_batches.value())
+            st._sync_display_limits(st.batches_value())
 
             for node_idx in range(1, config.MAX_NODES):
                 default_visible = node_idx <= self._n_slaves
@@ -927,7 +995,7 @@ class MainWindow(QMainWindow):
 
                 fir_cmd = str(self._settings.value(prefix + "fir_cmd", "") or "")
                 slave_tab.ef_fir.setText(fir_cmd)
-                self._restore_loaded_fir(ch, fir_cmd)
+                # No se restaura el filtro al arrancar — siempre arranca sin filtro
 
                 dc_remove = self._setting_bool(prefix + "dc_remove", nd.dc_remove)
                 slave_tab.cb_dc_remove.setChecked(dc_remove)
@@ -960,6 +1028,16 @@ class MainWindow(QMainWindow):
                 nd.pgavdac = pgavdac
                 nd.vdac_byte = vdac
                 nd.pga_code = pga
+
+                # Restaurar memoria Target V por ganancia
+                gain_map: dict[int, float] = {}
+                for code in range(len(config.GAIN_CODES)):
+                    key = prefix + f"gain_target_v/{code}"
+                    if self._settings.contains(key):
+                        gain_map[code] = self._setting_float(key, 0.0)
+                if gain_map:
+                    slave_tab.set_gain_target_v(gain_map)
+                    slave_tab._prev_pga_code = pga
 
             self._on_disp_secs_changed(st.spn_disp_secs.value())
             self._on_max_buf_secs_changed(st.spn_max_buf_secs.value())
@@ -1018,6 +1096,10 @@ class MainWindow(QMainWindow):
     def _clamp(value: int, lo: int, hi: int) -> int:
         return max(lo, min(hi, int(value)))
 
+    @staticmethod
+    def _clamp_f(value: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, float(value)))
+
     def _setting_int(self, key: str, default: int) -> int:
         try:
             return int(self._settings.value(key, default))
@@ -1057,7 +1139,7 @@ class MainWindow(QMainWindow):
             save_dict: dict = {
                 "fs":           config.FS,
                 "n_slaves":     self._n_slaves,
-                "n_batches":    self._stream_tab.spn_batches.value(),
+                "n_batches":    self._stream_tab.batches_value(),
                 "save_time":    stamp,
                 "samples_per_batch": config.SAMPLES_PER_BATCH,
                 "signal_units": "V",
@@ -1128,11 +1210,17 @@ class MainWindow(QMainWindow):
                                            config.NODE_NAMES[i + 1])
 
     def _update_plot_visibility(self) -> None:
-        """Compute which node indices should be visible and tell PlotArea."""
+        """Compute visible node indices sorted by type (Hammer→Geo1→Geo2)."""
         visible_indices = [
             i for i in range(1, config.MAX_NODES)
             if self._data[i].visible and i <= self._n_slaves
         ]
+        visible_indices.sort(key=lambda i: (
+            self._TYPE_ORDER.get(
+                self._slave_tabs[i - 1].dd_type.currentText()
+                if i <= len(self._slave_tabs) else "", 99
+            )
+        ))
         self._plot_area.set_active_nodes(visible_indices)
 
     def _append_log_tab(self, line: str) -> None:
@@ -1153,13 +1241,15 @@ class MainWindow(QMainWindow):
     def _on_alias_changed(self, node_idx: int, alias: str) -> None:
         self._settings.setValue(f"alias/node{node_idx}", alias)
         self._update_tab_title(node_idx)
+        self._update_plot_visibility()   # reordenar plots al cambiar tipo
+
+    _TYPE_ORDER = {"Hammer": 0, "Geo1": 1, "Geo2": 2}
 
     def _update_tab_title(self, node_idx: int) -> None:
         if not 1 <= node_idx <= len(self._slave_tabs):
             return
         st    = self._slave_tabs[node_idx - 1]
-        alias = st.ef_alias.text().strip()
-        title = alias if alias else config.NODE_NAMES[node_idx]
+        title = st.dd_type.currentText() or config.NODE_NAMES[node_idx]
         tab_idx = self._tab_widget.indexOf(st)
         if tab_idx >= 0:
             self._tab_widget.setTabText(tab_idx, title)
