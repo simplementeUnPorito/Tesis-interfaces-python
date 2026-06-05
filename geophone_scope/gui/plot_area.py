@@ -67,7 +67,7 @@ class PlotArea(QWidget):
         # Re-añadir en el orden deseado
         for idx in node_indices:
             if 0 <= idx < len(self._plots):
-                self._layout.addWidget(self._plots[idx])
+                self._layout.addWidget(self._plots[idx], stretch=1)
                 self._plots[idx].setVisible(True)
 
     def update_plots(
@@ -171,7 +171,7 @@ class PlotArea(QWidget):
             self._raw_curves.append(rc)
             self._filt_curves.append(fc)
 
-            self._layout.addWidget(pw)
+            self._layout.addWidget(pw, stretch=1)
 
         # Initially hide the master slot (index 0); master is gateway only
         self._plots[0].setVisible(False)
