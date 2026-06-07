@@ -189,7 +189,6 @@ class MainWindow(QMainWindow):
             slave_tab.test_requested.connect(self._on_test)
             slave_tab.ver_requested.connect(self._on_ver)
             slave_tab.notch_toggled.connect(self._on_notch_toggled)
-            slave_tab.notch_mu_changed.connect(self._on_notch_mu)
             slave_tab.notch_harm_changed.connect(self._on_notch_harm)
             slave_tab.latency_requested.connect(self._on_latency_probe)
             slave_tab.dd_dbg_port.currentTextChanged.connect(self._save_settings)
@@ -291,31 +290,23 @@ class MainWindow(QMainWindow):
         if nd.total_samples % config.SAMPLES_PER_BATCH == 0:
             nd.batch_count += 1
 
-        # FIR filter
-        if nd.filt_b is not None:
-            arr = np.array([raw_val], dtype=np.float64)
-            y, nd.filt_zi = signal_proc.fir_filter(nd.filt_b, arr, nd.filt_zi)
-            filt_val = float(y[0])
-        else:
-            filt_val = raw_val
+        # FIR filter + DC removal — streamed sample-by-sample.
+        # The harmonic notch needs the *complete* capture to fit f0 and its
+        # harmonics, so it can't run incrementally: while it's enabled,
+        # _render() rebuilds filt_buf from scratch each tick (see
+        # _reprocess_filt_buf) and the live per-sample path is skipped here.
+        if not nd.notch_enabled:
+            if nd.filt_b is not None:
+                arr = np.array([raw_val], dtype=np.float64)
+                y, nd.filt_zi = signal_proc.fir_filter(nd.filt_b, arr, nd.filt_zi)
+                filt_val = float(y[0])
+            else:
+                filt_val = raw_val
 
-        # DC removal on filtered value
-        if nd.dc_remove and len(nd.raw_buf) > 1:
-            filt_val -= sum(nd.raw_buf) / len(nd.raw_buf)
+            if nd.dc_remove and len(nd.raw_buf) > 1:
+                filt_val -= sum(nd.raw_buf) / len(nd.raw_buf)
 
-        # Notch LMS
-        if nd.notch_enabled:
-            arr_in = np.array([filt_val], dtype=np.float64)
-            arr_out, nd.notch_w = signal_proc.notch_canceller(
-                arr_in, nd.notch_w,
-                fs=config.FS,
-                f0=config.NOTCH_F0,
-                n_harmonics=nd.notch_harm,
-                mu=nd.notch_mu,
-            )
-            filt_val = float(arr_out[0])
-
-        nd.filt_buf.append(filt_val)
+            nd.filt_buf.append(filt_val)
 
     def _handle_heartbeat(self, pkt: Packet) -> None:
         """Update node PGA, VDAC, master state from heartbeat."""
@@ -445,8 +436,16 @@ class MainWindow(QMainWindow):
             # Slave HELLO (b2=0x01)
             node_idx = pkt.node_id
             psoc_ok  = pkt.hello_psoc_ok
+            fs_hz    = pkt.hello_fs_hz
             if 0 <= node_idx < config.MAX_NODES:
-                self._data[node_idx].psoc_ok = psoc_ok
+                nd = self._data[node_idx]
+                nd.psoc_ok = psoc_ok
+                # El PSoC reporta su fs real (depende de cómo esté programado el
+                # front-end analógico) — confiar en eso, no en config.FS estático.
+                if fs_hz > 0 and (not nd.fs_known or nd.fs != float(fs_hz)):
+                    nd.fs = float(fs_hz)
+                    nd.fs_known = True
+                    self._stream_tab.set_fs(self._effective_fs())
             if 1 <= node_idx <= len(self._slave_tabs):
                 nd = self._data[node_idx]
                 self._slave_tabs[node_idx - 1].update_stats(
@@ -457,12 +456,26 @@ class MainWindow(QMainWindow):
                     nd.format_latency_stats(),
                     psoc_ok,
                 )
+            fs_str = f" fs={fs_hz}Hz" if fs_hz > 0 else ""
             self._logger.log_human(
-                f"HELLO slave={node_idx} psoc_ok={psoc_ok}"
+                f"HELLO slave={node_idx} psoc_ok={psoc_ok}{fs_str}"
             )
         self._logger.log_machine(
             f"STATUS node={pkt.node_id:#04x} b=[{pkt.b2},{pkt.b1},{pkt.b0}]"
         )
+
+    def _effective_fs(self) -> float:
+        """Sample rate to use for batch/duration/display/notch calculations.
+
+        The ADC rate depends on how the analog front-end / PSoC is programmed
+        and can differ from the nominal config.FS, so prefer the value reported
+        by the first slave that has sent a HELLO; fall back to config.FS until
+        any slave has reported.
+        """
+        for nd in self._data.nodes[1:]:
+            if nd.fs_known:
+                return nd.fs
+        return float(config.FS)
 
     # ── Render timer callback (main thread) ───────────────────────────────────
 
@@ -473,6 +486,12 @@ class MainWindow(QMainWindow):
         labels:      list[str]                   = []
 
         for i, nd in enumerate(self._data.nodes):
+            # The harmonic notch fits over the *complete* capture, so while
+            # streaming with it enabled, keep refitting it to the growing
+            # buffer each tick (cheap: a single small lstsq solve).
+            if nd.notch_enabled and self._streaming:
+                self._reprocess_filt_buf(i)
+
             if nd.raw_buf:
                 raw_arrays.append(np.array(nd.raw_buf, dtype=np.float32))
             else:
@@ -559,7 +578,7 @@ class MainWindow(QMainWindow):
         self._streaming = True
         self._stream_tab.set_streaming(True)
         self._stream_tab.set_sync_state("HOT_WAIT → START")
-        capture_ms = int(round(n_batches * config.SAMPLES_PER_BATCH * 1000 / config.FS))
+        capture_ms = int(round(n_batches * config.SAMPLES_PER_BATCH * 1000 / self._effective_fs()))
         self._logger.log_human(f"START store n_batches={n_batches} (~{capture_ms / 1000:.2f} s)")
         self._logger.log_machine(f"CMD START n={n_batches}")
 
@@ -626,13 +645,13 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(int)
     def _on_disp_secs_changed(self, secs: int) -> None:
-        self._plot_area.set_display_samples(secs * config.FS)
+        self._plot_area.set_display_samples(int(round(secs * self._effective_fs())))
         self._save_settings()
         self._logger.log_machine(f"dispSecs={secs}")
 
     @pyqtSlot(int)
     def _on_max_buf_secs_changed(self, secs: int) -> None:
-        self._data.resize_all(secs * config.FS)
+        self._data.resize_all(int(round(secs * self._effective_fs())))
         self._save_settings()
         self._logger.log_machine(f"maxBufSecs={secs}")
 
@@ -681,10 +700,40 @@ class MainWindow(QMainWindow):
         self._logger.log_human(f"S{ch_index} PGA→{gain}")
         self._logger.log_machine(f"PGA ch={ch_index} code={pga_code}")
 
+    def _reprocess_filt_buf(self, ch_index: int) -> None:
+        """Rebuild filt_buf from raw_buf: FIR -> DC removal -> harmonic notch.
+
+        Used whenever a stage that needs the *complete* capture changes
+        (FIR command, DC removal, notch enable/harmonics) — in particular,
+        the least-squares harmonic notch only makes sense fitted over the
+        whole buffer, so it is always (re)computed here rather than
+        sample-by-sample.
+        """
+        nd = self._data[ch_index]
+        nd.filt_buf.clear()
+        if not nd.raw_buf:
+            nd.filt_zi = None
+            return
+
+        raw = np.array(nd.raw_buf, dtype=np.float64)
+        if nd.filt_b is not None:
+            arr, nd.filt_zi = signal_proc.fir_filter(nd.filt_b, raw, None)
+        else:
+            arr = raw.copy()
+            nd.filt_zi = None
+
+        if nd.dc_remove and len(raw) > 1:
+            arr = arr - float(np.mean(raw))
+
+        if nd.notch_enabled:
+            arr = signal_proc.harmonic_notch(arr, nd.fs, config.NOTCH_F0, nd.notch_harm)
+
+        nd.filt_buf.extend(arr.astype(np.float32).tolist())
+
     @pyqtSlot(int, str)
     def _on_fir_apply(self, ch_index: int, cmd_str: str) -> None:
         nd = self._data[ch_index]
-        b  = signal_proc.compile_fir_cmd(cmd_str, config.FS)
+        b  = signal_proc.compile_fir_cmd(cmd_str, nd.fs)
         if b is None:
             err = signal_proc.last_fir_error()
             detail = f": {err}" if err else ""
@@ -695,17 +744,7 @@ class MainWindow(QMainWindow):
             return
         nd.filt_b   = b
         nd.filt_cmd = cmd_str
-
-        # Aplicar el filtro a las muestras actuales en buffer
-        nd.filt_buf.clear()
-        if nd.raw_buf:
-            arr = np.array(nd.raw_buf, dtype=np.float64)
-            filtered, nd.filt_zi = signal_proc.fir_filter(b, arr, None)
-            if nd.dc_remove and len(arr) > 1:
-                filtered = filtered - float(np.mean(arr))
-            nd.filt_buf.extend(filtered.astype(np.float32).tolist())
-        else:
-            nd.filt_zi = None
+        self._reprocess_filt_buf(ch_index)
 
         self._save_settings()
         n_taps = len(b)
@@ -721,7 +760,7 @@ class MainWindow(QMainWindow):
         nd.filt_b   = None
         nd.filt_zi  = None
         nd.filt_cmd = ""
-        nd.filt_buf.clear()
+        self._reprocess_filt_buf(ch_index)
         self._save_settings()
         if ch_index <= len(self._slave_tabs):
             self._slave_tabs[ch_index - 1].set_fir_status("No filter")
@@ -882,23 +921,19 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(int, bool)
     def _on_notch_toggled(self, ch_index: int, enabled: bool) -> None:
-        self._data[ch_index].notch_enabled = enabled
-        if not enabled:
-            self._data[ch_index].notch_w = None
+        nd = self._data[ch_index]
+        nd.notch_enabled = enabled
+        self._reprocess_filt_buf(ch_index)
         self._save_settings()
         self._logger.log_machine(f"notch ch={ch_index} enabled={int(enabled)}")
-
-    @pyqtSlot(int, float)
-    def _on_notch_mu(self, ch_index: int, mu: float) -> None:
-        self._data[ch_index].notch_mu = mu
-        self._save_settings()
 
     @pyqtSlot(int, int)
     def _on_notch_harm(self, ch_index: int, n_harm: int) -> None:
         nd = self._data[ch_index]
         if nd.notch_harm != n_harm:
             nd.notch_harm = n_harm
-            nd.notch_w    = None   # reset weights when harmonic count changes
+            if nd.notch_enabled:
+                self._reprocess_filt_buf(ch_index)
         self._save_settings()
 
     # ── Persistent settings ──────────────────────────────────────────────────
@@ -934,7 +969,6 @@ class MainWindow(QMainWindow):
             s.setValue(prefix + "fir_cmd", slave_tab.ef_fir.text().strip())
             s.setValue(prefix + "dc_remove", slave_tab.cb_dc_remove.isChecked())
             s.setValue(prefix + "notch_enabled", slave_tab.cb_notch.isChecked())
-            s.setValue(prefix + "notch_mu", slave_tab.spn_notch_mu.value())
             s.setValue(prefix + "notch_harm", slave_tab.spn_notch_harm.value())
             s.setValue(prefix + "vdac_byte", slave_tab.vdac_byte)
             for code, val in slave_tab.get_gain_target_v().items():
@@ -1001,10 +1035,6 @@ class MainWindow(QMainWindow):
                 slave_tab.cb_dc_remove.setChecked(dc_remove)
                 nd.dc_remove = dc_remove
 
-                notch_mu = self._setting_float(prefix + "notch_mu", nd.notch_mu)
-                slave_tab.spn_notch_mu.setValue(notch_mu)
-                nd.notch_mu = notch_mu
-
                 notch_harm = self._setting_int(prefix + "notch_harm", nd.notch_harm)
                 slave_tab.spn_notch_harm.setValue(
                     self._clamp(notch_harm, slave_tab.spn_notch_harm.minimum(), slave_tab.spn_notch_harm.maximum())
@@ -1066,7 +1096,7 @@ class MainWindow(QMainWindow):
             if ch_index <= len(self._slave_tabs):
                 self._slave_tabs[ch_index - 1].set_fir_status("No filter")
             return
-        b = signal_proc.compile_fir_cmd(cmd_str, config.FS)
+        b = signal_proc.compile_fir_cmd(cmd_str, nd.fs)
         if b is None:
             err = signal_proc.last_fir_error()
             if ch_index <= len(self._slave_tabs):
@@ -1137,7 +1167,7 @@ class MainWindow(QMainWindow):
         fname = os.path.join(self._data_dir, f"{clean_base}_{stamp}.mat")
         try:
             save_dict: dict = {
-                "fs":           config.FS,
+                "fs":           self._effective_fs(),
                 "n_slaves":     self._n_slaves,
                 "n_batches":    self._stream_tab.batches_value(),
                 "save_time":    stamp,
@@ -1155,6 +1185,7 @@ class MainWindow(QMainWindow):
             }
             for i, nd in enumerate(self._data.nodes):
                 prefix = f"node{i}_"
+                save_dict[prefix + "fs"] = nd.fs
                 raw_v = np.array(nd.raw_buf, dtype=np.float32)
                 filt_v = np.array(nd.filt_buf, dtype=np.float32)
                 save_dict[prefix + "raw"]        = raw_v
@@ -1169,7 +1200,6 @@ class MainWindow(QMainWindow):
                 save_dict[prefix + "fir_cmd"] = nd.filt_cmd
                 save_dict[prefix + "dc_remove"] = bool(nd.dc_remove)
                 save_dict[prefix + "notch_enabled"] = bool(nd.notch_enabled)
-                save_dict[prefix + "notch_mu"] = float(nd.notch_mu)
                 save_dict[prefix + "notch_harm"] = int(nd.notch_harm)
                 save_dict[prefix + "pga_gain"] = (
                     config.GAIN_CODES[nd.pga_code]

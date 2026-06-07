@@ -58,6 +58,7 @@ class StreamTab(QWidget):
         super().__init__(parent)
         self._connected = False
         self._streaming = False
+        self._fs: float = float(config.FS)  # live value reported by hardware; set_fs() updates it
         self._build_ui()
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -282,9 +283,17 @@ class StreamTab(QWidget):
         n = self.spn_slaves.value() or (config.MAX_NODES - 1)
         self.arm_requested.emit(n)
 
+    def set_fs(self, fs_hz: float) -> None:
+        """Update the live sample rate (reported by hardware) and refresh estimates."""
+        if fs_hz <= 0 or fs_hz == self._fs:
+            return
+        self._fs = float(fs_hz)
+        self._update_batch_info()
+        self._update_mem_warn()
+
     def batches_value(self) -> int:
         """Convierte segundos al batch count más cercano."""
-        return max(1, round(self.spn_secs.value() * config.FS / config.SAMPLES_PER_BATCH))
+        return max(1, round(self.spn_secs.value() * self._fs / config.SAMPLES_PER_BATCH))
 
     def _on_start_stop(self) -> None:
         if self._streaming:
@@ -299,7 +308,7 @@ class StreamTab(QWidget):
     def _update_batch_info(self, _: float = 0.0) -> None:
         n = self.batches_value()
         smp = n * config.SAMPLES_PER_BATCH
-        dur = smp / config.FS
+        dur = smp / self._fs
         self.lbl_batch_info.setText(f"→ {n} bat / {smp} smp / {dur:.1f} s")
         if hasattr(self, "spn_disp_secs") and hasattr(self, "spn_max_buf_secs"):
             self._sync_display_limits(n)
@@ -316,10 +325,9 @@ class StreamTab(QWidget):
         else:
             self.lbl_mem_warn.setText("")
 
-    @staticmethod
-    def _capture_secs_for_batches(n_batches: int) -> int:
+    def _capture_secs_for_batches(self, n_batches: int) -> int:
         smp = max(1, int(n_batches)) * config.SAMPLES_PER_BATCH
-        return max(1, math.ceil(smp / config.FS))
+        return max(1, math.ceil(smp / self._fs))
 
     def _sync_display_limits(self, n_batches: int) -> None:
         capture_secs = self._capture_secs_for_batches(n_batches)

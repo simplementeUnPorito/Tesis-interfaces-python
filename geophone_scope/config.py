@@ -99,7 +99,6 @@ START_LATENCY_PROBE_GAP_S: float = 0.04
 
 # ── Notch defaults ───────────────────────────────────────────────────────────
 NOTCH_F0: float         = 50.0     # Hz
-NOTCH_DEFAULT_MU: float = 0.002
 NOTCH_DEFAULT_HARM: int = 3
 
 # ── Save ─────────────────────────────────────────────────────────────────────

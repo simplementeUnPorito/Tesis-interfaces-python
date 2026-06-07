@@ -52,7 +52,6 @@ class SlaveTab(QWidget):
     ver_requested:    pyqtSignal = pyqtSignal(int)          # ch_index
     send_all_requested: pyqtSignal = pyqtSignal(int)        # ch_index
     notch_toggled:    pyqtSignal = pyqtSignal(int, bool)    # ch_index, enabled
-    notch_mu_changed: pyqtSignal = pyqtSignal(int, float)  # ch_index, mu
     notch_harm_changed: pyqtSignal = pyqtSignal(int, int)  # ch_index, n_harm
     latency_requested: pyqtSignal = pyqtSignal(int)        # ch_index
 
@@ -167,7 +166,8 @@ class SlaveTab(QWidget):
         self.ef_fir = QLineEdit()
         self.ef_fir.setPlaceholderText("firls(73,(0,1,2,3,4,5),(0,0,1,1,0,0),fs=FS)")
         self.ef_fir.setToolTip(
-            "FIR command: lp/hp/bp/bs, firls(...), remez(...), firwin(...), firwin2(...), or b=[...]"
+            "FIR command: lp/hp/bp/bs(=sb), firls(...), remez(...), firwin(...), firwin2(...), or b=[...]\n"
+            "bs/sb accepts <low> <high> or a single <center> (±5 Hz notch), e.g. \"sb 240\""
         )
         row_fir_cmd.addWidget(self.ef_fir, 1)
         self.btn_apply_fir = QPushButton("Apply")
@@ -246,27 +246,21 @@ class SlaveTab(QWidget):
         vbox.addWidget(grp_stats)
 
         # ── Notch 50 Hz group ─────────────────────────────────────────────────
-        grp_notch = QGroupBox("50 Hz Notch Canceller (LMS)")
+        grp_notch = QGroupBox("50 Hz Notch (Least-Squares Fit)")
         vbox_notch = QVBoxLayout(grp_notch)
 
         self.cb_notch = QCheckBox("Enable")
+        self.cb_notch.setToolTip(
+            "Fits f0 and its harmonics to the complete captured buffer by\n"
+            "linear least squares and subtracts them — recomputed over the\n"
+            "whole capture each time (no step size, no convergence transient)."
+        )
         self.cb_notch.toggled.connect(
             lambda v: self.notch_toggled.emit(self.ch_index, v)
         )
         vbox_notch.addWidget(self.cb_notch)
 
         row_notch_params = QHBoxLayout()
-        row_notch_params.addWidget(QLabel("µ:"))
-        self.spn_notch_mu = QDoubleSpinBox()
-        self.spn_notch_mu.setRange(1e-6, 1.0)
-        self.spn_notch_mu.setDecimals(5)
-        self.spn_notch_mu.setSingleStep(0.0005)
-        self.spn_notch_mu.setValue(config.NOTCH_DEFAULT_MU)
-        self.spn_notch_mu.valueChanged.connect(
-            lambda v: self.notch_mu_changed.emit(self.ch_index, v)
-        )
-        row_notch_params.addWidget(self.spn_notch_mu)
-
         row_notch_params.addWidget(QLabel("Harmonics:"))
         self.spn_notch_harm = QSpinBox()
         self.spn_notch_harm.setRange(1, 5)

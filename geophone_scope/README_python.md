@@ -41,7 +41,7 @@ python main.py --log-dir C:\MyLogs --data-dir C:\MyData
 | `protocol.py` | Packet encode/decode |
 | `serial_worker.py` | Background QThread for serial I/O |
 | `debug_port.py` | Background QThread for slave debug UART |
-| `signal_proc.py` | FIR filter, DC removal, LMS notch |
+| `signal_proc.py` | FIR filter, DC removal, least-squares harmonic notch |
 | `data_store.py` | Per-node circular buffers + stats |
 | `logger.py` | Dual human/machine log files |
 | `gui/main_window.py` | QMainWindow — wires everything together |

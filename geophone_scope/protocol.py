@@ -105,6 +105,11 @@ class Packet:
         return bool(self.b1)
 
     @property
+    def hello_fs_hz(self) -> int:
+        """Sample rate reported in a slave HELLO packet (b0 = fs/100 Hz, 0 = unknown)."""
+        return self.b0 * 100
+
+    @property
     def hello_mac_sub(self) -> int:
         """MAC sub-type (0x02/0x03/0x04) for MAC byte pairs."""
         return self.b2

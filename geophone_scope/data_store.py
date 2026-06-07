@@ -31,10 +31,8 @@ class NodeData:
         self.filt_zi:  Optional[object] = None   # numpy filter state
         self.filt_cmd: str               = ""
 
-        # Notch (LMS adaptive) state
-        self.notch_w:        Optional[object] = None  # weight vector
+        # Notch (least-squares harmonic fit, recomputed over the full capture)
         self.notch_enabled:  bool  = False
-        self.notch_mu:       float = config.NOTCH_DEFAULT_MU
         self.notch_harm:     int   = config.NOTCH_DEFAULT_HARM
 
         # DC removal
@@ -45,6 +43,11 @@ class NodeData:
         self.vdac_byte: int = 128
         self.pgavdac:   int = 0
         self.psoc_ok:   Optional[bool] = None   # None until first HELLO
+
+        # ADC sample rate — depends on the analog front-end / PSoC programming,
+        # so it must come from the hardware (HELLO b0=fs/100), not a static constant.
+        self.fs:        float = float(config.FS)  # nominal default until reported
+        self.fs_known:  bool  = False              # True once a HELLO reported fs > 0
 
         # Batch / statistics
         self.batch_count:     int = 0
@@ -86,7 +89,6 @@ class NodeData:
         self.raw_buf.clear()
         self.filt_buf.clear()
         self.filt_zi    = None
-        self.notch_w    = None
         self.batch_count = 0
         self.total_samples = 0
         self.got_first   = False

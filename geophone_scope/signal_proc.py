@@ -1,4 +1,4 @@
-"""signal_proc.py — FIR filter, DC removal, and LMS adaptive notch helpers."""
+"""signal_proc.py — FIR filter, DC removal, and harmonic-notch helpers."""
 
 from __future__ import annotations
 
@@ -66,7 +66,8 @@ def compile_fir_cmd(cmd: str, fs: float) -> Optional[np.ndarray]:
         lp <cutoff>            — low-pass, e.g. "lp 200"
         hp <cutoff>            — high-pass, e.g. "hp 10"
         bp <low> <high>        — band-pass, e.g. "bp 10 400"
-        bs <low> <high>        — band-stop, e.g. "bs 45 55"
+        bs/sb <low> <high>     — band-stop / notch, e.g. "bs 45 55"
+        bs/sb <center>         — band-stop / notch, ±5 Hz around center, e.g. "sb 240"
         numtaps <n> lp <f>     — explicit tap count + low-pass
         firls(..., fs=FS)      — scipy.signal.firls expression
         remez(..., fs=FS)      — scipy.signal.remez expression
@@ -103,8 +104,15 @@ def compile_fir_cmd(cmd: str, fs: float) -> Optional[np.ndarray]:
         elif ftype in ("bp", "bandpass"):
             low, high = float(parts[1]), float(parts[2])
             b = firwin(n_taps, [low, high], pass_zero=False, fs=fs)
-        elif ftype in ("bs", "bandstop"):
-            low, high = float(parts[1]), float(parts[2])
+        elif ftype in ("bs", "bandstop", "sb", "stopband", "notch"):
+            freqs = [float(p) for p in parts[1:]]
+            if len(freqs) == 1:
+                half_bw = 5.0  # Hz; banda total = 10 Hz alrededor del centro
+                low, high = freqs[0] - half_bw, freqs[0] + half_bw
+            elif len(freqs) >= 2:
+                low, high = freqs[0], freqs[1]
+            else:
+                raise ValueError("bs/sb necesita <centro> o <low> <high>")
             b = firwin(n_taps, [low, high], fs=fs)
         else:
             return None
@@ -224,6 +232,52 @@ def _validate_fir_coeffs(result: object) -> Optional[np.ndarray]:
     return b
 
 
+def harmonic_notch(
+    x: np.ndarray,
+    fs: float,
+    f0: float,
+    n_harmonics: int,
+) -> np.ndarray:
+    """
+    Remove f0 and its harmonics from x with a one-shot least-squares fit.
+
+    The interference is modelled as a sum of cosine/sine pairs at
+    f0, 2*f0, … n_harmonics*f0. Their amplitudes are fitted to the
+    *complete* buffer x by linear least squares (a single np.linalg.lstsq
+    solve over the whole capture, not an iterative per-sample update), and
+    the fitted sinusoidal model is subtracted from x.
+
+    Mains hum sits at a known, very stable frequency, so once the whole
+    capture is available this direct fit is both exact (optimal in the
+    least-squares sense) and instantaneous — unlike LMS/NLMS, it needs no
+    step size and has no convergence transient or steady-state misadjustment.
+
+    Args:
+        x:           Input block (1-D numpy array).
+        fs:          Sample rate in Hz.
+        f0:          Fundamental frequency to cancel (Hz).
+        n_harmonics: Number of harmonics to cancel (including the fundamental).
+
+    Returns:
+        x with the fitted f0..n_harmonics*f0 sinusoids subtracted.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    n = len(x)
+    if n == 0 or n_harmonics <= 0:
+        return x.copy()
+
+    t = np.arange(n, dtype=np.float64)
+    cols = []
+    for k in range(1, n_harmonics + 1):
+        angle = 2.0 * np.pi * (k * f0) / fs * t
+        cols.append(np.cos(angle))
+        cols.append(np.sin(angle))
+    h = np.column_stack(cols)
+
+    coeffs, *_ = np.linalg.lstsq(h, x, rcond=None)
+    return x - h @ coeffs
+
+
 # ── DC removal ───────────────────────────────────────────────────────────────
 
 def dc_remove(buf: np.ndarray) -> np.ndarray:
@@ -231,58 +285,3 @@ def dc_remove(buf: np.ndarray) -> np.ndarray:
     if buf.size == 0:
         return buf
     return buf - buf.mean()
-
-
-# ── LMS adaptive notch canceller ─────────────────────────────────────────────
-
-def notch_canceller(
-    x: np.ndarray,
-    w: Optional[np.ndarray],
-    fs: float,
-    f0: float,
-    n_harmonics: int,
-    mu: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    LMS adaptive notch filter that cancels f0 and its harmonics.
-
-    The reference signal is a stack of sine/cosine pairs at f0, 2*f0, … n_harmonics*f0.
-    Filter weights are adapted sample-by-sample using the Widrow–Hoff LMS rule.
-
-    Args:
-        x:           Input block (1-D numpy array, float).
-        w:           Current weight vector (length 2*n_harmonics). Pass None to
-                     initialise with zeros.
-        fs:          Sample rate in Hz.
-        f0:          Fundamental frequency to cancel (Hz).
-        n_harmonics: Number of harmonics to cancel (including fundamental).
-        mu:          LMS step size (learning rate). Smaller = slower, more stable.
-
-    Returns:
-        (y_out, w_new) where y_out is the filtered output with harmonics
-        suppressed, and w_new is the updated weight vector.
-    """
-    n_weights = 2 * n_harmonics
-    if w is None or len(w) != n_weights:
-        w = np.zeros(n_weights, dtype=np.float64)
-
-    n     = len(x)
-    y_out = np.empty(n, dtype=np.float64)
-    t     = np.arange(n, dtype=np.float64)
-
-    # Pre-compute reference sinusoids for each harmonic
-    refs = np.empty((n_weights, n), dtype=np.float64)
-    for k in range(1, n_harmonics + 1):
-        angle = 2.0 * np.pi * (k * f0) / fs * t
-        refs[2 * (k - 1)]     = np.cos(angle)
-        refs[2 * (k - 1) + 1] = np.sin(angle)
-
-    w = w.copy()
-    for i in range(n):
-        ref_i   = refs[:, i]
-        noise_est = float(np.dot(w, ref_i))
-        e         = float(x[i]) - noise_est
-        y_out[i]  = e
-        w        += 2.0 * mu * e * ref_i
-
-    return y_out, w
