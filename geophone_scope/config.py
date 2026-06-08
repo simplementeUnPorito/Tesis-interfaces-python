@@ -36,6 +36,10 @@ SUBCMD_LATENCY: int    = 0xAF  # Start latency probe
 # ── Acquisition parameters ───────────────────────────────────────────────────
 FS: int           = 1020           # Sample rate, Hz
 SAMPLES_PER_BATCH: int = 30        # Samples per ESP-NOW batch
+PSOC_CAPTURE_MAX_BATCHES: int = 512  # PSoC store-and-forward RAM limit
+TEST_DEFAULT_SECONDS: float = 0.2    # Short directed debug burst
+TEST_MIN_SECONDS: float = 0.1
+TEST_MAX_SECONDS: float = 1.0
 DISP_SAMP: int    = FS * 3         # Default display window (3 s)
 MAX_BUF_S: int    = 10             # Default circular buffer length, seconds
 MAX_BUF: int      = FS * MAX_BUF_S

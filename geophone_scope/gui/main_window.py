@@ -428,6 +428,7 @@ class MainWindow(QMainWindow):
                         parts[0x04][0], parts[0x04][1],
                     )
                     mac_str = ":".join(f"{b:02X}" for b in mac_bytes)
+                    self._data[node_idx].mac = mac_str
                     self._slave_tabs[node_idx - 1].set_mac(mac_str)
                     self._settings.setValue(f"mac/node{node_idx}", mac_str)
                     self._mac_partial.pop(node_idx, None)
@@ -443,9 +444,11 @@ class MainWindow(QMainWindow):
                 # El PSoC reporta su fs real (depende de cómo esté programado el
                 # front-end analógico) — confiar en eso, no en config.FS estático.
                 if fs_hz > 0 and (not nd.fs_known or nd.fs != float(fs_hz)):
-                    nd.fs = float(fs_hz)
-                    nd.fs_known = True
+                    for slave_nd in self._data.nodes[1:]:
+                        slave_nd.fs = float(fs_hz)
+                        slave_nd.fs_known = True
                     self._stream_tab.set_fs(self._effective_fs())
+                    self._refresh_fs_dependent_windows()
             if 1 <= node_idx <= len(self._slave_tabs):
                 nd = self._data[node_idx]
                 self._slave_tabs[node_idx - 1].update_stats(
@@ -477,6 +480,16 @@ class MainWindow(QMainWindow):
                 return nd.fs
         return float(config.FS)
 
+    def _refresh_fs_dependent_windows(self) -> None:
+        """Keep sample-count windows aligned when HELLO reports the real fs."""
+        fs = self._effective_fs()
+        self._plot_area.set_display_samples(
+            int(round(self._stream_tab.spn_disp_secs.value() * fs))
+        )
+        self._data.resize_all(
+            int(round(self._stream_tab.spn_max_buf_secs.value() * fs))
+        )
+
     # ── Render timer callback (main thread) ───────────────────────────────────
 
     def _render(self) -> None:
@@ -504,7 +517,7 @@ class MainWindow(QMainWindow):
 
             labels.append(config.NODE_NAMES[i])
 
-        self._plot_area.update_plots(raw_arrays, filt_arrays, labels)
+        self._plot_area.update_plots(raw_arrays, filt_arrays, labels, self._effective_fs())
 
         # Update stats labels in slave tabs
         for i, nd in enumerate(self._data.nodes[1:], start=1):
@@ -816,6 +829,7 @@ class MainWindow(QMainWindow):
             self._test_timers.pop(ch_index).stop()
             try:
                 self._directed(ch_index, config.SUBCMD_DEBUG, 0)
+                self._cmd(config.CMD_STREAM, 0)
             except Exception:
                 pass
             nd = self._data[ch_index]
@@ -841,7 +855,7 @@ class MainWindow(QMainWindow):
         def _check() -> None:
             self._test_timers.pop(ch_index, None)
             gained = nd.batch_count - init_count
-            ok = gained >= 3
+            ok = gained >= 2
             nd.health = 1 if ok else 2
             if ch_index <= len(self._slave_tabs):
                 self._slave_tabs[ch_index - 1].set_health(nd.health)
@@ -853,10 +867,11 @@ class MainWindow(QMainWindow):
             self._logger.log_machine(f"TEST_RESULT ch={ch_index} batches={gained} ok={int(ok)}")
             try:
                 self._directed(ch_index, config.SUBCMD_DEBUG, 0)
+                self._cmd(config.CMD_STREAM, 0)
             except Exception:
                 pass
 
-        test_ms = 1500
+        test_ms = int(config.TEST_DEFAULT_SECONDS * 1000)
         if ch_index <= len(self._slave_tabs):
             test_ms = int(self._slave_tabs[ch_index - 1].spn_test_secs.value() * 1000)
         timer = QTimer(self)
@@ -870,10 +885,11 @@ class MainWindow(QMainWindow):
         if not self._connected:
             return
         n = self._stream_tab.batches_value()
+        capture_ms = int(round(n * config.SAMPLES_PER_BATCH * 1000 / self._effective_fs()))
         self._prepare_node_capture(ch_index)
         self._cmd16(config.CMD_SET_RECLEN, n)
         self._directed(ch_index, config.SUBCMD_VER, 1)
-        self._logger.log_human(f"VER Slave {ch_index} n={n} batches")
+        self._logger.log_human(f"VER Slave {ch_index} n={n} batches (~{capture_ms / 1000:.2f} s)")
         self._logger.log_machine(f"VER ch={ch_index} n={n}")
 
     @pyqtSlot(int)
@@ -1081,6 +1097,7 @@ class MainWindow(QMainWindow):
                     slave_tab.set_alias(alias)
                     self._update_tab_title(ch)
                 if mac:
+                    self._data[ch].mac = mac
                     slave_tab.set_mac(mac)
             self._dark_mode = self._setting_bool("ui/dark_mode", True)
             self._apply_theme()
@@ -1162,11 +1179,15 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def _on_save(self, base_name: str) -> None:
         os.makedirs(self._data_dir, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        now = datetime.now()
+        stamp = now.strftime("%Y%m%d_%H%M%S")
         clean_base = os.path.splitext(base_name.strip() or config.DEFAULT_SAVE_NAME)[0]
         fname = os.path.join(self._data_dir, f"{clean_base}_{stamp}.mat")
         try:
             save_dict: dict = {
+                "schema":       "geophone_scope_mat_node_prefix_v1",
+                "source":       "python_desktop_gui",
+                "created_at":   now.isoformat(timespec="seconds"),
                 "fs":           self._effective_fs(),
                 "n_slaves":     self._n_slaves,
                 "n_batches":    self._stream_tab.batches_value(),
@@ -1186,13 +1207,17 @@ class MainWindow(QMainWindow):
             for i, nd in enumerate(self._data.nodes):
                 prefix = f"node{i}_"
                 save_dict[prefix + "fs"] = nd.fs
+                save_dict[prefix + "fs_known"] = bool(nd.fs_known)
                 raw_v = np.array(nd.raw_buf, dtype=np.float32)
                 filt_v = np.array(nd.filt_buf, dtype=np.float32)
                 save_dict[prefix + "raw"]        = raw_v
                 save_dict[prefix + "filt"]       = filt_v
                 save_dict[prefix + "raw_v"]      = raw_v
                 save_dict[prefix + "filt_v"]     = filt_v
+                save_dict[prefix + "raw_count"]  = raw_v.size
+                save_dict[prefix + "filt_count"] = filt_v.size
                 save_dict[prefix + "batch_count"] = nd.batch_count
+                save_dict[prefix + "total_samples"] = nd.total_samples
                 save_dict[prefix + "pga_code"]   = nd.pga_code
                 save_dict[prefix + "vdac_byte"]  = nd.vdac_byte
                 save_dict[prefix + "pgavdac_code"] = nd.pgavdac
@@ -1212,6 +1237,14 @@ class MainWindow(QMainWindow):
                     else np.nan
                 )
                 save_dict[prefix + "slave_id"]   = nd.slave_id
+                save_dict[prefix + "name"] = (
+                    config.NODE_NAMES[i] if i < len(config.NODE_NAMES) else f"Node {i}"
+                )
+                save_dict[prefix + "psoc_ok"] = (
+                    np.nan if nd.psoc_ok is None else bool(nd.psoc_ok)
+                )
+                save_dict[prefix + "mac"] = nd.mac
+                save_dict[prefix + "health"] = nd.health
                 save_dict[prefix + "drift_hist"] = np.array(nd.drift_hist, dtype=np.float64)
                 save_dict[prefix + "latency_hist"] = np.array(nd.latency_hist, dtype=np.float64)
             savemat(fname, save_dict, do_compression=True, oned_as="column")

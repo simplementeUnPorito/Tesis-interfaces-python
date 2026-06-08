@@ -75,6 +75,7 @@ class PlotArea(QWidget):
         raw_bufs:  list[Optional[np.ndarray]],
         filt_bufs: list[Optional[np.ndarray]],
         node_labels: list[str],
+        fs_hz: float = float(config.FS),
     ) -> None:
         """
         Refresh all visible plots with the latest buffer data.
@@ -83,7 +84,9 @@ class PlotArea(QWidget):
             raw_bufs:    List indexed by node (0-3). None or empty → leave unchanged.
             filt_bufs:   Same length as raw_bufs. None → hide filt curve.
             node_labels: Title for each channel, e.g. ["Maestro", "Esclavo 1", ...].
+            fs_hz:       Shared sample rate for the time axis.
         """
+        fs = float(fs_hz) if fs_hz and fs_hz > 0 else float(config.FS)
         for i, (pw, rc, fc) in enumerate(
             zip(self._plots, self._raw_curves, self._filt_curves)
         ):
@@ -95,14 +98,14 @@ class PlotArea(QWidget):
 
             if raw is not None and len(raw) > 0:
                 tail = raw[-self._disp_samp :]
-                x    = np.arange(len(tail), dtype=np.float32) / config.FS
+                x    = np.arange(len(tail), dtype=np.float32) / fs
                 rc.setData(x, tail.astype(np.float32))
             else:
                 rc.setData([], [])
 
             if filt is not None and len(filt) > 0:
                 tail = filt[-self._disp_samp :]
-                x    = np.arange(len(tail), dtype=np.float32) / config.FS
+                x    = np.arange(len(tail), dtype=np.float32) / fs
                 fc.setData(x, tail.astype(np.float32))
                 fc.setVisible(True)
             else:

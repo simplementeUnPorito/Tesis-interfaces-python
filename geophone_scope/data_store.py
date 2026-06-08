@@ -43,6 +43,7 @@ class NodeData:
         self.vdac_byte: int = 128
         self.pgavdac:   int = 0
         self.psoc_ok:   Optional[bool] = None   # None until first HELLO
+        self.mac:       str = ""
 
         # ADC sample rate — depends on the analog front-end / PSoC programming,
         # so it must come from the hardware (HELLO b0=fs/100), not a static constant.

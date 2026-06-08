@@ -147,10 +147,10 @@ class StreamTab(QWidget):
         row_secs = QHBoxLayout()
         row_secs.addWidget(QLabel("Duración:"))
         self.spn_secs = QDoubleSpinBox()
-        self.spn_secs.setRange(0.1, 15.0)
-        self.spn_secs.setValue(2.4)
+        self.spn_secs.setRange(0.1, self._max_capture_secs())
+        self.spn_secs.setValue(min(2.4, self._max_capture_secs()))
         self.spn_secs.setSingleStep(0.5)
-        self.spn_secs.setDecimals(1)
+        self.spn_secs.setDecimals(2)
         self.spn_secs.setSuffix(" s")
         self.spn_secs.valueChanged.connect(self._update_batch_info)
         self.spn_secs.valueChanged.connect(self._update_mem_warn)
@@ -288,12 +288,14 @@ class StreamTab(QWidget):
         if fs_hz <= 0 or fs_hz == self._fs:
             return
         self._fs = float(fs_hz)
+        self._sync_capture_range()
         self._update_batch_info()
         self._update_mem_warn()
 
     def batches_value(self) -> int:
-        """Convierte segundos al batch count más cercano."""
-        return max(1, round(self.spn_secs.value() * self._fs / config.SAMPLES_PER_BATCH))
+        """Convert seconds to batches using ceil and the firmware RAM limit."""
+        n = math.ceil(self.spn_secs.value() * self._fs / config.SAMPLES_PER_BATCH)
+        return max(1, min(config.PSOC_CAPTURE_MAX_BATCHES, n))
 
     def _on_start_stop(self) -> None:
         if self._streaming:
@@ -309,7 +311,7 @@ class StreamTab(QWidget):
         n = self.batches_value()
         smp = n * config.SAMPLES_PER_BATCH
         dur = smp / self._fs
-        self.lbl_batch_info.setText(f"→ {n} bat / {smp} smp / {dur:.1f} s")
+        self.lbl_batch_info.setText(f"→ {n} bat / {smp} smp / real {dur:.2f} s")
         if hasattr(self, "spn_disp_secs") and hasattr(self, "spn_max_buf_secs"):
             self._sync_display_limits(n)
 
@@ -319,11 +321,26 @@ class StreamTab(QWidget):
         if store_kb > 80:
             self.lbl_mem_warn.setText(
                 f'<span style="color:orange;font-size:9px">'
-                f'⚠ {store_kb} KB/esclavo — puede fallar (límite ~80 KB)'
+                f'⚠ {store_kb} KB/esclavo; max {config.PSOC_CAPTURE_MAX_BATCHES} lotes'
                 f'</span>'
             )
         else:
             self.lbl_mem_warn.setText("")
+
+    def _max_capture_secs(self) -> float:
+        fs = max(1.0, float(self._fs))
+        return max(0.1, config.PSOC_CAPTURE_MAX_BATCHES * config.SAMPLES_PER_BATCH / fs)
+
+    def _sync_capture_range(self) -> None:
+        if not hasattr(self, "spn_secs"):
+            return
+        max_secs = self._max_capture_secs()
+        old = self.spn_secs.value()
+        self.spn_secs.blockSignals(True)
+        self.spn_secs.setRange(0.1, max_secs)
+        if old > max_secs:
+            self.spn_secs.setValue(max_secs)
+        self.spn_secs.blockSignals(False)
 
     def _capture_secs_for_batches(self, n_batches: int) -> int:
         smp = max(1, int(n_batches)) * config.SAMPLES_PER_BATCH
