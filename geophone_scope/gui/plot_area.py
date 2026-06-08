@@ -75,7 +75,8 @@ class PlotArea(QWidget):
         raw_bufs:  list[Optional[np.ndarray]],
         filt_bufs: list[Optional[np.ndarray]],
         node_labels: list[str],
-        fs_hz: float = float(config.FS),
+        fs_hz: float = 0.0,
+        filt_trims: Optional[list[float]] = None,
     ) -> None:
         """
         Refresh all visible plots with the latest buffer data.
@@ -85,12 +86,29 @@ class PlotArea(QWidget):
             filt_bufs:   Same length as raw_bufs. None → hide filt curve.
             node_labels: Title for each channel, e.g. ["Maestro", "Esclavo 1", ...].
             fs_hz:       Shared sample rate for the time axis.
+            filt_trims:  Per-node count of leading filtered samples to discard
+                before plotting (None or 0 → keep all). A linear-phase FIR of
+                length N has a constant group delay of (N-1)/2 samples, so its
+                first (N-1)/2 outputs are the filter's startup transient — not
+                a real signal feature. Dropping exactly that many samples from
+                the plotted tail (rather than keeping them and shifting the
+                curve) both hides that transient AND re-aligns what's left
+                with the raw curve at the same x positions, since
+                filt[k+trim] is the filtered estimate of raw[k].
         """
-        fs = float(fs_hz) if fs_hz and fs_hz > 0 else float(config.FS)
+        # No nominal/guessed fallback: Fs comes only from the hardware HELLO.
+        # Until it's known there is no meaningful time axis, so skip drawing.
+        fs = float(fs_hz) if fs_hz and fs_hz > 0 else 0.0
         for i, (pw, rc, fc) in enumerate(
             zip(self._plots, self._raw_curves, self._filt_curves)
         ):
             if not pw.isVisible():
+                continue
+            if not fs:
+                rc.setData([], [])
+                fc.setVisible(False)
+                if i < len(node_labels):
+                    pw.setTitle(node_labels[i], color="w", size="10pt")
                 continue
 
             raw = raw_bufs[i] if i < len(raw_bufs) else None
@@ -105,9 +123,15 @@ class PlotArea(QWidget):
 
             if filt is not None and len(filt) > 0:
                 tail = filt[-self._disp_samp :]
-                x    = np.arange(len(tail), dtype=np.float32) / fs
-                fc.setData(x, tail.astype(np.float32))
-                fc.setVisible(True)
+                trim = int(filt_trims[i]) if filt_trims and i < len(filt_trims) else 0
+                trimmed = tail[trim:] if trim < len(tail) else tail[:0]
+                if len(trimmed) > 0:
+                    x = np.arange(len(trimmed), dtype=np.float32) / fs
+                    fc.setData(x, trimmed.astype(np.float32))
+                    fc.setVisible(True)
+                else:
+                    fc.setData([], [])
+                    fc.setVisible(False)
             else:
                 fc.setVisible(False)
 

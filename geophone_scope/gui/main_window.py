@@ -468,21 +468,24 @@ class MainWindow(QMainWindow):
         )
 
     def _effective_fs(self) -> float:
-        """Sample rate to use for batch/duration/display/notch calculations.
+        """Sample rate to use for batch/duration/display/notch/export calculations.
 
         The ADC rate depends on how the analog front-end / PSoC is programmed
-        and can differ from the nominal config.FS, so prefer the value reported
-        by the first slave that has sent a HELLO; fall back to config.FS until
-        any slave has reported.
+        and can be reconfigured at any time, so there is NO nominal/guessed
+        fallback: this returns the value reported by the first slave that has
+        sent a HELLO, or 0.0 if none has yet — callers must treat 0 as
+        "unknown" and wait, never substitute a constant.
         """
         for nd in self._data.nodes[1:]:
             if nd.fs_known:
                 return nd.fs
-        return float(config.FS)
+        return 0.0
 
     def _refresh_fs_dependent_windows(self) -> None:
         """Keep sample-count windows aligned when HELLO reports the real fs."""
         fs = self._effective_fs()
+        if not fs:
+            return
         self._plot_area.set_display_samples(
             int(round(self._stream_tab.spn_disp_secs.value() * fs))
         )
@@ -496,6 +499,7 @@ class MainWindow(QMainWindow):
         """Called every RENDER_PERIOD_MS — update plots and stats labels."""
         raw_arrays:  list[Optional[np.ndarray]] = []
         filt_arrays: list[Optional[np.ndarray]] = []
+        filt_trims:  list[float]                 = []
         labels:      list[str]                   = []
 
         for i, nd in enumerate(self._data.nodes):
@@ -515,9 +519,15 @@ class MainWindow(QMainWindow):
             else:
                 filt_arrays.append(None)
 
+            # Linear-phase FIR of length N has constant group delay (N-1)/2:
+            # its first (N-1)/2 outputs are pure startup transient. Discard
+            # them at plot time — the rest aligns with raw at the same x
+            # positions, so the transient isn't mistaken for a real signal.
+            filt_trims.append((len(nd.filt_b) - 1) / 2.0 if nd.filt_b is not None else 0.0)
+
             labels.append(config.NODE_NAMES[i])
 
-        self._plot_area.update_plots(raw_arrays, filt_arrays, labels, self._effective_fs())
+        self._plot_area.update_plots(raw_arrays, filt_arrays, labels, self._effective_fs(), filt_trims)
 
         # Update stats labels in slave tabs
         for i, nd in enumerate(self._data.nodes[1:], start=1):
@@ -582,6 +592,10 @@ class MainWindow(QMainWindow):
     def _on_start(self, n_batches: int) -> None:
         if not self._connected:
             return
+        fs = self._effective_fs()
+        if not fs:
+            self._logger.log_human("START cancelado: esperando Fs real del esclavo (HELLO no recibido aun)")
+            return
         self._data.clear_all()
         self._plot_area.clear_all()
         for nd in self._data.nodes:
@@ -591,7 +605,7 @@ class MainWindow(QMainWindow):
         self._streaming = True
         self._stream_tab.set_streaming(True)
         self._stream_tab.set_sync_state("HOT_WAIT → START")
-        capture_ms = int(round(n_batches * config.SAMPLES_PER_BATCH * 1000 / self._effective_fs()))
+        capture_ms = int(round(n_batches * config.SAMPLES_PER_BATCH * 1000 / fs))
         self._logger.log_human(f"START store n_batches={n_batches} (~{capture_ms / 1000:.2f} s)")
         self._logger.log_machine(f"CMD START n={n_batches}")
 
@@ -658,13 +672,17 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(int)
     def _on_disp_secs_changed(self, secs: int) -> None:
-        self._plot_area.set_display_samples(int(round(secs * self._effective_fs())))
+        fs = self._effective_fs()
+        if fs:
+            self._plot_area.set_display_samples(int(round(secs * fs)))
         self._save_settings()
         self._logger.log_machine(f"dispSecs={secs}")
 
     @pyqtSlot(int)
     def _on_max_buf_secs_changed(self, secs: int) -> None:
-        self._data.resize_all(int(round(secs * self._effective_fs())))
+        fs = self._effective_fs()
+        if fs:
+            self._data.resize_all(int(round(secs * fs)))
         self._save_settings()
         self._logger.log_machine(f"maxBufSecs={secs}")
 
@@ -884,8 +902,12 @@ class MainWindow(QMainWindow):
     def _on_ver(self, ch_index: int) -> None:
         if not self._connected:
             return
+        fs = self._effective_fs()
+        if not fs:
+            self._logger.log_human(f"VER Slave {ch_index} cancelado: esperando Fs real del esclavo (HELLO no recibido aun)")
+            return
         n = self._stream_tab.batches_value()
-        capture_ms = int(round(n * config.SAMPLES_PER_BATCH * 1000 / self._effective_fs()))
+        capture_ms = int(round(n * config.SAMPLES_PER_BATCH * 1000 / fs))
         self._prepare_node_capture(ch_index)
         self._cmd16(config.CMD_SET_RECLEN, n)
         self._directed(ch_index, config.SUBCMD_VER, 1)

@@ -45,9 +45,10 @@ class NodeData:
         self.psoc_ok:   Optional[bool] = None   # None until first HELLO
         self.mac:       str = ""
 
-        # ADC sample rate — depends on the analog front-end / PSoC programming,
-        # so it must come from the hardware (HELLO b0=fs/100), not a static constant.
-        self.fs:        float = float(config.FS)  # nominal default until reported
+        # ADC sample rate — depends on the analog front-end / PSoC programming
+        # and can be reconfigured, so it must ALWAYS come from the hardware
+        # (HELLO b0=fs/100). No nominal/guessed value: 0 means "not yet known".
+        self.fs:        float = 0.0
         self.fs_known:  bool  = False              # True once a HELLO reported fs > 0
 
         # Batch / statistics

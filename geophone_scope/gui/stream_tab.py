@@ -58,7 +58,11 @@ class StreamTab(QWidget):
         super().__init__(parent)
         self._connected = False
         self._streaming = False
-        self._fs: float = float(config.FS)  # live value reported by hardware; set_fs() updates it
+        # Fs depends on how the PSoC's analog front-end is programmed and can
+        # be reconfigured, so there is NO nominal/guessed default: 0 means
+        # "not yet reported" and every batch/duration calc must wait for it.
+        self._fs: float = 0.0
+        self._fs_known: bool = False
         self._build_ui()
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -284,23 +288,36 @@ class StreamTab(QWidget):
         self.arm_requested.emit(n)
 
     def set_fs(self, fs_hz: float) -> None:
-        """Update the live sample rate (reported by hardware) and refresh estimates."""
-        if fs_hz <= 0 or fs_hz == self._fs:
+        """Record the live sample rate reported by the hardware HELLO and refresh estimates.
+
+        This is the ONLY way self._fs is ever set to a meaningful value —
+        there is no nominal/guessed default, because the PSoC's rate depends
+        on its analog front-end programming and can be reconfigured.
+        """
+        if fs_hz <= 0 or (self._fs_known and fs_hz == self._fs):
             return
         self._fs = float(fs_hz)
+        self._fs_known = True
         self._sync_capture_range()
         self._update_batch_info()
         self._update_mem_warn()
+        self.btn_start_stop.setEnabled(self._connected)
 
     def batches_value(self) -> int:
-        """Convert seconds to batches using ceil and the firmware RAM limit."""
+        """Convert seconds to batches using ceil and the firmware RAM limit.
+
+        Returns 0 if Fs hasn't been reported yet — callers must not start a
+        capture (or compute anything from this) until it's known.
+        """
+        if not self._fs_known:
+            return 0
         n = math.ceil(self.spn_secs.value() * self._fs / config.SAMPLES_PER_BATCH)
         return max(1, min(config.PSOC_CAPTURE_MAX_BATCHES, n))
 
     def _on_start_stop(self) -> None:
         if self._streaming:
             self.stop_requested.emit()
-        else:
+        elif self._fs_known:
             self.start_requested.emit(self.batches_value())
 
     def _on_save(self) -> None:
@@ -308,6 +325,9 @@ class StreamTab(QWidget):
         self.save_requested.emit(name)
 
     def _update_batch_info(self, _: float = 0.0) -> None:
+        if not self._fs_known:
+            self.lbl_batch_info.setText("esperando Fs del esclavo (HELLO)…")
+            return
         n = self.batches_value()
         smp = n * config.SAMPLES_PER_BATCH
         dur = smp / self._fs
@@ -316,6 +336,9 @@ class StreamTab(QWidget):
             self._sync_display_limits(n)
 
     def _update_mem_warn(self, _: float = 0.0) -> None:
+        if not self._fs_known:
+            self.lbl_mem_warn.setText("")
+            return
         n = self.batches_value()
         store_kb = (n * config.SAMPLES_PER_BATCH * 10 + n * 4) // 1024
         if store_kb > 80:
@@ -328,8 +351,12 @@ class StreamTab(QWidget):
             self.lbl_mem_warn.setText("")
 
     def _max_capture_secs(self) -> float:
-        fs = max(1.0, float(self._fs))
-        return max(0.1, config.PSOC_CAPTURE_MAX_BATCHES * config.SAMPLES_PER_BATCH / fs)
+        # Pure widget-range bound. Before the hardware reports its real Fs,
+        # the Start button is disabled, so this placeholder is never used to
+        # size an actual capture — set_fs() re-syncs it with the real value.
+        if not self._fs_known:
+            return 60.0
+        return max(0.1, config.PSOC_CAPTURE_MAX_BATCHES * config.SAMPLES_PER_BATCH / self._fs)
 
     def _sync_capture_range(self) -> None:
         if not hasattr(self, "spn_secs"):
@@ -343,6 +370,9 @@ class StreamTab(QWidget):
         self.spn_secs.blockSignals(False)
 
     def _capture_secs_for_batches(self, n_batches: int) -> int:
+        # Same widget-range-only placeholder rationale as _max_capture_secs.
+        if not self._fs_known:
+            return 1
         smp = max(1, int(n_batches)) * config.SAMPLES_PER_BATCH
         return max(1, math.ceil(smp / self._fs))
 
@@ -363,7 +393,7 @@ class StreamTab(QWidget):
         self.btn_connect.setEnabled(not connected)
         self.btn_disconnect.setEnabled(connected)
         self.btn_arm.setEnabled(connected)
-        self.btn_start_stop.setEnabled(connected)
+        self.btn_start_stop.setEnabled(connected and self._fs_known)
         if connected:
             self.lbl_conn.setText(f"● Connected: {port}")
             self.lbl_conn.setStyleSheet("color: green;")

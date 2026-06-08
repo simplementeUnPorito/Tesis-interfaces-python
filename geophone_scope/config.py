@@ -34,7 +34,10 @@ SUBCMD_VER: int        = 0xB2  # Single capture (Ver)
 SUBCMD_LATENCY: int    = 0xAF  # Start latency probe
 
 # ── Acquisition parameters ───────────────────────────────────────────────────
-FS: int           = 1020           # Sample rate, Hz
+# NOTE: intentionally NO nominal/default sample-rate constant. The PSoC's ADC
+# rate depends on its analog front-end programming and can be reconfigured at
+# any time, so Fs must ALWAYS come from the slave's HELLO (see
+# MainWindow._effective_fs / NodeData.fs_known) — never a guessed fallback.
 SAMPLES_PER_BATCH: int = 30        # Samples per ESP-NOW batch
 PSOC_CAPTURE_MAX_BATCHES: int = 512  # PSoC store-and-forward RAM limit
 TEST_DEFAULT_SECONDS: float = 0.2    # Short directed debug burst

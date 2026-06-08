@@ -80,7 +80,7 @@ def fmt_res(r):
 # PARÁMETROS — editá acá
 # ════════════════════════════════════════════════════════════
 f0_des      = 300    # Hz — frecuencia de corte (-3 dB)
-zeta_des    = np.sqrt(3)/2   # factor de amortiguamiento (0.707 = Butterworth)
+zeta_des    = 0.691   # factor de amortiguamiento (0.707 = Butterworth)
 K_des       = 5.0     # ganancia DC (magnitud; el MFB es inversor)
 TOP_N       = 20      # resultados a mostrar
 lambda_cost = 1       # peso del costo de componentes

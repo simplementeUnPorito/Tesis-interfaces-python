@@ -86,6 +86,8 @@ def zip_to_mat_dict(zip_path: str | Path) -> dict:
             save_dict[prefix + "vdac_byte"] = int(node.get("vdac_byte", 0) or 0)
             save_dict[prefix + "pgavdac_code"] = int(node.get("pgavdac_code", 0) or 0)
             save_dict[prefix + "visible"] = bool(node.get("visible", False))
+            save_dict[prefix + "connected"] = bool(node.get("connected", False))
+            save_dict[prefix + "type"] = _as_str(node.get("type", ""))
             save_dict[prefix + "fir_cmd"] = _as_str(node.get("fir_cmd", ""))
             save_dict[prefix + "dc_remove"] = bool(node.get("dc_remove", False))
             save_dict[prefix + "notch_enabled"] = bool(node.get("notch_enabled", False))
@@ -104,8 +106,11 @@ def zip_to_mat_dict(zip_path: str | Path) -> dict:
             save_dict[prefix + "health"] = int(node.get("health", 0) or 0)
             save_dict[prefix + "drift_hist"] = _as_float_array(node.get("drift_hist", []))
             save_dict[prefix + "latency_hist"] = _as_float_array(node.get("latency_hist", []))
+            save_dict[prefix + "data_dir"] = _as_str(node.get("data_dir", ""))
             save_dict[prefix + "raw_file"] = _as_str(node.get("raw_file", ""))
             save_dict[prefix + "filt_file"] = _as_str(node.get("filt_file", ""))
+            save_dict[prefix + "raw_csv_file"] = _as_str(node.get("raw_csv_file", ""))
+            save_dict[prefix + "filt_csv_file"] = _as_str(node.get("filt_csv_file", ""))
 
         return save_dict
 
