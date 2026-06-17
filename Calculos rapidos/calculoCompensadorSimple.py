@@ -74,6 +74,11 @@ ZETA_MIN    = 100      # ζ mínimo buscado en BP
 ZETA_MAX    = 1000     # ζ máximo buscado en BP
 TOP_N       = 15       # candidatos finales a mostrar
 
+# ── Ganancia pico máxima del filtro BP ──────────────────────────────────────
+# El filtro BP inversor tiene ganancia pico = R2·C1 / (R1·C1 + R2·C2).
+# Con valores anteriores salía ≈37 saturando la etapa. Limitar aquí.
+GAIN_BP_MAX = 1.5      # descartar candidatos con |H_peak_BP| > este valor
+
 # ── Rango de búsqueda — Adder (separado para cambiar en el futuro) ──────────
 R_min_add   = 1e3      # Ω
 R_max_add   = 1e6      # Ω
@@ -321,6 +326,11 @@ def circuito_params(R1, R2, C1, C2):
     zeta = (tau1+tau2) / (2*np.sqrt(tau1*tau2))
     return w0/(2*np.pi), zeta
 
+def bp_peak_gain(R1, R2, C1, C2):
+    """Ganancia pico del BP inversor: R2·C1 / (R1·C1 + R2·C2)."""
+    denom = R1*C1 + R2*C2
+    return (R2 * C1 / denom) if denom > 0 else np.inf
+
 # ════════════════════════════════════════════════════════════════════════════
 # BÚSQUEDA DE RESISTENCIAS DEL ADDER
 # ════════════════════════════════════════════════════════════════════════════
@@ -467,6 +477,9 @@ def buscar(caps_search, label, c2_ext_list=None):
                 zeta   = (tau1+tau2) / (2*np.sqrt(tau1*tau2))
                 if not (ZETA_MIN <= zeta <= ZETA_MAX):
                     continue
+                _d = R1*C1 + R2_i*C2_val
+                if _d > 0 and (R2_i*C1/_d) > GAIN_BP_MAX:
+                    continue
                 phase1.append(dict(R1=R1, C1=C1, C2=C2_val,
                                    C2_type=C2_type, C2_a=C2_a, C2_b=C2_b,
                                    R2_ideal=R2_i, zeta_approx=zeta))
@@ -505,6 +518,10 @@ def buscar(caps_search, label, c2_ext_list=None):
         f0_err = abs(f0v-f0_des)/f0_des*100
         if f0_err > F0_TOL_PCT: continue
         if not (ZETA_MIN <= zv <= ZETA_MAX): continue
+
+        # ── Filtrar por ganancia pico del BP ────────────────────────────
+        gpeak = bp_peak_gain(R1, R2_act, C1, C2)
+        if gpeak > GAIN_BP_MAX: continue
 
         # ── Buscar adder (Ru, Rbp, Rf) — vectorizado, sin T-red ─────────
         H_bp_cand  = H_real_arr(R1, R2_act, C1, C2, FREQS_EVAL)
