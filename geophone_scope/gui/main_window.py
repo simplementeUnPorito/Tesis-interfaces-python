@@ -433,8 +433,20 @@ class MainWindow(QMainWindow):
                     self._settings.setValue(f"mac/node{node_idx}", mac_str)
                     self._mac_partial.pop(node_idx, None)
                     self._logger.log_human(f"HELLO slave={node_idx} MAC={mac_str}")
-        else:
-            # Slave HELLO (b2=0x01)
+        elif pkt.b2 == 0x05:
+            # Exact Fs sub-packet: b1:b0 is uint16 Hz. Legacy HELLO still
+            # arrives for older clients, but only this packet can carry 2929 Hz.
+            node_idx = pkt.node_id
+            fs_hz = pkt.hello_fs_exact_hz
+            if 0 <= node_idx < config.MAX_NODES and fs_hz > 0:
+                for slave_nd in self._data.nodes[1:]:
+                    slave_nd.fs = float(fs_hz)
+                    slave_nd.fs_known = True
+                self._stream_tab.set_fs(self._effective_fs())
+                self._refresh_fs_dependent_windows()
+            self._logger.log_human(f"HELLO slave={node_idx} fs_exact={fs_hz}Hz")
+        elif pkt.b2 == 0x01:
+            # Slave HELLO (legacy b0=fs/100)
             node_idx = pkt.node_id
             psoc_ok  = pkt.hello_psoc_ok
             fs_hz    = pkt.hello_fs_hz
@@ -462,6 +474,10 @@ class MainWindow(QMainWindow):
             fs_str = f" fs={fs_hz}Hz" if fs_hz > 0 else ""
             self._logger.log_human(
                 f"HELLO slave={node_idx} psoc_ok={psoc_ok}{fs_str}"
+            )
+        else:
+            self._logger.log_human(
+                f"STATUS node={pkt.node_id:#04x} b=[{pkt.b2},{pkt.b1},{pkt.b0}]"
             )
         self._logger.log_machine(
             f"STATUS node={pkt.node_id:#04x} b=[{pkt.b2},{pkt.b1},{pkt.b0}]"

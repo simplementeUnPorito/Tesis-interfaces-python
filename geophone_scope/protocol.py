@@ -106,8 +106,13 @@ class Packet:
 
     @property
     def hello_fs_hz(self) -> int:
-        """Sample rate reported in a slave HELLO packet (b0 = fs/100 Hz, 0 = unknown)."""
+        """Legacy sample rate reported in a slave HELLO packet (b0 = fs/100 Hz, 0 = unknown)."""
         return self.b0 * 100
+
+    @property
+    def hello_fs_exact_hz(self) -> int:
+        """Exact sample rate from HELLO sub-packet 0x05 (uint16 big-endian)."""
+        return (self.b1 << 8) | self.b0
 
     @property
     def hello_mac_sub(self) -> int:

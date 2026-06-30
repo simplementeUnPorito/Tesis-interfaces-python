@@ -43,9 +43,10 @@ PSOC_CAPTURE_MAX_BATCHES: int = 512  # PSoC store-and-forward RAM limit
 TEST_DEFAULT_SECONDS: float = 0.2    # Short directed debug burst
 TEST_MIN_SECONDS: float = 0.1
 TEST_MAX_SECONDS: float = 1.0
-DISP_SAMP: int    = 9_000          # Startup placeholder (overridden by HELLO); ~3 s @ 3 kHz
+DEFAULT_SAMPLE_RATE_HZ: int = 2929 # Measured default before exact HELLO arrives
+DISP_SAMP: int    = DEFAULT_SAMPLE_RATE_HZ * 3   # Startup placeholder; ~3 s
 MAX_BUF_S: int    = 10             # Default circular buffer length, seconds
-MAX_BUF: int      = 30_000         # Startup placeholder (overridden by HELLO); ~10 s @ 3 kHz
+MAX_BUF: int      = DEFAULT_SAMPLE_RATE_HZ * MAX_BUF_S  # Startup placeholder; ~10 s
 
 # ── Nodes ────────────────────────────────────────────────────────────────────
 MAX_NODES: int = 4                 # 1 master gateway + 3 slaves
