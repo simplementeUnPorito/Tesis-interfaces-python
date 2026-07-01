@@ -1,93 +1,95 @@
 # Geophone Scope — Python/PyQt6
 
-Python replacement for `InterfaceESP.m`. Functionally equivalent to the MATLAB GUI.
+GUI de escritorio (reemplaza `InterfaceESP.m`). Funcionalmente equivalente a la
+interfaz MATLAB. Para trabajo de campo se prefiere la UI web del maestro ESP32;
+esta app es útil para post-proceso y análisis en PC.
 
-## Requirements
+## Requisitos
 
 - Python 3.11+
-- The packages listed in `requirements.txt`
+- Paquetes en `requirements.txt`
 
-## Installation
+## Instalación
 
 ```bash
 cd src/python/geophone_scope
 pip install -r requirements.txt
 ```
 
-## Running
+## Ejecutar
 
 ```bash
 python main.py
+python main.py --port COM8
+python main.py --port COM8 --baud 921600
+python main.py --log-dir C:\Logs --data-dir C:\Data
 ```
 
-With automatic connection on startup:
+## Convertir ZIP de la web a .mat
 
 ```bash
-python main.py --port COM3
-python main.py --port COM3 --baud 921600
+python zip_to_mat.py capture.zip
 ```
 
-Custom log / data directories:
+Convierte el ZIP exportado por la UI web del maestro en un `.mat` con las mismas
+claves que la app de escritorio (`node1_raw`, `node1_filt`, `fs`, etc.).
 
-```bash
-python main.py --log-dir C:\MyLogs --data-dir C:\MyData
-```
+## Layout de archivos
 
-## File layout
-
-| File | Purpose |
-|------|---------|
-| `config.py` | All constants (baud, FS, packet types, …) |
-| `protocol.py` | Packet encode/decode |
-| `serial_worker.py` | Background QThread for serial I/O |
-| `debug_port.py` | Background QThread for slave debug UART |
-| `signal_proc.py` | FIR filter, DC removal, least-squares harmonic notch |
-| `data_store.py` | Per-node circular buffers + stats |
-| `logger.py` | Dual human/machine log files |
-| `gui/main_window.py` | QMainWindow — wires everything together |
-| `gui/stream_tab.py` | Connection, ARM, START/STOP, save |
-| `gui/slave_tab.py` | Per-slave PGA/VDAC/FIR/test controls |
-| `gui/plot_area.py` | pyqtgraph real-time multi-channel plots |
+| Archivo | Función |
+|---------|---------|
+| `config.py` | Constantes: baud, tipos de paquete, comandos |
+| `protocol.py` | Encode/decode de paquetes |
+| `serial_worker.py` | QThread para I/O serie |
+| `debug_port.py` | QThread para UART debug del esclavo |
+| `signal_proc.py` | FIR (`firFilter`, `filtFilt`), `dcRemove`, notch armónico |
+| `data_store.py` | Buffers circulares por nodo + stats |
+| `logger.py` | Log dual humano/máquina a archivo |
+| `zip_to_mat.py` | Conversor ZIP (web UI) → `.mat` |
+| `gui/main_window.py` | QMainWindow — integra todos los componentes |
+| `gui/stream_tab.py` | Conexión, ARM, START/STOP, guardar |
+| `gui/slave_tab.py` | Controles PGA/VDAC/FIR por esclavo |
+| `gui/plot_area.py` | Gráficas tiempo real (pyqtgraph) |
 | `main.py` | Entry point |
 
-## Protocol summary
+## Protocolo
 
-### PC → Master (commands)
+### PC → Maestro (comandos)
 
-| Format | Bytes | Commands |
-|--------|-------|---------|
-| Standard | 4 | `0xAB cmd param (cmd^param)` |
+| Formato | Bytes | Comandos |
+|---------|-------|---------|
+| Estándar | 4 | `0xAB cmd param (cmd^param)` |
 | Set-N 16-bit | 5 | `0xAB cmd n_lo n_hi (cmd^n_lo^n_hi)` |
-| Directed | 6 | `0xAB 0xBD node_id sub_cmd param (node_id^sub_cmd^param)` |
+| Dirigido | 6 | `0xAB 0xBD node_id sub_cmd param (node_id^sub_cmd^param)` |
 
-### Master → PC (packets)
+### Maestro → PC (paquetes de 6 bytes)
 
-All packets: `[0x56][node_id][type][b2][b1][b0]`
+`[0x56][node_id][type][b2][b1][b0]`
 
-| Type | Meaning |
-|------|---------|
-| `0x00` | ADC sample (signed 24-bit) |
-| `0x01` | Heartbeat (pga, vdac, master_state) |
+| type | Significado |
+|------|-------------|
+| `0x00` | Muestra ADC (int24 signed) |
+| `0x01` | Heartbeat (PGA, VDAC, master_state) |
 | `0x07` | ACK |
-| `0xFC` | START latency (µs, 24-bit unsigned) |
-| `0xFD` | Status (master) / HELLO (slave) |
+| `0xFC` | Latencia START (µs, 24-bit) |
+| `0xFD` | Status / HELLO esclavo |
 | `0xFE` | READY (n_slaves_ready) |
 
-## Saved data format
+**Nota:** `Fs` no tiene constante nominal en `config.py` — siempre viene del
+HELLO del esclavo (el PSoC reporta 2929 Hz en el firmware actual). La app
+la lee de `PTYPE_STATUS` al arrancar.
 
-Files are MATLAB `.mat` archives. Load with:
+## Formato de datos guardados (.mat)
 
 ```python
 from scipy.io import loadmat
-d = loadmat("muestra_20240531_143022.mat")
-raw_slave1 = d["node1_raw"].ravel()  # float32 array in volts
-fs = float(d["fs"].squeeze())        # 1020.0
+d = loadmat("muestra_20260701_143022.mat")
+raw_slave1 = d["node1_raw"].ravel()   # float32 array en voltios
+fs = float(d["fs"].squeeze())         # 2929.0 (valor real reportado por el PSoC)
+fir_cmd = str(d["node1_fir_cmd"])
 ```
 
-## FIR command examples
-
-The per-slave FIR `Cmd` field accepts the short commands and SciPy-style
-coefficient expressions. `FS` and `fs` are available as the acquisition rate.
+## Comandos FIR (campo `Cmd` de cada esclavo)
 
 ```python
 lp 200
@@ -98,6 +100,7 @@ numtaps 201 lp 150
 firls(73, (0, 1, 2, 3, 4, 5), (0, 0, 1, 1, 0, 0), fs=FS)
 remez(73, [0, 40, 45, 55, 60, 510], [1, 0, 1], fs=FS)
 firwin(101, [45, 55], pass_zero="bandstop", fs=FS)
-firwin2(73, [0, 40, 45, 55, 60, 510], [1, 1, 0, 0, 1, 1], fs=FS)
 b = [0.25, 0.5, 0.25]
 ```
+
+`FS` y `fs` están disponibles como la tasa de muestreo real del hardware.
