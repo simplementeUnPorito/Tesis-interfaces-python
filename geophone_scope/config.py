@@ -32,6 +32,7 @@ SUBCMD_VDAC: int       = 0xAA  # Set VDAC byte (0-255)
 SUBCMD_DEBUG: int      = 0xA7  # Debug node on/off
 SUBCMD_VER: int        = 0xB2  # Single capture (Ver)
 SUBCMD_LATENCY: int    = 0xAF  # Start latency probe
+SUBCMD_ADC_CONFIG: int = 0xBA  # ADC range: 1=+/-2.5 V, 2=+/-0.512 V
 
 # ── Acquisition parameters ───────────────────────────────────────────────────
 # NOTE: intentionally NO nominal/default sample-rate constant. The PSoC's ADC
@@ -43,7 +44,7 @@ PSOC_CAPTURE_MAX_BATCHES: int = 512  # PSoC store-and-forward RAM limit
 TEST_DEFAULT_SECONDS: float = 0.2    # Short directed debug burst
 TEST_MIN_SECONDS: float = 0.1
 TEST_MAX_SECONDS: float = 1.0
-DEFAULT_SAMPLE_RATE_HZ: int = 2929 # Measured default before exact HELLO arrives
+DEFAULT_SAMPLE_RATE_HZ: int = 1020 # Measured default before exact HELLO arrives
 DISP_SAMP: int    = DEFAULT_SAMPLE_RATE_HZ * 3   # Startup placeholder; ~3 s
 MAX_BUF_S: int    = 10             # Default circular buffer length, seconds
 MAX_BUF: int      = DEFAULT_SAMPLE_RATE_HZ * MAX_BUF_S  # Startup placeholder; ~10 s
@@ -64,9 +65,12 @@ VDAC_MAX: int    = 255
 VDAC_FULL_SCALE_V: float = VDAC_MAX * VDAC_STEP
 
 # ── ADC scaling ──────────────────────────────────────────────────────────────
-# PSoC ADC config: 18-bit DelSig, +/-2.5 V input range, left alignment fixed
-# in firmware before transmission. ADC_CFG1_COUNTS_PER_VOLT from ADC.h = 52429.
-ADC_COUNTS_PER_VOLT: float = 52_429.0
+# PSoC ADC configs exposed by the firmware/web UI. Both run at 1020 Hz.
+ADC_CONFIGS = [
+    {"code": 1, "label": "+/-2.5 V", "range_v": 2.5, "fs_hz": 1020, "counts_per_volt": 131_072 / 2.5},
+    {"code": 2, "label": "+/-0.512 V", "range_v": 0.512, "fs_hz": 1020, "counts_per_volt": 131_072 / 0.512},
+]
+ADC_COUNTS_PER_VOLT: float = ADC_CONFIGS[0]["counts_per_volt"]
 
 # ── Master states (b0 of heartbeat) ─────────────────────────────────────────
 MASTER_STATE_NAMES: dict[int, str] = {
@@ -108,6 +112,7 @@ START_LATENCY_PROBE_GAP_S: float = 0.04
 # ── Notch defaults ───────────────────────────────────────────────────────────
 NOTCH_F0: float         = 50.0     # Hz
 NOTCH_DEFAULT_HARM: int = 3
+NOTCH_SEARCH_HZ: float  = 2.0      # buscar pico real en NOTCH_F0±este margen
 
 # ── Save ─────────────────────────────────────────────────────────────────────
 DEFAULT_SAVE_NAME: str = "muestra"

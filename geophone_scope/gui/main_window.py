@@ -435,7 +435,8 @@ class MainWindow(QMainWindow):
                     self._logger.log_human(f"HELLO slave={node_idx} MAC={mac_str}")
         elif pkt.b2 == 0x05:
             # Exact Fs sub-packet: b1:b0 is uint16 Hz. Legacy HELLO still
-            # arrives for older clients, but only this packet can carry 2929 Hz.
+            # arrives for older clients, but only this packet can carry exact
+            # rates such as 1020 Hz.
             node_idx = pkt.node_id
             fs_hz = pkt.hello_fs_exact_hz
             if 0 <= node_idx < config.MAX_NODES and fs_hz > 0:
@@ -773,7 +774,13 @@ class MainWindow(QMainWindow):
             arr = arr - float(np.mean(raw))
 
         if nd.notch_enabled:
-            arr = signal_proc.harmonic_notch(arr, nd.fs, config.NOTCH_F0, nd.notch_harm)
+            arr = signal_proc.harmonic_notch(
+                arr,
+                nd.fs,
+                config.NOTCH_F0,
+                nd.notch_harm,
+                config.NOTCH_SEARCH_HZ,
+            )
 
         nd.filt_buf.extend(arr.astype(np.float32).tolist())
 

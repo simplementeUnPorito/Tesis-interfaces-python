@@ -237,12 +237,14 @@ def harmonic_notch(
     fs: float,
     f0: float,
     n_harmonics: int,
+    search_hz: float = 2.0,
 ) -> np.ndarray:
     """
-    Remove f0 and its harmonics from x with a one-shot least-squares fit.
+    Remove mains hum and its harmonics from x with a one-shot least-squares fit.
 
     The interference is modelled as a sum of cosine/sine pairs at
-    f0, 2*f0, … n_harmonics*f0. Their amplitudes are fitted to the
+    f0, 2*f0, … n_harmonics*f0. The actual fundamental is first estimated
+    around f0±search_hz, then the amplitudes are fitted to the
     *complete* buffer x by linear least squares (a single np.linalg.lstsq
     solve over the whole capture, not an iterative per-sample update), and
     the fitted sinusoidal model is subtracted from x.
@@ -255,27 +257,109 @@ def harmonic_notch(
     Args:
         x:           Input block (1-D numpy array).
         fs:          Sample rate in Hz.
-        f0:          Fundamental frequency to cancel (Hz).
+        f0:          Nominal fundamental frequency to cancel (Hz).
         n_harmonics: Number of harmonics to cancel (including the fundamental).
+        search_hz:   Frequency-search half width around f0. Use 0 for fixed f0.
 
     Returns:
-        x with the fitted f0..n_harmonics*f0 sinusoids subtracted.
+        x with the fitted line-noise sinusoids subtracted.
     """
     x = np.asarray(x, dtype=np.float64)
     n = len(x)
-    if n == 0 or n_harmonics <= 0:
+    if n == 0 or n_harmonics <= 0 or not (fs > 0) or not (f0 > 0):
         return x.copy()
 
     t = np.arange(n, dtype=np.float64)
+    line_f0 = _estimate_line_frequency(x, fs, f0, search_hz, n_harmonics)
     cols = []
     for k in range(1, n_harmonics + 1):
-        angle = 2.0 * np.pi * (k * f0) / fs * t
+        if k * line_f0 >= fs / 2.0:
+            break
+        angle = 2.0 * np.pi * (k * line_f0) / fs * t
         cols.append(np.cos(angle))
         cols.append(np.sin(angle))
+    if not cols:
+        return x.copy()
     h = np.column_stack(cols)
 
     coeffs, *_ = np.linalg.lstsq(h, x, rcond=None)
     return x - h @ coeffs
+
+
+def _sinusoid_fit_score(x: np.ndarray, fs: float, freq: float, mean: float) -> float:
+    if not (freq > 0 and freq < fs / 2.0):
+        return -np.inf
+    t = np.arange(len(x), dtype=np.float64)
+    angle = 2.0 * np.pi * freq / fs * t
+    c = np.cos(angle)
+    s = np.sin(angle)
+    y = x - mean
+    cc = float(c @ c)
+    ss = float(s @ s)
+    cs = float(c @ s)
+    yc = float(y @ c)
+    ys = float(y @ s)
+    det = cc * ss - cs * cs
+    if det <= 1e-12:
+        return -np.inf
+    return (ss * yc * yc - 2.0 * cs * yc * ys + cc * ys * ys) / det
+
+
+def _estimate_line_frequency(
+    x: np.ndarray,
+    fs: float,
+    f0: float,
+    search_hz: float,
+    n_harmonics: int = 1,
+) -> float:
+    span = max(0.0, float(search_hz or 0.0))
+    if span <= 0.0 or len(x) < 8:
+        return f0
+    lo = max(0.1, f0 - span)
+    hi = min(fs / 2.0 - 1e-6, f0 + span)
+    if hi <= lo:
+        return f0
+    mean = float(np.mean(x))
+    n_harmonics = max(1, int(n_harmonics or 1))
+
+    best_f = f0
+    best_score = -np.inf
+    coarse = np.linspace(lo, hi, 81)
+    for freq in coarse:
+        score = _line_frequency_score(x, fs, float(freq), n_harmonics, mean)
+        if score > best_score:
+            best_score = score
+            best_f = float(freq)
+
+    coarse_step = float(coarse[1] - coarse[0]) if len(coarse) > 1 else (hi - lo)
+    fine_lo = max(lo, best_f - coarse_step)
+    fine_hi = min(hi, best_f + coarse_step)
+    for freq in np.linspace(fine_lo, fine_hi, 21):
+        score = _line_frequency_score(x, fs, float(freq), n_harmonics, mean)
+        if score > best_score:
+            best_score = score
+            best_f = float(freq)
+    return best_f
+
+
+def _line_frequency_score(
+    x: np.ndarray,
+    fs: float,
+    base_freq: float,
+    n_harmonics: int,
+    mean: float,
+) -> float:
+    score = 0.0
+    used = 0
+    for k in range(1, n_harmonics + 1):
+        freq = k * base_freq
+        if freq >= fs / 2.0:
+            break
+        s = _sinusoid_fit_score(x, fs, freq, mean)
+        if np.isfinite(s):
+            score += s
+            used += 1
+    return score if used else -np.inf
 
 
 # ── DC removal ───────────────────────────────────────────────────────────────
