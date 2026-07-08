@@ -37,9 +37,10 @@ claves que la app de escritorio (`node1_raw`, `node1_filt`, `fs`, etc.).
 ## Revisar muestras de campo de Canchita
 
 La herramienta `review_field_data.py` revisa carpetas exportadas por la web,
-detecta carpetas duplicadas comparando los puntos exactos de las señales crudas,
-marca un trigger inicial del hammer, y abre una GUI para corregir ese cursor y
-la distancia de cada muestra. Por defecto
+detecta duplicados comparando los puntos exactos de las señales crudas (primero
+carpetas completas y después captura por captura, así atrapa la misma captura
+repetida en carpetas con nombre distinto), marca un trigger inicial del hammer,
+y abre una GUI para corregir ese cursor y la distancia de cada muestra. Por defecto
 usa `raw_f32le.bin`; si alguna vez querés revisar las señales filtradas podés
 agregar `--filtered`.
 
@@ -65,6 +66,11 @@ En la ventana:
 - editar `Distancia m` si la etiqueta original estaba mal;
 - usar `Aplicar dist. a carpeta` cuando todas las capturas de esa carpeta tienen
   la misma distancia corregida;
+- usar `Invertir geo de carpeta` si el geófono de esa tanda quedó conectado al
+  revés (el circuito no tiene polaridad): invierte el geo de **todas** las
+  capturas de la carpeta actual (es un toggle y queda guardado en las marcas,
+  se aplica también a promedios, waterfall, MASW y export);
+- la zona auto marcada con dos clicks se limpia sola al cambiar de muestra;
 - desmarcar `Usar esta muestra` para excluir golpes malos;
 - usar `Filtro` para ver `Sin revision` o `Marcadas con N metros`;
 - usar `Mostrar mismo label` para filtrar la tabla al label actual y superponer
@@ -72,9 +78,35 @@ En la ventana:
 - usar `Guardar y siguiente` para marcar la muestra como revisada, guardarla y
   saltar a la próxima visible del filtro activo;
 - alternar `Modo oscuro` / `Modo claro` según convenga;
-- la ventana tiene cuatro pestañas: `Capturas` (la revisión golpe a golpe de
-  arriba), `Promedios / arrivals`, `Waterfall` y `MASW`. El botón `Ir a
-  promedios / arrivals` cambia de pestaña (ya no abre una ventana aparte);
+- la ventana tiene seis pestañas: `Capturas` (la revisión golpe a golpe de
+  arriba), `Filtros`, `Enfase`, `Promedios / arrivals`, `Waterfall` y `MASW`.
+  El botón `Ir a promedios / arrivals` cambia de pestaña (ya no abre una
+  ventana aparte);
+- **polaridad fija**: al cargar, el geófono queda siempre NO invertido y el
+  hammer siempre invertido, usando el flag `invert_signal` de la metadata solo
+  para saber cómo vino guardada cada señal (si un geo vino invertido se
+  desinvierte; si un hammer vino sin invertir se invierte);
+- la pestaña `Enfase` corrige errores chicos de posicionamiento entre tandas
+  medidas en días/carpetas distintas con el mismo label: elegís el label, ves
+  todas sus trazas superpuestas (un color por carpeta) y le das a cada carpeta
+  un offset en ms (positivo = esa tanda se corre a la izquierda). Los offsets
+  entran en promedios, waterfall, MASW y export, y persisten en
+  `Crudos\Canchita\alignment_offsets.json`;
+- la pestaña `Filtros` define un pasa-banda Butterworth aplicado con `filtfilt`
+  (fase cero, no corre los triggers) con corte bajo/alto y orden a elegir; un
+  corte en 0 desactiva ese extremo. La vista previa muestra la captura actual
+  de `Capturas` en tiempo y en espectro (original vs filtrada) para elegir la
+  banda. Con `Aplicar` activado el filtro entra en promedios, waterfall, MASW
+  y export; los parámetros persisten en
+  `Crudos\Canchita\filter_settings.json`;
+- **campañas con fs distinta** (3 s @ 2929 Hz del 3/7 y 10.59 s @ 1020 Hz del
+  7/7, ventana larga para ver bajas frecuencias ~1 Hz): dentro de cada grupo
+  de distancia las capturas se resamplean (`resample_poly`) a una fs común —
+  la mínima del grupo, o la `fs comun` fijada en `Filtros` — y se alinean por
+  su trigger. Las capturas viejas de 3 s siguen aportando al promedio en el
+  tramo donde tienen datos; la cola larga la definen solo las de 10.59 s (lo
+  faltante queda en NaN, no se inventa señal). Nunca se descarta un grupo por
+  tener fs mezcladas;
 - en la pestaña `Promedios / arrivals`, cuando todos los crudos tengan bien
   su label real de distancia, se recalculan los promedios por label usando el
   trigger del hammer (calculo liviano en memoria, no reescribe nada a disco),

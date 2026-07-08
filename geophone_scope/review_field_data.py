@@ -17,12 +17,18 @@ try:
         DEFAULT_RAW_ROOT,
         auto_pick_shot,
         default_average_arrivals_path,
+        default_alignment_offsets_path,
+        default_alignment_shot_offsets_path,
         default_annotations_path,
+        default_filter_settings_path,
         default_output_dir,
         discover_dataset,
         export_processed,
+        load_alignment_offsets,
+        load_alignment_shot_offsets,
         load_annotations,
         load_average_arrivals,
+        load_filter_settings,
         save_annotations,
     )
 except ImportError:  # pragma: no cover - script execution from this folder
@@ -30,12 +36,18 @@ except ImportError:  # pragma: no cover - script execution from this folder
         DEFAULT_RAW_ROOT,
         auto_pick_shot,
         default_average_arrivals_path,
+        default_alignment_offsets_path,
+        default_alignment_shot_offsets_path,
         default_annotations_path,
+        default_filter_settings_path,
         default_output_dir,
         discover_dataset,
         export_processed,
+        load_alignment_offsets,
+        load_alignment_shot_offsets,
         load_annotations,
         load_average_arrivals,
+        load_filter_settings,
         save_annotations,
     )
 
@@ -121,12 +133,18 @@ def main() -> int:
             if shot.shot_id not in annotations:
                 annotations[shot.shot_id] = auto_pick_shot(shot, prefer_filtered=prefer_filtered)
         average_arrivals = load_average_arrivals(default_average_arrivals_path(output_dir))
+        filter_settings = load_filter_settings(default_filter_settings_path(raw_root))
+        alignment_offsets = load_alignment_offsets(default_alignment_offsets_path(raw_root))
+        alignment_shot_offsets = load_alignment_shot_offsets(default_alignment_shot_offsets_path(raw_root))
         result = export_processed(
             dataset,
             annotations,
             output_dir,
             prefer_filtered=prefer_filtered,
             average_arrivals=average_arrivals,
+            filter_settings=filter_settings,
+            alignment_offsets=alignment_offsets,
+            alignment_shot_offsets=alignment_shot_offsets,
         )
         save_annotations(annotations_path, dataset, annotations)
         print(f"Salida: {result.output_dir}")
