@@ -701,3 +701,292 @@ NaN la zona `c > L·f` y dibuja la línea `c = L·f` en amarillo punteado
 (`_draw_lambda_max_boundary`). L se persiste (`array_length_m`) y se recalcula al
 restaurar. Verificado: con distancias span 40 m, `λ_max_vel(10 Hz)=400 m/s`, la máscara
 excluye `c>L·f` y `c<2·dx·f`, y todo pick del auto-pick cae en la banda.
+
+---
+
+## Fase 10 — Regiones por modo, selector de motores, exportadores y filtro-K bidireccional (2026-07-08)
+
+Rediseño del flujo multi-modo y multi-backend. Verificado headless (offscreen):
+`test_multimode2` 13/13, `test_masw_features` 21/21, `test_lambda` 8/8,
+`test_panel_backends` 6/6, `test_backends` 10/11 (1 assert viejo de tamaño).
+
+**Regiones por modo (antes: 1 región = 1 modo por orden de dibujo).** Ahora
+`_regions_by_mode: dict[int, list[polígono]]`: un modo puede tener VARIAS regiones,
+y la que se dibuja se agrega al MODO ACTIVO. Botón **'+ Agregar modo'** (`_add_mode`,
+M0→M1→…, deja el nuevo activo). 'Iniciar región'/'Cerrar región' operan sobre el
+modo activo; 'Quitar regiones del modo' limpia solo ese modo. **Auto-pick** arma una
+curva por cada modo con regiones, usando la UNIÓN de sus polígonos
+(`_velocity_mask_polys`), y registra cada curva en su modo. **'Limpiar picks'** ahora
+vacía `picks_by_mode[activo]` directamente (antes borraba vía alias y confundía). Se
+agregó **leyenda de colores** por modo (`mode_legend_label`, `_refresh_mode_legend`).
+
+**Inversión usa TODAS las curvas.** `_run_selected_inversion` despacha según el motor
+elegido: evodcinv y disba+MC invierten en conjunto todas las curvas de modo;
+maswavespy (1 modo) corre el Monte Carlo en vivo sobre el fundamental/activo.
+
+**Selector de motores (`masw_backends.py`).** Combo 'Motor de inversión' con:
+- `evodcinv`  — evodcinv+disba multimodo (`masw_multimodal`).
+- `disba_mc`  — disba forward multimodo + Monte Carlo propio (búsqueda aleatoria).
+- `maswavespy`— port numpy (`masw_inversion.monte_carlo_inversion`), 1 modo. El
+  paquete real de third-party/maswavespy necesita Cython (`cy_theoretical_dc`, sin
+  compilador acá); su `combination.CombineDCs` (numpy puro) sí se importa (path
+  inyectado por `_ensure_maswavespy_on_path`).
+- `adsurf`, `geopsy` — externos: `export_curves` escribe las curvas por modo en su
+  formato (ADsurf: freq/vel txt; Dinver: freq/slowness target) + README, y
+  `launch_tool` intenta abrir el ejecutable si está en el PATH. Botón 'Exportar
+  curvas (CSV)' para el formato genérico. Todos los resultados in-proc devuelven el
+  dict normalizado {beta, h, misfit, modes, theoretical, engine}.
+
+**Filtro K con sentido elegible.** `fk_directional_filter` ya tenía `keep_forward`;
+el combo 'Filtro K' (Off/Directo/Inverso) lo expone porque cuál es el sentido
+"correcto" depende del tendido (el que estaba fijo mostraba a veces el rebote).
+
+**Persistencia:** se guardan `regions_by_mode` (con compat al formato viejo `regions`),
+el motor elegido (`backend`), y `kfilter_mode` (compat con el bool viejo).
+
+**Demo:** `masw_demo.py` levanta solo el panel MASW con un gather sintético de dos
+crestas (o un `.npz` con common_time/distances/matrix) para probar regiones + todos
+los motores sin el dataset de campo. `python masw_demo.py`.
+
+**Pendientes anotados:**
+- ADsurf no se integró en-proceso (es repo GitHub con sus deps); se exporta/lanza.
+- El resultado multimodo (`_mm_result`) sigue sin persistirse entre sesiones (sí los
+  picks/regiones y el resultado del port maswavespy vía `_inv_result`).
+- 'Auto inversion' (un clic desde Waterfall) usa el flujo maswavespy de un modo, no
+  el motor seleccionado.
+
+---
+
+## Fase 11 — Smoke testing exhaustivo, robustez de 'Auto inversion', .target real y relevamiento (2026-07-08)
+
+**Smoke testing (offscreen, todo verde):**
+- App REAL completa con el dataset de Canchita (365 shots, 77 dup): construye
+  ventana, **auto-restaura el masw_state viejo (compat con formato pre-Fase 10)**,
+  cambia de tab, modo oscuro, filtro-K Off/Directo/Inverso, Ver MASW, calcular,
+  auto-pick, cerrar (guarda formato nuevo con `regions_by_mode`). 12/12.
+- MASW sobre datos REALES (21 canales, L≈40 m): imagen, 2 regiones→2 curvas, los 3
+  motores in-proc (maswavespy/disba_mc/evodcinv), guardar CSV, tema, restore vacío,
+  y casos borde (inversión con <3 picks avisa, export sin curvas avisa). 10/10.
+- Handlers de mouse por eventos mock (con el gate de `sceneBoundingRect` neutralizado,
+  que offscreen queda degenerado): dibujo de polígono, Añadir/Borrar, arrastrar (mueve
+  velocidad, freq fija), y edición en la pestaña de inversión (borrar + arrastrar libre
+  re-clava freq). OK. (Un par de "fallos" iniciales eran artefactos del test: puntos
+  exactamente en el techo del rango c, que el ray-casting excluye por estar en el borde.)
+
+**'Auto inversion' más robusta.** `auto_extract_dispersion_curve` (extractor coherente,
+no lo escribí yo) es estricto y en capturas ruidosas reales tira "no hay cresta
+coherente" y abortaba. Ahora `run_auto` **cae al `_auto_pick` simple** (cresta por
+frecuencia en la banda 2·dx ≤ λ ≤ L) si el coherente falla, así el botón siempre
+produce algo o da un mensaje claro. Verificado: en datos reales pasó de 0 picks a 90 +
+inversión OK.
+
+**Export .target real de Dinver (swprepost).** `export_curves('geopsy', …)` ahora usa
+`swprepost.Target.to_target` para escribir el `.target` real (XML gzip) por modo, listo
+para 'Load target' en Dinver; si swprepost no está, cae al texto simple. `pip install
+swprepost` (en requirements).
+
+**Relevamiento de qué más ensamblar:** ver `MASW_INTEGRATIONS.md`. Ranking:
+1. (hecho) swprepost → .target de Dinver.
+2. **swprocess** (Vantassel) → imagen MASW en Python con **std de la curva** por modo,
+   para validar la nuestra y alimentar `velstd` a evodcinv/BayHunter.
+3. **BayHunter** (GFZ) → inversión bayesiana McMC con **bandas de incertidumbre** y
+   n° de capas como incógnita (lo más "tesis"); forward SURF96 vía pysurf96.
+4. **obspy** → export SEG-Y/SU del gather crudo para que Geopsy haga su propio picking.
+El router `masw_backends` está hecho para sumar estos como backends/exportadores sin
+tocar la UI.
+
+---
+
+## Fase 12 — Auditoría de Fases 9-11 (2026-07-08, revisor distinto)
+
+Code review completo del diff (commiteado en b882918c "Casi casi" = hasta Fase 9;
+working tree = Fases 10-11) + pyflakes + tests de borde dirigidos. Resultado:
+4 bugs reales corregidos, resto verificado sano.
+
+**Corregido:**
+1. **`disba_mc` y `evodcinv` crasheaban con Capas=1** (el spin permite 1) con un
+   ValueError críptico de numpy en `column_stack`. Ahora ambos validan y andan.
+2. **Semántica de "Capas" inconsistente entre motores**: para el port maswavespy
+   n_layers=3 ⇒ 3 capas + semiespacio (beta de 4), pero para evodcinv/disba_mc
+   significaba 3 en TOTAL (beta de 3) — el mismo spin producía modelos distintos
+   según el motor. Unificado a la convención del port (capas SOBRE el semiespacio):
+   `masw_multimodal` agrega n_layers+1 Layer a evodcinv, `disba_monte_carlo` usa
+   n_layers espesores + n_layers+1 velocidades. Verificado: los 3 motores devuelven
+   (beta=4, h=3) con Capas=3.
+3. **Riesgo de pérdida de picks guardados**: `_restore_masw_state` envolvía los DOS
+   restores (waterfall y MASW) en un solo try — si el del waterfall lanzaba, el de
+   MASW no corría, los picks quedaban vacíos en memoria y el `closeEvent` los
+   pisaba en disco. Ahora cada restore tiene su propio try.
+4. **`run_auto` (camino coherente)** no refrescaba el combo de modos → mostraba
+   "0 picks" tras el auto-pick. Agregado `_refresh_mode_combo()`.
+
+**Verificado sin problemas (con tests dirigidos, todos verdes):**
+- Datos del usuario intactos tras los smoke con el dataset real (annotations 365=365,
+  ni entradas nuevas ni perdidas). El masw_state migró al formato nuevo, como debía.
+- Migraciones de formato: `regions` viejo → `regions_by_mode`, `kfilter` bool →
+  combo (True→Directo, False→Off).
+- Leyendas de pyqtgraph NO acumulan entradas en corridas repetidas (multimodo ni MC vivo).
+- Guardado con paneles vacíos: npz se omite/borra intencionalmente y el restore de
+  estado vacío no crashea. El backend elegido persiste.
+- pyflakes: solo imports de sondeo intencionales (`import disba  # probe`).
+- Curvas de 3 puntos (mínimo) invierten sin crash.
+
+**Anotado, sin acción:**
+- `_valid_velocity_mask` quedó sin llamadores en producción (la usan los tests y
+  documenta la banda 2·dx·f ≤ c ≤ L·f); se deja.
+- Si el restore del waterfall falla pero el de MASW anda, el npz re-guardado pierde
+  los arrays wf_* (recomputables con 'Ver waterfall' en un click). Aceptado.
+- El commit b882918c fue del usuario a mitad de sesión; el working tree tiene
+  Fases 10-11 + estos fixes, sin commitear.
+
+Suites (todas verdes tras los fixes): fullapp 12/12 · masw_real 10/10 · clicks 4/4 ·
+panel_backends 6/6 · multimode2 13/13 · features 21/21 · lambda 8/8 · auto_inv 5/5 ·
+persist 5/5 · edge 4/4 · consistency 4/4.
+
+## Fase 13 — Polaridad del geofono en el Waterfall: flip manual + auto-enfase en 2 etapas (2026-07-08)
+
+**Problema.** El geofono funciona conectado en cualquier sentido, pero conectado
+al revés la señal queda invertida — según el día de campo pudo quedar en
+contrafase. El usuario ya dejó en fase las capturas validadas DENTRO de cada
+punto (ej. todas las de 12 m coinciden entre sí), pero un punto entero puede
+estar en contrafase respecto a sus vecinos (12 m vs 10/14 m), lo que destruye
+el waterfall y el MASW. Además las capturas sin validar no tienen polaridad
+controlada.
+
+**Semántica clave.** Todo se corrige a nivel DATO vía `geo_flip` por captura
+(persistido en `field_review_annotations.json`) — NO es un ajuste de vista como
+el recorte/trazas ocultas del waterfall. Invertir una "traza" del waterfall =
+togglear `geo_flip` en TODAS las capturas de esa distancia: como promedio,
+filtro y resampleo son lineales, negar todos los miembros equivale exactamente
+a negar el promedio, así que la fila del waterfall se niega en memoria
+(`WaterfallPanel.flip_row`) sin recomputar, y el próximo "Refrescar promedios"
+reproduce lo mismo (la `annotations_signature` incluye `geo_flip`, así que el
+cache de promedios se invalida solo).
+
+**UI nueva (pestaña Waterfall):**
+- **"Invertir traza"** (debajo de la lista de trazas): invierte/des-invierte la
+  distancia seleccionada. `FieldReviewWindow._flip_distance_group` →
+  `flip_distance_group()` (field_review_data) + autosave + `flip_row` + refresh
+  del plot de Capturas. Es el override manual si el auto no convence.
+- **"Auto polaridad"** (fila superior; no confundir con "Auto inversion" que es
+  la inversión MASW): corre `auto_align_polarity()` y muestra resumen. Si la
+  etapa B cambió puntos validados, recalcula promedios y re-muestra el waterfall.
+
+**`auto_align_polarity()` (field_review_data.py), dos etapas:**
+1. **Intra-punto**: SOLO capturas sin validar (accepted y no reviewed). Se
+   preparan con el mismo pipeline que `compute_average_groups`
+   (`_prepare_shot_for_grouping` + resampleo a fs común + alineado al trigger)
+   y se comparan por producto punto (sin lag, ya están alineadas) contra el
+   consenso (nanmean) de las VALIDADAS de su punto; si da negativo se les
+   togglea `geo_flip` con `source="auto_polaridad"`. Las validadas no se tocan
+   nunca: el flip es una propuesta que el usuario acepta al revisarlas en
+   Capturas. Punto sin validadas → consenso = mayoría actual de las no
+   validadas (cambios mínimos).
+2. **Inter-punto**: promedios por distancia (solo validadas, igual que el
+   waterfall), encadenados desde la distancia MENOR (ancla). Correlación
+   cruzada completa (`scipy.signal.correlate`, la búsqueda de lag absorbe el
+   moveout entre puntos; demean + NaN→0 ANTES de resamplear a fs común porque
+   `resample_poly` propaga NaN); pico de |corr| negativo → se invierte el punto
+   COMPLETO vía `flip_distance_group` (validadas Y sin validar, para no romper
+   la fase interna).
+
+Idempotente (segunda corrida no cambia nada). No escribe a disco; el caller
+autosavea. Test sintético (scratchpad `test_auto_polarity.py`, verde): 3 puntos,
+uno con el punto entero en contrafase + 1 candidata cruzada, otro con 1
+candidata invertida — detecta exactamente esos flips, y la candidata del punto
+contrafase termina con `geo_flip=False` (etapa A la togglea, etapa B la
+des-togglea junto con el punto: coherente con el punto ya corregido). Smoke
+offscreen del panel (`test_waterfall_panel.py`, verde): botones, callbacks,
+`flip_row` niega solo la fila pedida.
+
+**Ojo**: el comentario viejo de `PickAnnotation.geo_flip` decía "el circuito no
+tiene polaridad"; corregido — sí importa el sentido de conexión, la señal queda
+invertida y eso destruye el promediado.
+
+## Fase 14 — Enfase POR CARPETA + promedio de carpeta en Capturas (2026-07-08)
+
+**Workflow nuevo (pedido del usuario):** en Capturas se pone BIEN el trigger de
+cada señal (ese es ahora el ajuste fino, con el promedio de su carpeta como
+referencia); en Enfase se calibra el desfase ENTRE DIAS trabajando por carpeta
+(no señal por señal, que era lento: 32 señales por label); en Waterfall se
+revisa si falta algo de fase.
+
+**Enfase (`AlignmentPanel`) reescrito a por-carpeta:**
+- Navega carpetas del label ordenadas por pico a pico del PROMEDIO de la
+  carpeta, descendente. La primera define el 0 (se confirma con OK en 0.000).
+- El gráfico muestra el promedio de cada carpeta ya confirmada (un color por
+  carpeta, leyenda con el nombre; `legend.clear()` en cada redraw para no
+  acumular entradas) + el promedio de la carpeta actual resaltado, que se
+  mueve entero con el offset en vivo.
+- Promedio por carpeta: trigger-alineado SIN offsets (la carpeta se corre
+  rígida después con `grid - offset`), interpolación a grilla común para fs
+  mezcladas, precalculado por label en `self._folder_traces` → mover el spin
+  no recarga nada (rápido).
+- "OK alineado" guarda `alignment_offsets[label][carpeta]` (estructura que ya
+  era el default por señal en `get_alignment_offset`) **y limpia los offsets
+  por señal viejos de esa carpeta** (tenían prioridad y pelearían con el
+  ajuste de carpeta). El contador de legados se muestra en el texto de la
+  carpeta. "Reset esta carpeta" saca solo esa; "Reset todo el label" limpia
+  offsets de carpeta Y por señal del label (igual que antes).
+- Entran las señales `accepted` (no hace falta `reviewed`, igual que el panel
+  viejo).
+
+**Capturas: checkbox "Promedio carpeta"** (junto a los overlays, default ON):
+superpone en el geo_plot el promedio trigger-alineado de las señales
+accepted+reviewed de la MISMA carpeta, excluyendo la actual (verde `#2ca02c`,
+`_folder_average_for_shot`, misma mecánica liviana que
+`_ok_average_for_distance`: cache de señales, sin resamplear fs — dentro de
+una carpeta la fs es una). Sirve para calzar el trigger de cada señal contra
+el consenso de su día.
+
+Tests offscreen (scratchpad, verdes): `test_alignment_panel.py` (orden por p2p
+del promedio, primera define el 0, OK guarda offset de carpeta y limpia
+per-shot legado, resets) y `test_folder_avg_capturas.py` (ventana completa:
+n correcto excluyendo actual y sin validar, overlay aparece/desaparece con el
+checkbox). pyflakes: sin hallazgos nuevos (QKeySequence/get_alignment_offset/
+masw_multimodal ya estaban sin uso en HEAD).
+
+## Fase 15 — "Rechazar esta carpeta" en Enfase: excluir sin tocar Capturas (2026-07-08)
+
+**Pedido del usuario:** que una carpeta sea "válida" en Capturas (trigger y
+forma coherentes con el resto del grupo) NO implica que tenga que entrar al
+waterfall — puede querer excluirla igual (ej. no confía en cómo quedó
+enfasada contra las demás, o algo la hace sospechosa) sin marcar sus señales
+como inválidas ni tocar el trigger.
+
+**Dato nuevo, independiente de `PickAnnotation`:** `disabled_folders: dict[str,
+list[str]]` (`{label: [carpeta, ...]}`), persistido en
+`alignment_disabled_folders.json` (`load_disabled_folders`/
+`save_disabled_folders`/`default_disabled_folders_path`, mismo patrón que
+`alignment_offsets`). Chequeo: `is_folder_disabled(disabled, distance_m,
+folder_name)`. Firma para invalidar cache: `disabled_folders_signature`.
+
+**Filtro aplicado en:** `compute_average_groups`, `export_processed` (la
+muestra individual se exporta igual — solo no entra al `grouped` del
+promedio) y `auto_align_polarity` (no participa del consenso intra-punto ni
+de la cadena inter-punto). Verificado con datos sintéticos: `n` del grupo cae
+de 4 a 2 al desactivar una carpeta, y el manifest del export confirma que el
+promedio real usó solo 2 (la muestra individual de la carpeta desactivada
+sigue en `muestras/`).
+
+**UI (`AlignmentPanel`):** botón toggle "Rechazar esta carpeta" debajo de OK
+alineado. Es ortogonal al offset: podés tener una carpeta acumulada (offset
+guardado) Y rechazada a la vez — sigue apareciendo como referencia en el
+gráfico (línea punteada, "carpeta (rechazada)" en la leyenda) para poder
+alinearla igual por si algún día se reactiva. "Reset esta carpeta" y "Reset
+todo el label" también limpian el rechazo. El estado se refleja con
+`blockSignals` en `_show_current` (mismo patrón que offset_spin) para no
+disparar `_toggle_reject` en bucle al navegar.
+
+Wiring: `FieldReviewWindow.disabled_folders` cargado en `__init__`, pasado a
+`AverageReviewPanel`, `AlignmentPanel` y `auto_align_polarity`; guardado junto
+con los demás offsets en `_alignment_offsets_changed`. `review_field_data.py
+--export-only` también lo carga y pasa a `export_processed`.
+
+Test nuevo (`test_disabled_folders_data.py`, scratchpad): confirma exclusión
+real en `compute_average_groups`/`export_processed` (no solo de UI), checks
+de `is_folder_disabled` cross-label, round-trip de persistencia y estabilidad
+de la signature. Test de UI extendido en `test_alignment_panel.py`: toggle,
+persistencia visual al navegar, limpieza en ambos resets. pyflakes limpio
+(saqué `is_folder_disabled` de los imports de field_review_app.py: solo se
+usa dentro de field_review_data.py).

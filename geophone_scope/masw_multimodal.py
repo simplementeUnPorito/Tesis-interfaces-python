@@ -71,7 +71,8 @@ def multimodal_inversion(
     curves_by_mode
         {modo: (frecuencias_Hz, velocidades_m_s)}. Modo 0 = fundamental.
     n_layers
-        Cantidad de capas (incluye el semiespacio).
+        Cantidad de capas SOBRE el semiespacio (misma convencion que el flujo
+        Monte Carlo de un modo: n_layers=3 -> 3 capas + semiespacio, beta de 4).
     maxiter, popsize, seed
         Parametros del optimizador CPSO de evodcinv.
     vs_min_ms, vs_max_ms, thickness_max_m
@@ -111,10 +112,15 @@ def multimodal_inversion(
         lam_max = float(all_c.max()) / max(float(all_f.min()), 1e-6)
         thickness_max_m = max(0.5 * lam_max, 5.0)
 
+    n_layers = int(n_layers)
+    if n_layers < 1:
+        raise ValueError("Se necesita al menos 1 capa sobre el semiespacio.")
     model = EarthModel()
-    # Espesor maximo por capa: reparte el alcance total con holgura.
-    layer_tmax_km = max((thickness_max_m / 1000.0) / max(n_layers - 1, 1) * 2.0, 1.0 / 1000.0)
-    for _ in range(int(n_layers)):
+    # n_layers capas sobre el semiespacio -> n_layers+1 entradas en evodcinv
+    # (la ultima actua de semiespacio). Espesor maximo por capa: reparte el
+    # alcance total con holgura.
+    layer_tmax_km = max((thickness_max_m / 1000.0) / n_layers * 2.0, 1.0 / 1000.0)
+    for _ in range(n_layers + 1):
         thickness = np.array([0.5 / 1000.0, layer_tmax_km])
         velocity_s = np.array([vs_min_ms / 1000.0, vs_max_ms / 1000.0])
         model.add(Layer(thickness, velocity_s))

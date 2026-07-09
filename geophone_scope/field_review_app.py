@@ -49,20 +49,24 @@ try:
         alignment_shot_offsets_signature,
         annotations_signature,
         apply_bandpass_filter,
+        auto_align_polarity,
         auto_pick_shot,
         build_waterfall_matrix,
         compute_average_groups,
         default_alignment_offsets_path,
         default_alignment_shot_offsets_path,
         default_average_arrivals_path,
+        default_disabled_folders_path,
         default_filter_settings_path,
         default_masw_arrays_path,
         default_masw_state_path,
         default_output_dir,
         default_session_path,
+        disabled_folders_signature,
         export_processed,
         filter_settings_signature,
         fk_directional_filter,
+        flip_distance_group,
         format_distance_label,
         get_alignment_offset,
         hammer_global_time_signal,
@@ -70,6 +74,7 @@ try:
         load_alignment_shot_offsets,
         load_annotations,
         load_average_arrivals,
+        load_disabled_folders,
         load_filter_settings,
         load_masw_arrays,
         load_masw_state,
@@ -82,6 +87,7 @@ try:
         save_alignment_shot_offsets,
         save_annotations,
         save_average_arrivals,
+        save_disabled_folders,
         save_filter_settings,
         save_masw_arrays,
         save_masw_state,
@@ -98,20 +104,24 @@ except ImportError:  # pragma: no cover - script execution from this folder
         alignment_shot_offsets_signature,
         annotations_signature,
         apply_bandpass_filter,
+        auto_align_polarity,
         auto_pick_shot,
         build_waterfall_matrix,
         compute_average_groups,
         default_alignment_offsets_path,
         default_alignment_shot_offsets_path,
         default_average_arrivals_path,
+        default_disabled_folders_path,
         default_filter_settings_path,
         default_masw_arrays_path,
         default_masw_state_path,
         default_output_dir,
         default_session_path,
+        disabled_folders_signature,
         export_processed,
         filter_settings_signature,
         fk_directional_filter,
+        flip_distance_group,
         format_distance_label,
         get_alignment_offset,
         hammer_global_time_signal,
@@ -119,6 +129,7 @@ except ImportError:  # pragma: no cover - script execution from this folder
         load_alignment_shot_offsets,
         load_annotations,
         load_average_arrivals,
+        load_disabled_folders,
         load_filter_settings,
         load_masw_arrays,
         load_masw_state,
@@ -131,6 +142,7 @@ except ImportError:  # pragma: no cover - script execution from this folder
         save_alignment_shot_offsets,
         save_annotations,
         save_average_arrivals,
+        save_disabled_folders,
         save_filter_settings,
         save_masw_arrays,
         save_masw_state,
@@ -145,6 +157,7 @@ try:
     )
     from .masw_inversion import monte_carlo_inversion
     from . import masw_multimodal
+    from . import masw_backends
 except ImportError:  # pragma: no cover - script execution from this folder
     from masw_dispersion import (
         auto_extract_dispersion_curve,
@@ -153,6 +166,7 @@ except ImportError:  # pragma: no cover - script execution from this folder
     )
     from masw_inversion import monte_carlo_inversion
     import masw_multimodal
+    import masw_backends
 
 
 def _plot_finite_segments(plot_widget, x: np.ndarray, y: np.ndarray, pen) -> None:
@@ -203,6 +217,8 @@ class FieldReviewWindow(QMainWindow):
         self.alignment_offsets = load_alignment_offsets(self.alignment_offsets_path)
         self.alignment_shot_offsets_path = default_alignment_shot_offsets_path(dataset.raw_root)
         self.alignment_shot_offsets = load_alignment_shot_offsets(self.alignment_shot_offsets_path)
+        self.disabled_folders_path = default_disabled_folders_path(dataset.raw_root)
+        self.disabled_folders = load_disabled_folders(self.disabled_folders_path)
         self.session_path = default_session_path(dataset.raw_root)
         self._session = load_session(self.session_path)
         self._session_last_shot_id = self._session.get("last_shot_id")
@@ -246,12 +262,18 @@ class FieldReviewWindow(QMainWindow):
         """Restaura el ultimo waterfall y analisis MASW guardados (picks por
         modo, regiones, resultado de inversion) para no rehacer todo el flujo
         al reabrir la app sobre el mismo dataset."""
+        # Cada restore en su propio try: si el del waterfall falla no debe
+        # impedir restaurar los picks/regiones de MASW (que al cerrar se
+        # re-guardan y pisarian el trabajo guardado si quedaran vacios).
         try:
             self.waterfall_panel.restore_state(
                 self._masw_state.get("waterfall", {}),
                 self._masw_arrays,
                 self.average_panel.arrivals,
             )
+        except Exception:
+            pass
+        try:
             self.masw_panel.restore_state(
                 self._masw_state.get("masw", {}),
                 self._masw_arrays,
@@ -477,6 +499,16 @@ class FieldReviewWindow(QMainWindow):
         overlay_box.addWidget(self.overlay_check)
         overlay_box.addWidget(QLabel("max"))
         overlay_box.addWidget(self.overlay_count)
+        self.folder_avg_check = QCheckBox("Promedio carpeta")
+        self.folder_avg_check.setChecked(True)
+        self.folder_avg_check.setToolTip(
+            "Superpone el promedio (alineado por trigger) de las señales YA validadas\n"
+            "de la MISMA CARPETA, sin contar la actual: referencia para dejar BIEN el\n"
+            "trigger de cada señal (el ajuste fino); el desfase entre dias se calibra\n"
+            "despues en Enfase, por carpeta."
+        )
+        self.folder_avg_check.toggled.connect(self._refresh_plot)
+        overlay_box.addWidget(self.folder_avg_check)
         left_layout.addLayout(overlay_box)
 
         self.theme_btn = QPushButton("Modo oscuro")
@@ -510,6 +542,8 @@ class FieldReviewWindow(QMainWindow):
             dark_mode=self.dark_mode,
             on_show_masw=self._show_masw_tab,
             on_auto_masw=self._auto_masw_tab,
+            on_flip_distance=self._flip_distance_group,
+            on_auto_polarity=self._auto_polarity,
         )
         self.average_panel = AverageReviewPanel(
             dataset=self.dataset,
@@ -521,6 +555,7 @@ class FieldReviewWindow(QMainWindow):
             filter_settings=self.filter_settings,
             alignment_offsets=self.alignment_offsets,
             alignment_shot_offsets=self.alignment_shot_offsets,
+            disabled_folders=self.disabled_folders,
         )
         self.filter_panel = FilterPanel(
             settings=self.filter_settings,
@@ -537,6 +572,7 @@ class FieldReviewWindow(QMainWindow):
             get_peak_to_peak=self._shot_peak_to_peak,
             dark_mode=self.dark_mode,
             on_changed=self._alignment_offsets_changed,
+            disabled=self.disabled_folders,
         )
         self.tabs.addTab(self.filter_panel, "Filtros")
         self.tabs.addTab(self.alignment_panel, "Enfase")
@@ -588,6 +624,7 @@ class FieldReviewWindow(QMainWindow):
         try:
             save_alignment_offsets(self.alignment_offsets_path, self.alignment_offsets)
             save_alignment_shot_offsets(self.alignment_shot_offsets_path, self.alignment_shot_offsets)
+            save_disabled_folders(self.disabled_folders_path, self.disabled_folders)
         except Exception:
             pass
 
@@ -605,6 +642,77 @@ class FieldReviewWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.masw_panel)
         QApplication.processEvents()
         self.masw_panel.run_auto(common_time, distances, matrix)
+
+    def _flip_distance_group(self, distance_m: float) -> None:
+        """Boton 'Invertir traza' del waterfall: invierte el punto completo
+        (geo_flip en todas sus capturas) y niega la fila en pantalla al
+        instante. Apretar de nuevo lo revierte."""
+        changed = flip_distance_group(self.dataset, self.annotations, distance_m, source="manual")
+        label = format_distance_label(distance_m)
+        if not changed:
+            self.waterfall_panel.info_label.setText(f"No hay capturas a {label} para invertir.")
+            return
+        self._autosave_annotations()
+        self.waterfall_panel.flip_row(distance_m)
+        self._refresh_plot()
+        self.waterfall_panel.info_label.setText(
+            f"Polaridad invertida en {label}: geo_flip toggleado en {changed} capturas "
+            "(persiste; afecta promedios, MASW y export)"
+        )
+
+    def _auto_polarity(self) -> None:
+        """Boton 'Auto polaridad' del waterfall: corre las dos etapas de
+        auto_align_polarity, persiste y recalcula promedios/waterfall si
+        cambio algun punto validado."""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            report = auto_align_polarity(
+                self.dataset,
+                self.annotations,
+                prefer_filtered=self.prefer_filtered,
+                filter_settings=self.filter_settings,
+                alignment_offsets=self.alignment_offsets,
+                alignment_shot_offsets=self.alignment_shot_offsets,
+                disabled_folders=self.disabled_folders,
+            )
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Auto polaridad", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        flipped_a = list(report.get("stage_a_flipped", []))
+        flipped_b = list(report.get("stage_b_flipped_distances", []))
+        skipped_b = list(report.get("stage_b_skipped_distances", []))
+        if flipped_a or flipped_b:
+            self._autosave_annotations()
+            self._refresh_plot()
+        if flipped_b:
+            # Cambiaron puntos validados: los promedios y el waterfall que se
+            # ven tienen la polaridad vieja, recalcular y re-mostrar.
+            self.average_panel.refresh(force=True)
+            if self.average_panel.averages:
+                self.average_panel.show_waterfall()
+
+        lines: list[str] = []
+        if flipped_a:
+            shown = ", ".join(flipped_a[:12]) + (", ..." if len(flipped_a) > 12 else "")
+            lines.append(
+                f"Etapa intra-punto: {len(flipped_a)} captura(s) SIN validar invertidas "
+                f"para quedar en fase con las validadas de su punto (las validadas no se tocaron; "
+                f"acepta las propuestas al revisarlas en Capturas):\n  {shown}"
+            )
+        if flipped_b:
+            labels = ", ".join(format_distance_label(d) for d in flipped_b)
+            lines.append(f"Etapa inter-punto: punto(s) completo(s) invertidos por contrafase: {labels}")
+        if skipped_b:
+            labels = ", ".join(format_distance_label(d) for d in sorted(set(skipped_b)))
+            lines.append(f"Sin promedio validado (no participaron del enfase entre puntos): {labels}")
+        if not lines:
+            lines.append("No hizo falta ningun cambio: todos los puntos ya estan en fase.")
+        lines.append(
+            "\nSi algun punto quedo al reves igual, usa 'Invertir traza' para corregirlo a mano."
+        )
+        QMessageBox.information(self, "Auto polaridad", "\n\n".join(lines))
 
     def _compute_row_order(self) -> list[int]:
         indices = list(range(len(self.dataset.shots)))
@@ -843,6 +951,7 @@ class FieldReviewWindow(QMainWindow):
         self._style_plots()
         self._plot_overlays(shot, ann)
         self._plot_ok_average(ann)
+        self._plot_folder_average(shot)
         hammer_color, geo_color, _overlay_color = self._plot_colors()
         self.hammer_plot.plot(time, hammer, pen=pg.mkPen(hammer_color, width=2.0), name="hammer")
         self.geo_plot.plot(geo_time, geo, pen=pg.mkPen(geo_color, width=2.0), name="geo")
@@ -999,6 +1108,64 @@ class FieldReviewWindow(QMainWindow):
         pen = pg.mkPen(self._OK_AVERAGE_COLOR, width=3)
         item = self.geo_plot.plot(time_s, mean, pen=pen, name="promedio OK")
         item.setZValue(30)
+
+    _FOLDER_AVERAGE_COLOR = "#2ca02c"
+
+    def _folder_average_for_shot(
+        self, current_shot: FieldShot
+    ) -> tuple[np.ndarray, np.ndarray, int] | None:
+        """Promedio del geofono (alineado por trigger) de las señales YA
+        validadas (accepted+reviewed) de la MISMA CARPETA que la actual,
+        excluyendola. Misma mecanica liviana que `_ok_average_for_distance`
+        (cache de señales, sin resamplear fs distintas — dentro de una
+        carpeta la fs es una sola)."""
+        segments: list[tuple[np.ndarray, int]] = []
+        fs_ref: float | None = None
+        for shot in self.dataset.shots:
+            if shot.folder_name != current_shot.folder_name:
+                continue
+            if shot.shot_id == current_shot.shot_id:
+                continue
+            ann = self.annotations.get(shot.shot_id)
+            if ann is None or not ann.accepted or not ann.reviewed:
+                continue
+            fs = float(shot.fs or shot.geo.fs or shot.hammer.fs)
+            if fs <= 0:
+                continue
+            if fs_ref is None:
+                fs_ref = fs
+            elif abs(fs - fs_ref) > 1e-6:
+                continue
+            _hammer, geo = self._zeroed_pair(shot, ann)
+            if geo.size == 0:
+                continue
+            trigger_idx = int(round(float(ann.trigger_s) * fs))
+            segments.append((geo, trigger_idx))
+        if not segments or fs_ref is None:
+            return None
+        rel_start = max(-idx for _geo, idx in segments)
+        rel_end = max(geo.size - idx for geo, idx in segments)
+        if rel_end <= rel_start + 1:
+            return None
+        stack = [
+            segment_nan_padded(geo, idx + rel_start, idx + rel_end)
+            for geo, idx in segments
+        ]
+        with np.errstate(invalid="ignore"):
+            mean = np.nanmean(np.vstack(stack), axis=0)
+        time_s = np.arange(rel_start, rel_end, dtype=np.float64) / fs_ref
+        return time_s, mean, len(segments)
+
+    def _plot_folder_average(self, current_shot: FieldShot) -> None:
+        if not self.folder_avg_check.isChecked():
+            return
+        result = self._folder_average_for_shot(current_shot)
+        if result is None:
+            return
+        time_s, mean, n = result
+        pen = pg.mkPen(self._FOLDER_AVERAGE_COLOR, width=2.5)
+        item = self.geo_plot.plot(time_s, mean, pen=pen, name=f"promedio carpeta (n={n})")
+        item.setZValue(28)
 
     def _trigger_line_changed(self) -> None:
         if self._loading:
@@ -1692,21 +1859,31 @@ _ALIGN_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#46f0f0
 
 
 class AlignmentPanel(QWidget):
-    """Tab de enfase: ajuste de offset de tiempo POR SEÑAL INDIVIDUAL (no por
-    carpeta) para corregir errores de posicionamiento entre tandas medidas en
-    dias/carpetas distintas antes de promediar.
+    """Tab de enfase: ajuste de offset de tiempo POR CARPETA (tanda/dia) para
+    calibrar el desfase entre dias medidos en carpetas distintas antes de
+    promediar. El ajuste fino por señal ya no vive aca: se hace poniendo BIEN
+    el trigger en Capturas (con el promedio de la carpeta como referencia).
 
-    Navega las señales de un label en orden de pico a pico descendente
-    (empezar por la mas facil de ver el golpe, mismo criterio que la tabla de
-    Capturas). El grafico muestra el ACUMULADO de las señales ya confirmadas
-    con "OK alineado" (en vez de todas a la vez), mas la señal actual
-    resaltada, para ir armando el promedio de a una.
+    Flujo: dentro de un label se navega carpeta por carpeta, ordenadas por
+    pico a pico del promedio de la carpeta descendente. La primera (la mas
+    facil de ver el golpe) define el 0; cada carpeta siguiente se muestra
+    como SU PROMEDIO contra los promedios de las carpetas ya confirmadas con
+    "OK alineado" (un color por carpeta), y el offset mueve la carpeta
+    entera.
 
-    El offset por señal tiene prioridad sobre el offset de carpeta (legado):
-    una señal nunca ajustada a mano en este panel sigue usando el offset de
-    su carpeta como default (ver `get_alignment_offset` en
-    field_review_data.py). Offset positivo corre esa señal hacia la
-    izquierda (llegada mas temprana)."""
+    El offset de carpeta se guarda en alignment_offsets[label][carpeta] y es
+    el default de todas sus señales (ver `get_alignment_offset` en
+    field_review_data.py). Los offsets por señal viejos tienen prioridad, asi
+    que al confirmar una carpeta con OK se limpian los de sus señales (el
+    trigger de Capturas es ahora el ajuste fino). Offset positivo corre la
+    carpeta hacia la izquierda (llegada mas temprana).
+
+    "Rechazar esta carpeta" es una decision independiente de "valida" en
+    Capturas: una carpeta puede tener señales con trigger/forma coherentes
+    (validas) pero el usuario no confia en como quedo respecto a las demas
+    (ej. mal enfasada, ruido raro) y la excluye de promedios/waterfall/MASW/
+    export sin tocar sus anotaciones. Se guarda en disabled_folders
+    (persistido aparte, `is_folder_disabled` en field_review_data.py)."""
 
     def __init__(
         self,
@@ -1718,6 +1895,7 @@ class AlignmentPanel(QWidget):
         get_peak_to_peak,
         dark_mode: bool = False,
         on_changed=None,
+        disabled: dict[str, list[str]] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1725,12 +1903,15 @@ class AlignmentPanel(QWidget):
         self.annotations = annotations
         self.offsets = offsets
         self.shot_offsets = shot_offsets
+        self.disabled = disabled if disabled is not None else {}
         self.get_zeroed = get_zeroed
         self.get_peak_to_peak = get_peak_to_peak
         self.dark_mode = dark_mode
         self.on_changed = on_changed
         self._loading = False
-        self._shots: list[tuple[FieldShot, PickAnnotation]] = []
+        # Carpeta -> (señales, promedio precalculado) del label actual.
+        self._folders: list[tuple[str, list[tuple[FieldShot, PickAnnotation]]]] = []
+        self._folder_traces: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._index = 0
         self._build_ui()
 
@@ -1763,7 +1944,7 @@ class AlignmentPanel(QWidget):
         nav_box.addWidget(self.next_btn)
         left_layout.addLayout(nav_box)
 
-        form_box = QGroupBox("Offset de esta señal (micro-ajuste)")
+        form_box = QGroupBox("Offset de esta carpeta (mueve todas sus señales)")
         form = QFormLayout(form_box)
         self.offset_spin = QDoubleSpinBox()
         self.offset_spin.setRange(-500.0, 500.0)
@@ -1778,9 +1959,20 @@ class AlignmentPanel(QWidget):
         self.ok_btn.clicked.connect(self._mark_ok)
         left_layout.addWidget(self.ok_btn)
 
+        self.reject_btn = QPushButton("Rechazar esta carpeta")
+        self.reject_btn.setCheckable(True)
+        self.reject_btn.setToolTip(
+            "Excluye esta carpeta de promedios/waterfall/MASW/export aunque sus señales\n"
+            "sean validas (trigger y forma coherentes en Capturas): es una decision\n"
+            "aparte, ej. porque no confia en como quedo enfasada contra las demas.\n"
+            "Las muestras individuales se siguen exportando; solo no entran al promedio."
+        )
+        self.reject_btn.toggled.connect(self._toggle_reject)
+        left_layout.addWidget(self.reject_btn)
+
         reset_box = QHBoxLayout()
-        self.reset_shot_btn = QPushButton("Reset esta señal")
-        self.reset_shot_btn.clicked.connect(self._reset_shot)
+        self.reset_shot_btn = QPushButton("Reset esta carpeta")
+        self.reset_shot_btn.clicked.connect(self._reset_folder)
         self.reset_label_btn = QPushButton("Reset todo el label")
         self.reset_label_btn.clicked.connect(self._reset_label)
         reset_box.addWidget(self.reset_shot_btn)
@@ -1788,11 +1980,15 @@ class AlignmentPanel(QWidget):
         left_layout.addLayout(reset_box)
 
         hint = QLabel(
-            "Orden: mayor pico a pico primero (la mas facil de ver el golpe). "
-            "El offset es por señal individual, no por carpeta; una señal "
-            "nunca ajustada usa el offset de su carpeta como default. El "
-            "grafico muestra el acumulado de las ya confirmadas con 'OK "
-            "alineado' (un color por señal) mas la señal actual resaltada. "
+            "Se trabaja POR CARPETA (tanda/dia), no por señal: el grafico "
+            "muestra el PROMEDIO de cada carpeta. Orden: mayor pico a pico "
+            "del promedio primero; esa carpeta define el 0. Las ya "
+            "confirmadas con 'OK alineado' quedan de referencia (un color "
+            "por carpeta) y el offset mueve la carpeta actual entera. Al "
+            "confirmar se limpian los offsets por señal viejos de esa "
+            "carpeta (el ajuste fino ahora es el trigger en Capturas). "
+            "'Rechazar esta carpeta' la saca de promedios/waterfall/MASW/export "
+            "aunque sus señales sean validas — es tu decision, no la del trigger. "
             "Se aplica a promedios, waterfall, MASW y export."
         )
         hint.setWordWrap(True)
@@ -1836,123 +2032,15 @@ class AlignmentPanel(QWidget):
         self._loading = False
         self._label_changed()
 
-    def _ordered_shots_for_label(self, label: str) -> list[tuple[FieldShot, PickAnnotation]]:
-        """Señales aceptadas de ese label, ordenadas por pico a pico
-        descendente (igual criterio que Capturas): se empieza por la mas
-        facil de ver para guiar el ajuste del resto."""
-        matches: list[tuple[FieldShot, PickAnnotation]] = []
-        for shot in self.dataset.shots:
-            ann = self.annotations.get(shot.shot_id)
-            if ann is None or not ann.accepted:
-                continue
-            if format_distance_label(ann.distance_m) != label:
-                continue
-            matches.append((shot, ann))
-        matches.sort(key=lambda pair: -self.get_peak_to_peak(pair[0]))
-        return matches
-
-    def _is_accumulated(self, shot: FieldShot) -> bool:
-        return shot.shot_id in self.shot_offsets
-
-    def _shot_default_offset_s(self, shot: FieldShot, ann: PickAnnotation) -> float:
-        if shot.shot_id in self.shot_offsets:
-            return float(self.shot_offsets[shot.shot_id])
-        label = format_distance_label(ann.distance_m)
-        return float(self.offsets.get(label, {}).get(shot.folder_name, 0.0))
-
-    def _current(self) -> tuple[FieldShot, PickAnnotation] | None:
-        if not (0 <= self._index < len(self._shots)):
-            return None
-        return self._shots[self._index]
-
-    def _label_changed(self, *_args) -> None:
-        if self._loading:
-            return
-        label = self.label_combo.currentText()
-        self._shots = self._ordered_shots_for_label(label) if label else []
-        self._index = 0
-        self._show_current()
-
-    def _show_current(self) -> None:
-        current = self._current()
-        self._loading = True
-        if current is None:
-            self.shot_label.setText("-")
-            self.offset_spin.setValue(0.0)
-        else:
-            shot, ann = current
-            n_done = sum(1 for s, _a in self._shots if self._is_accumulated(s))
-            estado = "ya alineada" if self._is_accumulated(shot) else "sin alinear todavia"
-            self.shot_label.setText(
-                f"{self._index + 1}/{len(self._shots)} — {shot.folder_name}/{shot.capture_name}\n"
-                f"dist {ann.distance_m:.3f} m — {estado} — {n_done}/{len(self._shots)} acumuladas"
-            )
-            self.offset_spin.setValue(self._shot_default_offset_s(shot, ann) * 1000.0)
-        self._loading = False
-        self._redraw()
-
-    def _move(self, delta: int) -> None:
-        if not self._shots:
-            return
-        self._index = int(np.clip(self._index + delta, 0, len(self._shots) - 1))
-        self._show_current()
-
-    def _offset_changed(self, _value_ms: float) -> None:
-        if self._loading:
-            return
-        self._redraw()
-
-    def _mark_ok(self) -> None:
-        current = self._current()
-        if current is None:
-            return
-        shot, _ann = current
-        self.shot_offsets[shot.shot_id] = float(self.offset_spin.value()) / 1000.0
-        if self.on_changed is not None:
-            self.on_changed()
-        self._move(1)
-
-    def _reset_shot(self) -> None:
-        current = self._current()
-        if current is None:
-            return
-        shot, ann = current
-        self.shot_offsets.pop(shot.shot_id, None)
-        if self.on_changed is not None:
-            self.on_changed()
-        self._loading = True
-        self.offset_spin.setValue(self._shot_default_offset_s(shot, ann) * 1000.0)
-        self._loading = False
-        self._show_current()
-
-    def _reset_label(self) -> None:
-        label = self.label_combo.currentText()
-        if label in self.offsets:
-            self.offsets[label] = {}
-        for shot, _ann in self._shots:
-            self.shot_offsets.pop(shot.shot_id, None)
-        if self.on_changed is not None:
-            self.on_changed()
-        self._show_current()
-
-    _MEAN_COLOR = "#2ca02c"
-
-    def _current_highlight_color(self) -> str:
-        return "#ffffff" if self.dark_mode else "#000000"
-
-    def _partial_mean(self, exclude_shot_id: str | None) -> tuple[np.ndarray, np.ndarray, int] | None:
-        """Media parcial de las señales YA alineadas (acumuladas) del label
-        actual, cada una corrida por su trigger + su offset guardado. Devuelve
-        (tiempo, media, n) o None si todavía no hay ninguna acumulada.
-
-        Se interpola cada señal a una grilla de tiempo común (maneja fs
-        mezcladas 2929/1020 sin problema); NaN fuera del tramo de cada una,
-        nanmean por columna. No dibuja las señales individuales: el usuario
-        solo ve esta media como referencia para alinear la señal actual."""
+    def _folder_average(
+        self, pairs: list[tuple[FieldShot, PickAnnotation]]
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Promedio del geofono de una carpeta, alineado por trigger de cada
+        señal (SIN offsets: la carpeta entera se corre despues, rigida, con
+        su offset). Interpola a una grilla comun (maneja fs mezcladas);
+        devuelve (tiempo relativo al trigger, media) o None."""
         traces: list[tuple[np.ndarray, np.ndarray]] = []
-        for shot, ann in self._shots:
-            if shot.shot_id == exclude_shot_id or not self._is_accumulated(shot):
-                continue
+        for shot, ann in pairs:
             fs = float(shot.fs or shot.geo.fs or shot.hammer.fs)
             if fs <= 0:
                 continue
@@ -1962,8 +2050,7 @@ class AlignmentPanel(QWidget):
                 continue
             if geo.size == 0:
                 continue
-            offset_s = float(self.shot_offsets.get(shot.shot_id, 0.0))
-            t = np.arange(geo.size, dtype=np.float64) / fs - float(ann.trigger_s) - offset_s
+            t = np.arange(geo.size, dtype=np.float64) / fs - float(ann.trigger_s)
             traces.append((t, geo.astype(np.float64)))
         if not traces:
             return None
@@ -1979,45 +2066,223 @@ class AlignmentPanel(QWidget):
         stack = [np.interp(grid, t, g, left=np.nan, right=np.nan) for t, g in traces]
         with np.errstate(invalid="ignore"):
             mean = np.nanmean(np.vstack(stack), axis=0)
-        return grid, mean, len(traces)
+        return grid, mean
+
+    def _ordered_folders_for_label(
+        self, label: str
+    ) -> list[tuple[str, list[tuple[FieldShot, PickAnnotation]]]]:
+        """Carpetas del label con sus señales aceptadas, ordenadas por pico a
+        pico del PROMEDIO de la carpeta descendente: se empieza por la mas
+        facil de ver el golpe, que define el 0. Precalcula los promedios en
+        self._folder_traces."""
+        by_folder: dict[str, list[tuple[FieldShot, PickAnnotation]]] = {}
+        for shot in self.dataset.shots:
+            ann = self.annotations.get(shot.shot_id)
+            if ann is None or not ann.accepted:
+                continue
+            if format_distance_label(ann.distance_m) != label:
+                continue
+            by_folder.setdefault(shot.folder_name, []).append((shot, ann))
+        self._folder_traces = {}
+        p2p: dict[str, float] = {}
+        for folder, pairs in by_folder.items():
+            result = self._folder_average(pairs)
+            if result is None:
+                continue
+            self._folder_traces[folder] = result
+            p2p[folder] = peak_to_peak(result[1])
+        return sorted(
+            ((folder, by_folder[folder]) for folder in self._folder_traces),
+            key=lambda item: -p2p[item[0]],
+        )
+
+    def _is_accumulated(self, folder: str) -> bool:
+        label = self.label_combo.currentText()
+        return folder in self.offsets.get(label, {})
+
+    def _is_rejected(self, folder: str) -> bool:
+        label = self.label_combo.currentText()
+        return folder in self.disabled.get(label, ())
+
+    def _folder_default_offset_s(self, folder: str) -> float:
+        label = self.label_combo.currentText()
+        return float(self.offsets.get(label, {}).get(folder, 0.0))
+
+    def _current(self) -> tuple[str, list[tuple[FieldShot, PickAnnotation]]] | None:
+        if not (0 <= self._index < len(self._folders)):
+            return None
+        return self._folders[self._index]
+
+    def _label_changed(self, *_args) -> None:
+        if self._loading:
+            return
+        label = self.label_combo.currentText()
+        self._folders = self._ordered_folders_for_label(label) if label else []
+        self._index = 0
+        self._show_current()
+
+    def _show_current(self) -> None:
+        current = self._current()
+        self._loading = True
+        if current is None:
+            self.shot_label.setText("-")
+            self.offset_spin.setValue(0.0)
+            self.reject_btn.blockSignals(True)
+            self.reject_btn.setChecked(False)
+            self.reject_btn.blockSignals(False)
+        else:
+            folder, pairs = current
+            n_done = sum(1 for f, _p in self._folders if self._is_accumulated(f))
+            rejected = self._is_rejected(folder)
+            if rejected:
+                estado = "RECHAZADA — no entra a promedios/waterfall/MASW/export"
+            elif self._is_accumulated(folder):
+                estado = "ya alineada"
+            elif self._index == 0 and n_done == 0:
+                estado = "esta carpeta define el 0 (confirmala con OK)"
+            else:
+                estado = "sin alinear todavia"
+            legacy = sum(1 for shot, _ann in pairs if shot.shot_id in self.shot_offsets)
+            legacy_txt = f" — {legacy} offset(s) por señal viejos (OK los limpia)" if legacy else ""
+            self.shot_label.setText(
+                f"carpeta {self._index + 1}/{len(self._folders)} — {folder} ({len(pairs)} señales)\n"
+                f"{estado} — {n_done}/{len(self._folders)} carpetas acumuladas{legacy_txt}"
+            )
+            self.offset_spin.setValue(self._folder_default_offset_s(folder) * 1000.0)
+            self.reject_btn.blockSignals(True)
+            self.reject_btn.setChecked(rejected)
+            self.reject_btn.blockSignals(False)
+        self._loading = False
+        self._redraw()
+
+    def _move(self, delta: int) -> None:
+        if not self._folders:
+            return
+        self._index = int(np.clip(self._index + delta, 0, len(self._folders) - 1))
+        self._show_current()
+
+    def _offset_changed(self, _value_ms: float) -> None:
+        if self._loading:
+            return
+        self._redraw()
+
+    def _mark_ok(self) -> None:
+        current = self._current()
+        if current is None:
+            return
+        folder, pairs = current
+        label = self.label_combo.currentText()
+        self.offsets.setdefault(label, {})[folder] = float(self.offset_spin.value()) / 1000.0
+        # Los offsets por señal viejos tienen prioridad sobre el de carpeta y
+        # pelearian con este ajuste: se limpian (el ajuste fino ahora es el
+        # trigger en Capturas).
+        for shot, _ann in pairs:
+            self.shot_offsets.pop(shot.shot_id, None)
+        if self.on_changed is not None:
+            self.on_changed()
+        self._move(1)
+
+    def _toggle_reject(self, checked: bool) -> None:
+        if self._loading:
+            return
+        current = self._current()
+        if current is None:
+            return
+        folder, _pairs = current
+        label = self.label_combo.currentText()
+        entry = self.disabled.setdefault(label, [])
+        if checked and folder not in entry:
+            entry.append(folder)
+        elif not checked and folder in entry:
+            entry.remove(folder)
+        if self.on_changed is not None:
+            self.on_changed()
+        self._show_current()
+
+    def _reset_folder(self) -> None:
+        current = self._current()
+        if current is None:
+            return
+        folder, _pairs = current
+        label = self.label_combo.currentText()
+        self.offsets.get(label, {}).pop(folder, None)
+        entry = self.disabled.get(label)
+        if entry and folder in entry:
+            entry.remove(folder)
+        if self.on_changed is not None:
+            self.on_changed()
+        self._show_current()
+
+    def _reset_label(self) -> None:
+        label = self.label_combo.currentText()
+        if label in self.offsets:
+            self.offsets[label] = {}
+        if label in self.disabled:
+            self.disabled[label] = []
+        for _folder, pairs in self._folders:
+            for shot, _ann in pairs:
+                self.shot_offsets.pop(shot.shot_id, None)
+        if self.on_changed is not None:
+            self.on_changed()
+        self._show_current()
+
+    _MEAN_COLOR = "#2ca02c"
+
+    def _current_highlight_color(self) -> str:
+        return "#ffffff" if self.dark_mode else "#000000"
 
     def _redraw(self) -> None:
         self.plot.clear()
         label = self.label_combo.currentText()
         current = self._current()
-        current_shot_id = current[0].shot_id if current is not None else None
-        # Media parcial de las ya alineadas (una sola traza de referencia, no
-        # las 30 individuales) — excluye la señal actual.
-        mean_result = self._partial_mean(exclude_shot_id=current_shot_id)
+        current_folder = current[0] if current is not None else None
+        # Promedios de las carpetas ya confirmadas (un color por carpeta),
+        # cada uno corrido por su offset guardado — son la referencia.
+        legend = self.plot.plotItem.legend
+        if legend is None:
+            legend = self.plot.addLegend()
+        else:
+            legend.clear()
         n_acc = 0
-        if mean_result is not None:
-            grid, mean, n_acc = mean_result
-            self.plot.plot(
-                grid, mean, pen=pg.mkPen(self._MEAN_COLOR, width=3), name="media parcial"
-            )
-        # Señal actual (con el offset en vivo del spin) para moverla contra la media.
-        if current is not None:
-            shot, ann = current
-            fs = float(shot.fs or shot.geo.fs or shot.hammer.fs)
-            if fs > 0:
-                try:
-                    _hammer, geo = self.get_zeroed(shot, ann)
-                except Exception:
-                    geo = np.array([])
-                if geo.size:
-                    offset_s = float(self.offset_spin.value()) / 1000.0
-                    time = np.arange(geo.size, dtype=np.float64) / fs - float(ann.trigger_s) - offset_s
-                    self.plot.plot(
-                        time, geo, pen=pg.mkPen(self._current_highlight_color(), width=2), name="señal actual"
-                    )
+        for folder, _pairs in self._folders:
+            if folder == current_folder or not self._is_accumulated(folder):
+                continue
+            trace = self._folder_traces.get(folder)
+            if trace is None:
+                continue
+            grid, mean = trace
+            offset_s = self._folder_default_offset_s(folder)
+            color = _ALIGN_COLORS[n_acc % len(_ALIGN_COLORS)]
+            rejected = self._is_rejected(folder)
+            pen = pg.mkPen(color, width=1.6, style=Qt.PenStyle.DashLine if rejected else Qt.PenStyle.SolidLine)
+            name = f"{folder} (rechazada)" if rejected else folder
+            self.plot.plot(grid - offset_s, mean, pen=pen, name=name)
+            n_acc += 1
+        # Promedio de la carpeta actual (con el offset en vivo del spin) para
+        # moverla entera contra las referencias.
+        if current_folder is not None:
+            trace = self._folder_traces.get(current_folder)
+            if trace is not None:
+                grid, mean = trace
+                offset_s = float(self.offset_spin.value()) / 1000.0
+                self.plot.plot(
+                    grid - offset_s,
+                    mean,
+                    pen=pg.mkPen(self._current_highlight_color(), width=2.4),
+                    name=f"{current_folder} (actual)",
+                )
         self.plot.setXRange(-0.1, 1.0, padding=0.02)
         if not label:
             self.status_label.setText("Elegi un label para empezar a alinear")
-        else:
-            ref = "verde" if n_acc else "todavía sin media (esta será la primera)"
+        elif n_acc == 0:
             self.status_label.setText(
-                f"{label}: media parcial de {n_acc} ya alineadas ({ref}) + señal actual "
-                f"({'blanco' if self.dark_mode else 'negro'}). Mové el offset para calzarla."
+                f"{label}: sin carpetas de referencia todavia — esta define el 0, confirmala con OK."
+            )
+        else:
+            self.status_label.setText(
+                f"{label}: promedios de {n_acc} carpeta(s) ya alineadas (un color cada una) + "
+                f"promedio de la carpeta actual ({'blanco' if self.dark_mode else 'negro'}). "
+                "Mové el offset para calzarla."
             )
 
     def set_dark_mode(self, dark: bool) -> None:
@@ -2047,6 +2312,7 @@ class AverageReviewPanel(QWidget):
         filter_settings: FilterSettings | None = None,
         alignment_offsets: dict[str, dict[str, float]] | None = None,
         alignment_shot_offsets: dict[str, float] | None = None,
+        disabled_folders: dict[str, list[str]] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2059,6 +2325,7 @@ class AverageReviewPanel(QWidget):
         self.filter_settings = filter_settings
         self.alignment_offsets = alignment_offsets
         self.alignment_shot_offsets = alignment_shot_offsets
+        self.disabled_folders = disabled_folders
         self.arrivals_path = default_average_arrivals_path(self.output_dir)
         self.arrivals = load_average_arrivals(self.arrivals_path)
         self.averages: list[dict] = []
@@ -2082,6 +2349,11 @@ class AverageReviewPanel(QWidget):
 
     def refresh(self, force: bool = False) -> None:
         self._refresh_averages(force=force)
+
+    def show_waterfall(self) -> None:
+        """Re-arma y muestra el waterfall con los promedios actuales (mismo
+        camino que el boton 'Ver waterfall')."""
+        self._show_waterfall()
 
     def set_dark_mode(self, dark: bool) -> None:
         self.dark_mode = bool(dark)
@@ -2178,6 +2450,7 @@ class AverageReviewPanel(QWidget):
             filter_settings_signature(self.filter_settings),
             alignment_offsets_signature(self.alignment_offsets),
             alignment_shot_offsets_signature(self.alignment_shot_offsets),
+            disabled_folders_signature(self.disabled_folders),
         )
         if not force and self.averages and signature == self._last_signature:
             self.summary_label.setText(f"{len(self.averages)} promedios (sin cambios) | {self.output_dir}")
@@ -2195,6 +2468,7 @@ class AverageReviewPanel(QWidget):
                 filter_settings=self.filter_settings,
                 alignment_offsets=self.alignment_offsets,
                 alignment_shot_offsets=self.alignment_shot_offsets,
+                disabled_folders=self.disabled_folders,
             )
         except Exception as exc:
             QMessageBox.critical(self, "No se pudieron calcular promedios", str(exc))
@@ -2355,6 +2629,7 @@ class AverageReviewPanel(QWidget):
                 filter_settings=self.filter_settings,
                 alignment_offsets=self.alignment_offsets,
                 alignment_shot_offsets=self.alignment_shot_offsets,
+                disabled_folders=self.disabled_folders,
             )
         except Exception as exc:
             QMessageBox.critical(self, "No se pudo exportar waterfall", str(exc))
@@ -2416,19 +2691,27 @@ class WaterfallPanel(QWidget):
     SOLO de vista (y de lo que se manda a MASW con 'Ver MASW'/'Auto
     inversion'); no afecta el CSV/PNG/PDF exportados desde la pestaña
     Promedios, que siguen usando todas las distancias y el rango completo
-    (ver nota en HANDOFF_FIELD_REVIEW.md, Fase 8)."""
+    (ver nota en HANDOFF_FIELD_REVIEW.md, Fase 8).
+
+    Excepcion a lo anterior: 'Invertir traza' y 'Auto polaridad' NO son de
+    vista — togglean geo_flip en las anotaciones (a nivel captura), asi que
+    persisten y afectan promedios, MASW y export."""
 
     def __init__(
         self,
         dark_mode: bool = False,
         on_show_masw=None,
         on_auto_masw=None,
+        on_flip_distance=None,
+        on_auto_polarity=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.dark_mode = dark_mode
         self.on_show_masw = on_show_masw
         self.on_auto_masw = on_auto_masw
+        self.on_flip_distance = on_flip_distance
+        self.on_auto_polarity = on_auto_polarity
         self._crosshair_v: pg.InfiniteLine | None = None
         self._crosshair_h: pg.InfiniteLine | None = None
         self._proxy = None
@@ -2451,15 +2734,20 @@ class WaterfallPanel(QWidget):
         )
         self.raw_amplitude_check.toggled.connect(self._redraw)
         top.addWidget(self.raw_amplitude_check)
-        self.kfilter_check = QCheckBox("Filtro K (quitar rebotes)")
-        self.kfilter_check.setToolTip(
+        top.addWidget(QLabel("Filtro K"))
+        self.kfilter_combo = QComboBox()
+        self.kfilter_combo.addItems(["Off", "Directo", "Inverso"])
+        self.kfilter_combo.setToolTip(
             "Filtro direccional frecuencia-numero de onda (f-k).\n"
-            "Separa las ondas por direccion y deja solo las que viajan de la fuente hacia\n"
-            "los geofonos (moveout positivo), eliminando rebotes/reflexiones que vuelven.\n"
+            "Separa las ondas por direccion de propagacion. El sentido 'correcto' depende de\n"
+            "como quedo el tendido; como no esta bien definido, elegi el que deje la onda\n"
+            "principal (directa) y no el rebote:\n"
+            " - Directo: conserva moveout positivo (fuente→geofonos, k·f ≤ 0).\n"
+            " - Inverso: conserva la mitad opuesta (rebotes / sentido contrario).\n"
             "Se aplica a la vista y a lo que se manda a MASW; el export no se toca."
         )
-        self.kfilter_check.toggled.connect(self._redraw)
-        top.addWidget(self.kfilter_check)
+        self.kfilter_combo.currentIndexChanged.connect(self._redraw)
+        top.addWidget(self.kfilter_combo)
         self.masw_btn = QPushButton("Ver MASW")
         self.masw_btn.setToolTip(
             "Analisis MASW paso a paso: imagen de dispersion, picking manual, inversion"
@@ -2473,6 +2761,19 @@ class WaterfallPanel(QWidget):
         )
         self.auto_masw_btn.clicked.connect(self._send_to_auto_masw)
         top.addWidget(self.auto_masw_btn)
+        self.auto_polarity_btn = QPushButton("Auto polaridad")
+        self.auto_polarity_btn.setToolTip(
+            "Corrige la polaridad del geofono en dos etapas:\n"
+            " 1) Intra-punto: las capturas SIN validar se enfasan contra el consenso de las\n"
+            "    validadas de su distancia (las validadas no se tocan; el flip queda como\n"
+            "    propuesta que aceptas al revisarlas en Capturas).\n"
+            " 2) Inter-punto: cada promedio se correlaciona con el del punto vecino ya\n"
+            "    alineado; si da en contrafase se invierte el punto COMPLETO (geo_flip).\n"
+            "Persiste en las anotaciones y afecta promedios, MASW y export.\n"
+            "(No confundir con 'Auto inversion', que es la inversion MASW.)"
+        )
+        self.auto_polarity_btn.clicked.connect(self._request_auto_polarity)
+        top.addWidget(self.auto_polarity_btn)
         layout.addLayout(top)
 
         trim_box = QHBoxLayout()
@@ -2521,6 +2822,14 @@ class WaterfallPanel(QWidget):
         trace_btn_box.addWidget(self.trace_all_btn)
         trace_btn_box.addWidget(self.trace_none_btn)
         traces_layout.addLayout(trace_btn_box)
+        self.flip_trace_btn = QPushButton("Invertir traza")
+        self.flip_trace_btn.setToolTip(
+            "Invierte la polaridad de la traza seleccionada (apretar de nuevo la devuelve).\n"
+            "No es solo de vista: togglea geo_flip en TODAS las capturas de esa distancia,\n"
+            "asi el cambio persiste y llega a promedios, MASW y export."
+        )
+        self.flip_trace_btn.clicked.connect(self._flip_selected_trace)
+        traces_layout.addWidget(self.flip_trace_btn)
         body.addWidget(traces_box)
 
         plot_box = QWidget()
@@ -2597,14 +2906,20 @@ class WaterfallPanel(QWidget):
         return common_time[lo:hi], matrix[:, lo:hi]
 
     def _apply_kfilter(self, common_time: np.ndarray, matrix: np.ndarray) -> np.ndarray:
-        """Filtro f-k direccional (quita rebotes) sobre TODAS las distancias,
-        antes de descartar las ocultas — asi la resolucion en k usa el tendido
-        completo. Se aplica sobre la matriz ya recortada en tiempo."""
-        if not self.kfilter_check.isChecked() or self._last_data is None:
+        """Filtro f-k direccional sobre TODAS las distancias, antes de descartar
+        las ocultas — asi la resolucion en k usa el tendido completo. El sentido
+        se elige en el combo (Directo = moveout positivo, Inverso = la mitad
+        opuesta) porque cual es el 'correcto' depende del tendido."""
+        mode = self.kfilter_combo.currentText() if hasattr(self, "kfilter_combo") else "Off"
+        if mode == "Off" or self._last_data is None:
             return matrix
         distances = self._last_data["distances"]
+        keep_forward = mode != "Inverso"
         try:
-            return np.asarray(fk_directional_filter(matrix, distances, common_time), dtype=np.float64)
+            return np.asarray(
+                fk_directional_filter(matrix, distances, common_time, keep_forward=keep_forward),
+                dtype=np.float64,
+            )
         except Exception:
             return matrix
 
@@ -2671,7 +2986,7 @@ class WaterfallPanel(QWidget):
             "trim_start": float(self.trim_start_spin.value()),
             "trim_end": float(self.trim_end_spin.value()),
             "raw_amplitude": bool(self.raw_amplitude_check.isChecked()),
-            "kfilter": bool(self.kfilter_check.isChecked()),
+            "kfilter_mode": self.kfilter_combo.currentText(),
             "n_averages": int(d["n_averages"]) if d else 0,
             "has_data": d is not None,
             "hammer_n": (hammer.get("n") if isinstance(hammer, dict) else None),
@@ -2712,11 +3027,17 @@ class WaterfallPanel(QWidget):
         for widget, key in (
             (self.trim_enabled_check, "trim_enabled"),
             (self.raw_amplitude_check, "raw_amplitude"),
-            (self.kfilter_check, "kfilter"),
         ):
             widget.blockSignals(True)
             widget.setChecked(bool(state.get(key, False)))
             widget.blockSignals(False)
+        kmode = state.get("kfilter_mode")
+        if kmode is None:  # compat con el bool viejo
+            kmode = "Directo" if state.get("kfilter") else "Off"
+        self.kfilter_combo.blockSignals(True)
+        idx = self.kfilter_combo.findText(str(kmode))
+        self.kfilter_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.kfilter_combo.blockSignals(False)
         for spin, key in ((self.trim_start_spin, "trim_start"), (self.trim_end_spin, "trim_end")):
             if key in state:
                 spin.blockSignals(True)
@@ -2842,6 +3163,37 @@ class WaterfallPanel(QWidget):
         mode = "amplitud real (atenuacion visible)" if raw_amplitude else "normalizada por traza"
         self.info_label.setText(f"{n_averages} promedios{extra} | escala: {mode}")
 
+    def _flip_selected_trace(self) -> None:
+        if self._last_data is None:
+            self.info_label.setText("Todavia no hay waterfall calculado.")
+            return
+        item = self.trace_list.currentItem()
+        if item is None:
+            self.info_label.setText("Selecciona una traza en la lista para invertirla.")
+            return
+        if self.on_flip_distance is not None:
+            self.on_flip_distance(float(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _request_auto_polarity(self) -> None:
+        if self.on_auto_polarity is not None:
+            self.on_auto_polarity()
+
+    def flip_row(self, distance_m: float) -> bool:
+        """Niega en memoria la fila del waterfall de esa distancia y redibuja.
+        Como el promedio es lineal, esto es exactamente lo mismo que
+        recalcular los promedios con el geo_flip ya toggleado."""
+        if self._last_data is None:
+            return False
+        key = round(float(distance_m), 6)
+        distances = self._last_data["distances"]
+        matrix = self._last_data["matrix"]
+        for i, distance in enumerate(distances):
+            if round(float(distance), 6) == key:
+                matrix[i, :] = -matrix[i, :]
+                self._redraw()
+                return True
+        return False
+
     def _send_to_masw(self) -> None:
         self._emit_masw(self.on_show_masw)
 
@@ -2949,6 +3301,9 @@ class MaswPanel(QWidget):
         self.inner_tabs.addTab(self._build_inversion_tab(), "2. Inversion")
         self.inner_tabs.addTab(self._build_profile_tab(), "3. Perfil Vs")
         self._apply_theme()
+        self._refresh_mode_combo()
+        self._refresh_mode_legend()
+        self._backend_changed()
 
     def _build_dispersion_tab(self) -> QWidget:
         tab = QWidget()
@@ -3172,22 +3527,40 @@ class MaswPanel(QWidget):
         form.addRow("Densidad", self.rho_spin)
         left_layout.addWidget(form_box)
 
-        self.run_inv_btn = QPushButton("Correr inversion")
-        self.run_inv_btn.clicked.connect(self._run_inversion)
+        engine_box = QGroupBox("Motor de inversión")
+        engine_layout = QVBoxLayout(engine_box)
+        self.backend_combo = QComboBox()
+        for key, label, _kind in masw_backends.BACKENDS:
+            self.backend_combo.addItem(label, key)
+        self.backend_combo.setToolTip(
+            "Herramienta con la que se invierte. Los 'inproc' corren dentro de la app; "
+            "las externas (ADsurf, Geopsy/Dinver) exportan las curvas y, si estan en el PATH, "
+            "se lanzan. maswavespy usa el port numpy (1 modo); evodcinv y disba+MC usan TODAS "
+            "las curvas de modo."
+        )
+        self.backend_combo.currentIndexChanged.connect(self._backend_changed)
+        engine_layout.addWidget(self.backend_combo)
+        self.backend_status_label = QLabel("")
+        self.backend_status_label.setWordWrap(True)
+        engine_layout.addWidget(self.backend_status_label)
+        left_layout.addWidget(engine_box)
+
+        self.run_inv_btn = QPushButton("Correr inversión")
+        self.run_inv_btn.setToolTip(
+            "Corre el motor seleccionado con las curvas pickeadas (todas las de modo si el motor "
+            "es multimodo). Para motores externos, exporta/lanza."
+        )
+        self.run_inv_btn.clicked.connect(self._run_selected_inversion)
         self.stop_inv_btn = QPushButton("Detener")
         self.stop_inv_btn.setEnabled(False)
         self.stop_inv_btn.clicked.connect(self._stop_inversion)
         left_layout.addWidget(self.run_inv_btn)
         left_layout.addWidget(self.stop_inv_btn)
 
-        self.run_mm_btn = QPushButton("Inversión conjunta multimodo")
-        self.run_mm_btn.setToolTip(
-            "Ajusta un unico perfil de capas a TODAS las curvas de modo a la vez (evodcinv + disba, "
-            "algoritmo evolutivo CPSO). Necesita al menos un modo con 3+ picks.\n"
-            "Requiere: pip install disba evodcinv."
-        )
-        self.run_mm_btn.clicked.connect(self._run_multimodal_inversion)
-        left_layout.addWidget(self.run_mm_btn)
+        self.export_curves_btn = QPushButton("Exportar curvas (CSV)")
+        self.export_curves_btn.setToolTip("Guarda las curvas de todos los modos como CSV para revisarlas o cargarlas en otra herramienta.")
+        self.export_curves_btn.clicked.connect(lambda: self._export_to_tool("generic"))
+        left_layout.addWidget(self.export_curves_btn)
 
         edit_box = QGroupBox("Editar curva (puntos)")
         edit_layout = QVBoxLayout(edit_box)
@@ -3346,21 +3719,36 @@ class MaswPanel(QWidget):
         if self._last_result is None:
             return
         f, c, A = self._last_result
+        fell_back = False
         try:
             freqs, c_obs = auto_extract_dispersion_curve(
                 f, c, A, np.asarray(self._raw_distances, dtype=np.float64)
             )
-        except ValueError as exc:
-            QMessageBox.warning(self, "Auto inversion", str(exc))
-            return
-        self._reset_all_modes()
-        self.picks.update({float(fv): float(cv) for fv, cv in zip(freqs, c_obs)})
-        self.pick_fmin_spin.setValue(float(freqs[0]))
-        self.pick_fmax_spin.setValue(float(freqs[-1]))
+            self._reset_all_modes()
+            self.picks.update({float(fv): float(cv) for fv, cv in zip(freqs, c_obs)})
+            self.pick_fmin_spin.setValue(float(freqs[0]))
+            self.pick_fmax_spin.setValue(float(freqs[-1]))
+        except ValueError:
+            # El extractor "coherente" es estricto y en capturas ruidosas puede
+            # no encontrar cresta. En vez de abortar, cae al auto-pick simple
+            # (cresta por frecuencia dentro de la banda valida 2*dx <= lambda <= L).
+            fell_back = True
+            self._reset_all_modes()
+            self._auto_pick()
+            if not self.picks:
+                QMessageBox.warning(
+                    self, "Auto inversion",
+                    "No se pudo extraer una curva automatica (ni con el pick simple). "
+                    "Proba a mano: defini regiones por modo y usa 'Auto-pick'.",
+                )
+                return
+            ks = sorted(self.picks)
+            freqs = np.array(ks, dtype=np.float64)
+        self._refresh_mode_combo()
         self._refresh_pick_scatter()
+        modo_txt = " (pick simple: cresta por frecuencia)" if fell_back else " (coherente + rechazo de outliers)"
         self.info_label.setText(
-            f"Auto-pick: {len(self.picks)} puntos coherentes en {freqs[0]:.1f}-{freqs[-1]:.1f} Hz "
-            "(umbral de amplitud + limites del tendido + rechazo de outliers)."
+            f"Auto-pick: {len(self.picks)} puntos en {freqs[0]:.1f}-{freqs[-1]:.1f} Hz{modo_txt}."
         )
         QApplication.processEvents()
         self._go_to_inversion()
@@ -3885,8 +4273,8 @@ class MaswPanel(QWidget):
             self._refresh_m0_draw()
             self.m0_close_btn.setEnabled(len(self._m0_draft) >= 3)
             self.info_label.setText(
-                f"Poligono M0: {len(self._m0_draft)} vertice(s). Segui clickeando y presiona "
-                "'Cerrar polígono M0' cuando tengas al menos 3."
+                f"Región M{self._active_mode}: {len(self._m0_draft)} vertice(s). Segui clickeando y "
+                "presiona 'Cerrar región' cuando tengas al menos 3."
             )
             event.accept()
             return
@@ -4139,6 +4527,60 @@ class MaswPanel(QWidget):
     def _stop_inversion(self) -> None:
         self._abort_inversion = True
 
+    def _modes_with_curve(self, min_points: int = 3) -> list[int]:
+        """Modos con al menos `min_points` picks (curvas invertibles)."""
+        return [m for m in sorted(self.picks_by_mode) if len(self.picks_by_mode[m]) >= min_points]
+
+    def _curves_by_mode_for_inversion(self, min_points: int = 3) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+        out: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for m, picks in self.picks_by_mode.items():
+            if len(picks) < min_points:
+                continue
+            fs = np.array(sorted(picks), dtype=np.float64)
+            cs = np.array([picks[k] for k in sorted(picks)], dtype=np.float64)
+            out[int(m)] = (fs, cs)
+        return out
+
+    def _backend_changed(self, _idx: int = 0) -> None:
+        if not hasattr(self, "backend_combo"):
+            return
+        key = self.backend_combo.currentData()
+        if key is None:
+            return
+        kind = masw_backends.backend_kind(key)
+        status = masw_backends.backend_status(key)
+        n = len(self._modes_with_curve())
+        if kind == "export":
+            self.run_inv_btn.setText("Exportar / lanzar")
+            hint = "Exporta las curvas y, si está en el PATH, lanza la herramienta."
+        else:
+            self.run_inv_btn.setText("Correr inversión")
+            scope = "todas las curvas" if key in ("evodcinv", "disba_mc") else "1 modo (fundamental/activo)"
+            hint = f"Usa {scope}."
+        self.backend_status_label.setText(f"{status} · {hint} · {n} modo(s) con curva")
+
+    def _run_selected_inversion(self) -> None:
+        if self._inverting:
+            return
+        key = self.backend_combo.currentData() if hasattr(self, "backend_combo") else "maswavespy"
+        if masw_backends.backend_kind(key) == "export":
+            self._export_to_tool(key, launch=True)
+            return
+        if not masw_backends.backend_available(key):
+            QMessageBox.warning(self, "MASW", f"El motor no está disponible: {masw_backends.backend_status(key)}")
+            return
+        if key == "maswavespy":
+            # Un solo modo: flujo Monte Carlo en vivo sobre el modo activo/fundamental.
+            modes = self._modes_with_curve()
+            if modes and self._active_mode not in modes:
+                self._active_mode = modes[0]
+                self.picks = self.picks_by_mode[self._active_mode]
+                self._refresh_mode_combo()
+            self._run_inversion()
+            return
+        # evodcinv / disba_mc: inversion conjunta con TODAS las curvas.
+        self._run_backend_multimodal(key)
+
     def _run_inversion(self) -> None:
         if self._inverting:
             return
@@ -4269,55 +4711,74 @@ class MaswPanel(QWidget):
 
     # -------------------------------------- inversion conjunta multi-modo
 
-    def _run_multimodal_inversion(self) -> None:
+    def _export_to_tool(self, tool: str, launch: bool = False) -> None:
+        """Exporta las curvas de todos los modos para una herramienta externa
+        (o formato generico) y, si `launch`, intenta abrirla."""
+        curves_by_mode = self._curves_by_mode_for_inversion()
+        if not curves_by_mode:
+            QMessageBox.warning(self, "MASW", "No hay curvas pickeadas (algun modo con 3+ picks).")
+            return
+        out_dir = QFileDialog.getExistingDirectory(self, "Carpeta para exportar las curvas")
+        if not out_dir:
+            return
+        try:
+            paths = masw_backends.export_curves(tool, curves_by_mode, out_dir)
+        except Exception as exc:
+            QMessageBox.critical(self, "MASW", f"No pude exportar: {exc}")
+            return
+        msg = "Exportado:\n" + "\n".join(str(p) for p in paths)
+        if launch and masw_backends.backend_kind(tool) == "export":
+            launched, note = masw_backends.launch_tool(tool, paths)
+            msg += "\n\n" + note
+        QMessageBox.information(self, "MASW", msg)
+        self.inv_status_label.setText(f"Curvas exportadas ({len(curves_by_mode)} modos) → {out_dir}")
+
+    def _run_backend_multimodal(self, key: str) -> None:
         if self._inverting:
             return
-        curves = {m: p for m, p in self.picks_by_mode.items() if len(p) >= 3}
-        if not curves:
+        curves_by_mode = self._curves_by_mode_for_inversion()
+        if not curves_by_mode:
             QMessageBox.warning(
                 self, "MASW",
                 "Se necesita al menos un modo con 3+ picks. Defini regiones por modo y corre 'Auto-pick'.",
             )
             return
-        if not masw_multimodal.available():
-            QMessageBox.warning(
-                self, "MASW",
-                "La inversion multimodo necesita las librerias 'disba' y 'evodcinv'.\n"
-                "Instalalas con:\n    pip install disba evodcinv",
-            )
+        if not masw_backends.backend_available(key):
+            QMessageBox.warning(self, "MASW", f"Motor no disponible: {masw_backends.backend_status(key)}")
             return
-        curves_by_mode = {
-            int(m): (
-                np.array(sorted(p), dtype=np.float64),
-                np.array([p[k] for k in sorted(p)], dtype=np.float64),
-            )
-            for m, p in curves.items()
-        }
         self._inverting = True
-        self.run_mm_btn.setEnabled(False)
         self.run_inv_btn.setEnabled(False)
         self.inv_status_label.setText(
-            f"Corriendo inversion multimodo ({len(curves_by_mode)} modos) con evodcinv+disba... puede tardar."
+            f"Corriendo inversión ({masw_backends.backend_label(key)}) con {len(curves_by_mode)} modo(s)... puede tardar."
         )
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         QApplication.processEvents()
         try:
-            res = masw_multimodal.multimodal_inversion(
+            res = masw_backends.run_inversion(
+                key,
                 curves_by_mode,
                 n_layers=int(self.nlayers_spin.value()),
                 maxiter=int(max(self.niter_spin.value() // 10, 30)),
                 popsize=20,
+                n_iter=int(self.niter_spin.value()),
+                nu=float(self.nu_spin.value()),
+                rho=float(self.rho_spin.value()),
+                bs=float(self.bs_spin.value()),
+                bh=float(self.bh_spin.value()),
             )
         except Exception as exc:
-            QMessageBox.critical(self, "MASW", f"La inversion multimodo fallo: {exc}")
+            QMessageBox.critical(self, "MASW", f"La inversión falló: {exc}")
             return
         finally:
             QApplication.restoreOverrideCursor()
             self._inverting = False
-            self.run_mm_btn.setEnabled(True)
             self.run_inv_btn.setEnabled(True)
         self._mm_result = res
         self._display_multimodal_result(res)
+
+    # Alias historico (por si algo externo lo llama): usa evodcinv.
+    def _run_multimodal_inversion(self) -> None:
+        self._run_backend_multimodal("evodcinv")
 
     def _display_multimodal_result(self, res: dict) -> None:
         for item in self._inv_model_items:
@@ -4363,8 +4824,9 @@ class MaswPanel(QWidget):
         self.profile_plot.clear()
         self.profile_plot.plot(xs, ys, pen=green, name="Vs multimodo")
         boundaries = np.concatenate(([0.0], np.cumsum(h)))
+        engine = res.get("engine", "multimodo")
         lines = [
-            "INVERSION MULTIMODO (evodcinv + disba)",
+            f"INVERSION ({engine})",
             f"Modos: {', '.join('M' + str(m) for m in res['modes'])}",
             f"Desajuste (rmse): {res['misfit']:.4f} km/s",
             "",
@@ -4376,8 +4838,8 @@ class MaswPanel(QWidget):
         lines.append(f"Semiespacio (>{boundaries[-1]:.2f} m): Vs = {beta[-1]:.0f} m/s")
         self.profile_summary.setText("\n".join(lines))
         self.inv_status_label.setText(
-            f"Inversion multimodo lista: {len(res['modes'])} modos, desajuste {res['misfit']:.4f} km/s. "
-            "El perfil esta en '3. Perfil Vs'."
+            f"Inversión lista ({engine}): {len(res['modes'])} modo(s), desajuste {res['misfit']:.4f} km/s. "
+            "El perfil está en '3. Perfil Vs'."
         )
         self.inner_tabs.setCurrentIndex(2)
 
@@ -4511,7 +4973,10 @@ class MaswPanel(QWidget):
                 str(mode): [[float(f), float(picks[f])] for f in sorted(picks)]
                 for mode, picks in self.picks_by_mode.items()
             },
-            "regions": [[[float(x), float(y)] for (x, y) in poly] for poly in self._regions],
+            "regions_by_mode": {
+                str(mode): [[[float(x), float(y)] for (x, y) in poly] for poly in polys]
+                for mode, polys in self._regions_by_mode.items()
+            },
             "geophone_spacing_m": (
                 float(self._geophone_spacing_m) if self._geophone_spacing_m else None
             ),
@@ -4519,6 +4984,7 @@ class MaswPanel(QWidget):
                 float(self._array_length_m) if self._array_length_m else None
             ),
             "inner_tab": int(self.inner_tabs.currentIndex()),
+            "backend": self.backend_combo.currentData() if hasattr(self, "backend_combo") else None,
             "has_data": self._raw_matrix is not None,
             "has_inv_result": self._inv_result is not None,
             "inv_scalars": (
@@ -4583,9 +5049,22 @@ class MaswPanel(QWidget):
                 state.get("array_length_m") or self._estimate_array_length(self._raw_distances)
             )
 
-        self._regions = [
-            [(float(x), float(y)) for (x, y) in poly] for poly in state.get("regions", [])
-        ]
+        rbm: dict[int, list[list[tuple[float, float]]]] = {}
+        raw_rbm = state.get("regions_by_mode")
+        if isinstance(raw_rbm, dict):
+            for mode_str, polys in raw_rbm.items():
+                try:
+                    mode = int(mode_str)
+                except (TypeError, ValueError):
+                    continue
+                rbm[mode] = [[(float(x), float(y)) for (x, y) in poly] for poly in polys]
+        else:
+            # Compat con el formato viejo `regions` (lista plana, indice = modo).
+            for mode, poly in enumerate(state.get("regions", [])):
+                rbm[mode] = [[(float(x), float(y)) for (x, y) in poly]]
+        if not rbm:
+            rbm = {0: []}
+        self._regions_by_mode = rbm
         pbm: dict[int, dict[float, float]] = {}
         for mode_str, pts in state.get("picks_by_mode", {}).items():
             try:
@@ -4600,6 +5079,12 @@ class MaswPanel(QWidget):
         if self._active_mode not in self.picks_by_mode:
             self._active_mode = 0
         self.picks = self.picks_by_mode.setdefault(self._active_mode, {})
+
+        backend = state.get("backend")
+        if backend and hasattr(self, "backend_combo"):
+            idx = self.backend_combo.findData(backend)
+            if idx >= 0:
+                self.backend_combo.setCurrentIndex(idx)
 
         if self._raw_matrix is not None:
             # Reconstruye la imagen de dispersion (deterministico) para que
@@ -4620,9 +5105,11 @@ class MaswPanel(QWidget):
             self._update_profile_tab()
 
         self._refresh_mode_combo()
+        self._refresh_mode_legend()
         self._refresh_pick_scatter()
         self._refresh_m0_draw()
         self._refresh_inv_observed()
+        self._backend_changed()
         try:
             self.inner_tabs.setCurrentIndex(int(state.get("inner_tab", 0)))
         except Exception:

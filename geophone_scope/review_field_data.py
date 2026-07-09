@@ -20,6 +20,7 @@ try:
         default_alignment_offsets_path,
         default_alignment_shot_offsets_path,
         default_annotations_path,
+        default_disabled_folders_path,
         default_filter_settings_path,
         default_output_dir,
         discover_dataset,
@@ -28,6 +29,7 @@ try:
         load_alignment_shot_offsets,
         load_annotations,
         load_average_arrivals,
+        load_disabled_folders,
         load_filter_settings,
         save_annotations,
     )
@@ -39,6 +41,7 @@ except ImportError:  # pragma: no cover - script execution from this folder
         default_alignment_offsets_path,
         default_alignment_shot_offsets_path,
         default_annotations_path,
+        default_disabled_folders_path,
         default_filter_settings_path,
         default_output_dir,
         discover_dataset,
@@ -47,6 +50,7 @@ except ImportError:  # pragma: no cover - script execution from this folder
         load_alignment_shot_offsets,
         load_annotations,
         load_average_arrivals,
+        load_disabled_folders,
         load_filter_settings,
         save_annotations,
     )
@@ -136,6 +140,7 @@ def main() -> int:
         filter_settings = load_filter_settings(default_filter_settings_path(raw_root))
         alignment_offsets = load_alignment_offsets(default_alignment_offsets_path(raw_root))
         alignment_shot_offsets = load_alignment_shot_offsets(default_alignment_shot_offsets_path(raw_root))
+        disabled_folders = load_disabled_folders(default_disabled_folders_path(raw_root))
         result = export_processed(
             dataset,
             annotations,
@@ -145,6 +150,7 @@ def main() -> int:
             filter_settings=filter_settings,
             alignment_offsets=alignment_offsets,
             alignment_shot_offsets=alignment_shot_offsets,
+            disabled_folders=disabled_folders,
         )
         save_annotations(annotations_path, dataset, annotations)
         print(f"Salida: {result.output_dir}")

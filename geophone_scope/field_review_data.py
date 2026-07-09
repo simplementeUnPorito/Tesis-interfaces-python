@@ -20,7 +20,7 @@ from typing import Any, Iterable
 
 import numpy as np
 from scipy.io import savemat
-from scipy.signal import butter, resample_poly, sosfiltfilt
+from scipy.signal import butter, correlate, resample_poly, sosfiltfilt
 
 
 SCHEMA = "geophone_field_review_v1"
@@ -30,6 +30,7 @@ DEFAULT_AVERAGE_ARRIVALS_NAME = "average_arrivals.json"
 DEFAULT_FILTER_SETTINGS_NAME = "filter_settings.json"
 DEFAULT_ALIGNMENT_OFFSETS_NAME = "alignment_offsets.json"
 DEFAULT_ALIGNMENT_SHOT_OFFSETS_NAME = "alignment_shot_offsets.json"
+DEFAULT_DISABLED_FOLDERS_NAME = "alignment_disabled_folders.json"
 DEFAULT_SESSION_NAME = "field_review_session.json"
 DEFAULT_MASW_STATE_NAME = "field_review_masw_state.json"
 DEFAULT_MASW_ARRAYS_NAME = "field_review_masw_state.npz"
@@ -81,9 +82,11 @@ class PickAnnotation:
     notes: str = ""
     source: str = "auto"
     reviewed: bool = False
-    # Inversion extra del geofono por muestra: el circuito del geofono no
-    # tiene polaridad, asi que segun el dia pudo quedar conectado al reves.
-    # Se aplica DESPUES de la convencion fija (geo no invertido).
+    # Inversion extra del geofono por muestra: el geofono funciona conectado
+    # en cualquier sentido, pero conectado al reves la señal capturada queda
+    # invertida (y eso destruye el promedio/waterfall), asi que segun el dia
+    # pudo quedar grabada en contrafase. Se aplica DESPUES de la convencion
+    # fija (geo no invertido).
     geo_flip: bool = False
 
     @property
@@ -585,6 +588,64 @@ def alignment_shot_offsets_signature(shot_offsets: dict[str, float] | None) -> t
     )
 
 
+def default_disabled_folders_path(raw_root: str | Path) -> Path:
+    return Path(raw_root).resolve() / DEFAULT_DISABLED_FOLDERS_NAME
+
+
+def load_disabled_folders(path: str | Path) -> dict[str, list[str]]:
+    """Carpetas desactivadas por (label de distancia, carpeta): sus señales
+    pueden ser validas (trigger y forma coherentes, marcadas OK en Capturas)
+    pero el usuario decidio en Enfase que esa tanda NO entre a promedios,
+    waterfall, MASW ni al promedio del export (las muestras individuales se
+    exportan igual)."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    disabled: dict[str, list[str]] = {}
+    for item in data.get("disabled", []):
+        try:
+            label = str(item["label"])
+            folder = str(item["folder"])
+        except (KeyError, TypeError):
+            continue
+        if folder not in disabled.setdefault(label, []):
+            disabled[label].append(folder)
+    return disabled
+
+
+def save_disabled_folders(path: str | Path, disabled: dict[str, list[str]]) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    items = [
+        {"label": label, "folder": folder}
+        for label in sorted(disabled)
+        for folder in sorted(set(disabled[label]))
+    ]
+    data = {"schema": SCHEMA, "updated_at": utc_now_iso(), "disabled": items}
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def disabled_folders_signature(disabled: dict[str, list[str]] | None) -> tuple:
+    if not disabled:
+        return ()
+    return tuple(
+        sorted((label, folder) for label, folders in disabled.items() for folder in set(folders))
+    )
+
+
+def is_folder_disabled(
+    disabled: dict[str, list[str]] | None, distance_m: float, folder_name: str
+) -> bool:
+    if not disabled:
+        return False
+    return folder_name in disabled.get(format_distance_label(distance_m), ())
+
+
 def default_session_path(raw_root: str | Path) -> Path:
     return Path(raw_root).resolve() / DEFAULT_SESSION_NAME
 
@@ -944,6 +1005,7 @@ def compute_average_groups(
     filter_settings: FilterSettings | None = None,
     alignment_offsets: dict[str, dict[str, float]] | None = None,
     alignment_shot_offsets: dict[str, float] | None = None,
+    disabled_folders: dict[str, list[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """Version liviana de los promedios, solo en memoria (no escribe nada a
     disco). Pensada para refrescar la pestaña de revision de promedios sin
@@ -966,6 +1028,10 @@ def compute_average_groups(
     for shot in dataset.shots:
         ann = annotations.get(shot.shot_id)
         if ann is None or not ann.accepted or not ann.reviewed:
+            continue
+        if is_folder_disabled(disabled_folders, ann.distance_m, shot.folder_name):
+            # Carpeta desactivada en Enfase: señales validas pero la tanda
+            # entera no entra al promedio/waterfall por decision del usuario.
             continue
         offset_s = get_alignment_offset(
             alignment_offsets, ann.distance_m, shot.folder_name,
@@ -1050,6 +1116,175 @@ def compute_average_groups(
     return groups, hammer_global
 
 
+def flip_distance_group(
+    dataset: FieldDataset,
+    annotations: dict[str, PickAnnotation],
+    distance_m: float,
+    source: str = "manual",
+) -> int:
+    """Togglea geo_flip en TODAS las capturas de una distancia (validadas o
+    no): invierte la polaridad del punto completo sin romper la coherencia
+    interna que ya se logro dentro del punto. Devuelve cuantas cambio.
+    El caller persiste (save_annotations)."""
+    key = round(float(distance_m), 6)
+    changed = 0
+    for shot in dataset.shots:
+        ann = annotations.get(shot.shot_id)
+        distance = float(ann.distance_m) if ann is not None else float(shot.distance_m)
+        if round(distance, 6) != key:
+            continue
+        if ann is None:
+            ann = auto_pick_shot(shot)
+            annotations[shot.shot_id] = ann
+        ann.geo_flip = not bool(ann.geo_flip)
+        ann.source = source
+        changed += 1
+    return changed
+
+
+def _nanmean_rows(stack: np.ndarray) -> np.ndarray:
+    """nanmean por columna sin el RuntimeWarning 'Mean of empty slice' en las
+    colas todo-NaN (quedan NaN, como con nanmean)."""
+    counts = np.sum(np.isfinite(stack), axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.nansum(stack, axis=0) / counts
+
+
+def _polarity_corr_ready(signal: np.ndarray) -> np.ndarray | None:
+    """Señal lista para correlacionar: media afuera y NaN->0 (los NaN de las
+    colas desparejas no deben aportar)."""
+    x = np.asarray(signal, dtype=np.float64)
+    finite = np.isfinite(x)
+    if not np.any(finite):
+        return None
+    out = np.where(finite, x - float(np.nanmean(x)), 0.0)
+    return out if np.any(out) else None
+
+
+def auto_align_polarity(
+    dataset: FieldDataset,
+    annotations: dict[str, PickAnnotation],
+    prefer_filtered: bool = False,
+    filter_settings: FilterSettings | None = None,
+    alignment_offsets: dict[str, dict[str, float]] | None = None,
+    alignment_shot_offsets: dict[str, float] | None = None,
+    disabled_folders: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Correccion automatica de polaridad del geofono en dos etapas.
+
+    Etapa A (intra-punto): dentro de cada distancia, SOLO las capturas sin
+    validar (accepted y no reviewed) se comparan contra el consenso de las
+    validadas de ese punto (que el usuario ya dejo en fase a mano); si el
+    producto punto da negativo se les togglea geo_flip. Las validadas no se
+    tocan nunca: el flip queda como propuesta que el usuario acepta (o no)
+    al revisarlas en Capturas. Si el punto no tiene validadas, el consenso
+    es la mayoria actual de las no validadas (cambios minimos).
+
+    Etapa B (inter-punto): los promedios de cada distancia (solo validadas,
+    igual que el waterfall) se encadenan desde la distancia menor; si la
+    correlacion cruzada (con busqueda de lag, que absorbe el moveout) contra
+    el vecino ya alineado da pico negativo, se invierte el punto COMPLETO
+    via flip_distance_group (asi no se rompe la fase interna).
+
+    No guarda nada a disco; el caller persiste las anotaciones. Idempotente:
+    una segunda corrida no deberia cambiar nada.
+    """
+    grouped: dict[float, list[dict[str, Any]]] = {}
+    for shot in dataset.shots:
+        ann = annotations.get(shot.shot_id)
+        if ann is None or not ann.accepted:
+            continue
+        if is_folder_disabled(disabled_folders, ann.distance_m, shot.folder_name):
+            # Carpeta desactivada: no participa del consenso ni de la cadena
+            # entre puntos (no va al waterfall).
+            continue
+        offset_s = get_alignment_offset(
+            alignment_offsets, ann.distance_m, shot.folder_name,
+            shot_id=shot.shot_id, shot_offsets=alignment_shot_offsets,
+        )
+        item = _prepare_shot_for_grouping(shot, ann, prefer_filtered, filter_settings, offset_s=offset_s)
+        if item is None:
+            continue
+        grouped.setdefault(round(float(ann.distance_m), 6), []).append(item)
+
+    stage_a_flipped: list[str] = []
+    stage_b_flipped: list[float] = []
+    stage_b_skipped: list[float] = []
+    group_means: list[tuple[float, float, np.ndarray]] = []  # (distancia, fs, promedio validadas)
+
+    for distance in sorted(grouped):
+        items = grouped[distance]
+        fs = _resample_items_to_common_fs(items, filter_settings, ("geo_zero",))
+        if fs <= 0:
+            continue
+        rel_start = max(-int(item["trigger_idx"]) for item in items)
+        rel_end = max(int(item["geo_zero"].size) - int(item["trigger_idx"]) for item in items)
+        if rel_end <= rel_start + 1:
+            continue
+        for item in items:
+            start = int(item["trigger_idx"]) + rel_start
+            end = int(item["trigger_idx"]) + rel_end
+            item["geo_seg"] = segment_nan_padded(item["geo_zero"], start, end)
+        validated = [item for item in items if item["annotation"].reviewed]
+        candidates = [item for item in items if not item["annotation"].reviewed]
+
+        # ---- Etapa A: enfasar las no validadas contra el consenso del punto.
+        if candidates:
+            reference_items = validated if validated else candidates
+            reference = _nanmean_rows(np.vstack([item["geo_seg"] for item in reference_items]))
+            for item in candidates:
+                product = item["geo_seg"] * reference
+                if not np.any(np.isfinite(product)):
+                    continue
+                score = float(np.nansum(product))
+                if score < 0:
+                    ann = item["annotation"]
+                    ann.geo_flip = not bool(ann.geo_flip)
+                    ann.source = "auto_polaridad"
+                    item["geo_seg"] = -item["geo_seg"]
+                    stage_a_flipped.append(f"{item['shot'].folder_name}/{item['shot'].capture_name}")
+
+        # El promedio inter-punto usa solo validadas (igual que el waterfall).
+        if validated:
+            mean = _nanmean_rows(np.vstack([item["geo_seg"] for item in validated]))
+            group_means.append((distance, fs, mean))
+        else:
+            stage_b_skipped.append(distance)
+
+    # ---- Etapa B: encadenar promedios desde la distancia menor.
+    if len(group_means) >= 2:
+        fs_common = min(fs for _, fs, _ in group_means)
+        prepared: list[tuple[float, np.ndarray | None]] = []
+        for distance, fs, mean in group_means:
+            # NaN->0 ANTES de resamplear: resample_poly propaga NaN.
+            ready = _polarity_corr_ready(mean)
+            if ready is not None and abs(fs - fs_common) > 1e-6:
+                ready = resample_signal(ready, fs, fs_common)
+            prepared.append((distance, ready))
+        previous = prepared[0][1]
+        for distance, current in prepared[1:]:
+            if current is None:
+                stage_b_skipped.append(distance)
+                continue
+            if previous is None:
+                previous = current
+                continue
+            corr = correlate(current, previous, mode="full", method="auto")
+            peak = int(np.argmax(np.abs(corr)))
+            if corr[peak] < 0:
+                flip_distance_group(dataset, annotations, distance, source="auto_polaridad")
+                current = -current
+                stage_b_flipped.append(distance)
+            previous = current
+
+    return {
+        "groups": len(grouped),
+        "stage_a_flipped": stage_a_flipped,
+        "stage_b_flipped_distances": stage_b_flipped,
+        "stage_b_skipped_distances": stage_b_skipped,
+    }
+
+
 @dataclass
 class ExportResult:
     output_dir: Path
@@ -1070,6 +1305,7 @@ def export_processed(
     filter_settings: FilterSettings | None = None,
     alignment_offsets: dict[str, dict[str, float]] | None = None,
     alignment_shot_offsets: dict[str, float] | None = None,
+    disabled_folders: dict[str, list[str]] | None = None,
 ) -> ExportResult:
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1153,10 +1389,11 @@ def export_processed(
         }
         meta_path.write_text(json.dumps(sample_meta, indent=2), encoding="utf-8")
         manifest_samples.append(sample_meta)
-        if not ann.reviewed:
+        if not ann.reviewed or is_folder_disabled(disabled_folders, ann.distance_m, shot.folder_name):
             # La muestra individual se exporta igual (queda en disco para
             # quien quiera revisarla), pero solo entra al promedio/waterfall
-            # una vez marcada OK a mano (ver compute_average_groups).
+            # una vez marcada OK a mano (ver compute_average_groups) y si su
+            # carpeta no fue desactivada en Enfase.
             continue
         grouped.setdefault(distance, []).append(item)
         # El hammer ya se carga siempre en polaridad invertida (convencion

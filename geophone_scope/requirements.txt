@@ -4,8 +4,15 @@ pyserial>=3.5
 numpy>=1.24
 scipy>=1.11
 matplotlib>=3.8
-# Opcionales: inversion conjunta multi-modo (evodcinv + disba). Sin ellas, la
-# app cae al flujo Monte Carlo de un solo modo. Nota: evodcinv 2.2.x usa np.Inf
-# (removido en NumPy 2.0); masw_multimodal._patch_numpy() re-agrega el alias.
+# Opcionales: motores de inversion seleccionables en la pestaña MASW
+# (masw_backends.py). Sin ellas quedan disponibles maswavespy (port numpy) y los
+# exportadores; con ellas se habilitan evodcinv+disba (multimodo) y disba+Monte
+# Carlo propio. Nota: evodcinv 2.2.x usa np.Inf (removido en NumPy 2.0);
+# masw_multimodal._patch_numpy() re-agrega el alias antes de importarlo.
+# maswavespy va vendored en third-party/maswavespy (no pip); su inversion/dispersion
+# Cython no se compila, se usa el port numpy (masw_inversion.py / masw_dispersion.py).
 disba>=0.7
 evodcinv>=2.2
+# swprepost: escribe el .target real de Dinver (Geopsy) para el export a esa
+# herramienta. Sin el, el export geopsy cae a un texto simple.
+swprepost>=2.0
