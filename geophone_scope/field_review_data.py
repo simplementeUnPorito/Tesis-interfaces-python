@@ -31,6 +31,7 @@ DEFAULT_FILTER_SETTINGS_NAME = "filter_settings.json"
 DEFAULT_ALIGNMENT_OFFSETS_NAME = "alignment_offsets.json"
 DEFAULT_ALIGNMENT_SHOT_OFFSETS_NAME = "alignment_shot_offsets.json"
 DEFAULT_DISABLED_FOLDERS_NAME = "alignment_disabled_folders.json"
+DEFAULT_DISPERSION_GROUPS_NAME = "dispersion_groups.json"
 DEFAULT_SESSION_NAME = "field_review_session.json"
 DEFAULT_MASW_STATE_NAME = "field_review_masw_state.json"
 DEFAULT_MASW_ARRAYS_NAME = "field_review_masw_state.npz"
@@ -635,6 +636,79 @@ def disabled_folders_signature(disabled: dict[str, list[str]] | None) -> tuple:
         return ()
     return tuple(
         sorted((label, folder) for label, folders in disabled.items() for folder in set(folders))
+    )
+
+
+def default_dispersion_groups_path(raw_root: str | Path) -> Path:
+    return Path(raw_root).resolve() / DEFAULT_DISPERSION_GROUPS_NAME
+
+
+def load_dispersion_groups(path: str | Path) -> tuple[int, dict[str, int]]:
+    """Carga los grupos usados para calcular dispersion por separado.
+
+    La asignacion es por carpeta/tanda completa: folder_name -> grupo (1..N).
+    Carpetas ausentes se interpretan como grupo 1 para mantener compatibilidad
+    con sesiones previas.
+    """
+    path = Path(path)
+    if not path.exists():
+        return 1, {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return 1, {}
+    try:
+        group_count = max(1, int(data.get("group_count", 1) or 1))
+    except (TypeError, ValueError):
+        group_count = 1
+    assignments: dict[str, int] = {}
+    raw = data.get("assignments", {})
+    if isinstance(raw, dict):
+        items = raw.items()
+    else:
+        items = ((item.get("folder"), item.get("group")) for item in raw if isinstance(item, dict))
+    for folder, group in items:
+        try:
+            folder_name = str(folder)
+            group_id = int(group)
+        except (TypeError, ValueError):
+            continue
+        if not folder_name:
+            continue
+        assignments[folder_name] = int(np.clip(group_id, 1, group_count))
+    return group_count, assignments
+
+
+def save_dispersion_groups(
+    path: str | Path,
+    group_count: int,
+    assignments: dict[str, int],
+) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    group_count = max(1, int(group_count or 1))
+    clean = {
+        str(folder): int(np.clip(int(group), 1, group_count))
+        for folder, group in sorted(assignments.items())
+        if str(folder)
+    }
+    data = {
+        "schema": SCHEMA,
+        "updated_at": utc_now_iso(),
+        "group_count": group_count,
+        "assignments": clean,
+    }
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def dispersion_groups_signature(group_count: int, assignments: dict[str, int] | None) -> tuple:
+    group_count = max(1, int(group_count or 1))
+    if not assignments:
+        return (group_count,)
+    return (
+        group_count,
+        tuple(sorted((str(folder), int(np.clip(int(group), 1, group_count))) for folder, group in assignments.items())),
     )
 
 

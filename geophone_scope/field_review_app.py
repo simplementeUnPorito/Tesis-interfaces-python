@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -57,11 +58,13 @@ try:
         default_alignment_shot_offsets_path,
         default_average_arrivals_path,
         default_disabled_folders_path,
+        default_dispersion_groups_path,
         default_filter_settings_path,
         default_masw_arrays_path,
         default_masw_state_path,
         default_output_dir,
         default_session_path,
+        dispersion_groups_signature,
         disabled_folders_signature,
         export_processed,
         filter_settings_signature,
@@ -75,6 +78,7 @@ try:
         load_annotations,
         load_average_arrivals,
         load_disabled_folders,
+        load_dispersion_groups,
         load_filter_settings,
         load_masw_arrays,
         load_masw_state,
@@ -88,6 +92,7 @@ try:
         save_annotations,
         save_average_arrivals,
         save_disabled_folders,
+        save_dispersion_groups,
         save_filter_settings,
         save_masw_arrays,
         save_masw_state,
@@ -112,11 +117,13 @@ except ImportError:  # pragma: no cover - script execution from this folder
         default_alignment_shot_offsets_path,
         default_average_arrivals_path,
         default_disabled_folders_path,
+        default_dispersion_groups_path,
         default_filter_settings_path,
         default_masw_arrays_path,
         default_masw_state_path,
         default_output_dir,
         default_session_path,
+        dispersion_groups_signature,
         disabled_folders_signature,
         export_processed,
         filter_settings_signature,
@@ -130,6 +137,7 @@ except ImportError:  # pragma: no cover - script execution from this folder
         load_annotations,
         load_average_arrivals,
         load_disabled_folders,
+        load_dispersion_groups,
         load_filter_settings,
         load_masw_arrays,
         load_masw_state,
@@ -143,6 +151,7 @@ except ImportError:  # pragma: no cover - script execution from this folder
         save_annotations,
         save_average_arrivals,
         save_disabled_folders,
+        save_dispersion_groups,
         save_filter_settings,
         save_masw_arrays,
         save_masw_state,
@@ -193,6 +202,39 @@ def _plot_finite_segments(plot_widget, x: np.ndarray, y: np.ndarray, pen) -> Non
         plot_widget.plot(x[i0:i1], y[i0:i1], pen=pen)
 
 
+def _folder_group_id(folder_name: str, group_count: int, assignments: dict[str, int] | None) -> int:
+    group_count = max(1, int(group_count or 1))
+    assignments = assignments or {}
+    try:
+        group_id = int(assignments.get(str(folder_name), 1))
+    except (TypeError, ValueError):
+        group_id = 1
+    return int(np.clip(group_id, 1, group_count))
+
+
+def _group_name(group_id: int) -> str:
+    return f"Grupo {int(group_id)}"
+
+
+def _filtered_dataset_for_group(
+    dataset: FieldDataset,
+    group_id: int,
+    group_count: int,
+    assignments: dict[str, int] | None,
+) -> FieldDataset:
+    group_id = int(np.clip(int(group_id or 1), 1, max(1, int(group_count or 1))))
+    shots = [
+        shot for shot in dataset.shots
+        if _folder_group_id(shot.folder_name, group_count, assignments) == group_id
+    ]
+    return FieldDataset(
+        raw_root=dataset.raw_root,
+        shots=shots,
+        duplicate_groups=dataset.duplicate_groups,
+        skipped_folders=dataset.skipped_folders,
+    )
+
+
 class FieldReviewWindow(QMainWindow):
     _ORDER_MODE_P2P = "Pico a pico (mayor primero)"
     _ORDER_MODE_ORIGINAL = "Carpeta / captura (original)"
@@ -219,6 +261,8 @@ class FieldReviewWindow(QMainWindow):
         self.alignment_shot_offsets = load_alignment_shot_offsets(self.alignment_shot_offsets_path)
         self.disabled_folders_path = default_disabled_folders_path(dataset.raw_root)
         self.disabled_folders = load_disabled_folders(self.disabled_folders_path)
+        self.dispersion_groups_path = default_dispersion_groups_path(dataset.raw_root)
+        self.group_count, self.group_assignments = load_dispersion_groups(self.dispersion_groups_path)
         self.session_path = default_session_path(dataset.raw_root)
         self._session = load_session(self.session_path)
         self._session_last_shot_id = self._session.get("last_shot_id")
@@ -1855,6 +1899,230 @@ class FilterPanel(QWidget):
                 axis.setTextPen(pg.mkPen(fg))
 
 
+class GroupingPanel(QWidget):
+    """Asigna carpetas/tandas a grupos independientes para MASW.
+
+    Cada grupo se procesa como un flujo completo: Enfase -> Promedios ->
+    Waterfall -> imagen de dispersion. Si una carpeta no aparece en la
+    asignacion persistida, pertenece al grupo 1.
+    """
+
+    def __init__(
+        self,
+        dataset: FieldDataset,
+        annotations: dict[str, PickAnnotation],
+        group_count: int,
+        assignments: dict[str, int],
+        dark_mode: bool = False,
+        on_changed=None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.dataset = dataset
+        self.annotations = annotations
+        self.group_count = max(1, int(group_count or 1))
+        self.assignments = assignments
+        self.dark_mode = dark_mode
+        self.on_changed = on_changed
+        self._loading = False
+        self._build_ui()
+        self.refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        root = QSplitter(Qt.Orientation.Horizontal)
+        outer.addWidget(root)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+
+        config_box = QGroupBox("Grupos de dispersion")
+        form = QFormLayout(config_box)
+        self.group_count_spin = QSpinBox()
+        self.group_count_spin.setRange(1, 20)
+        self.group_count_spin.setValue(self.group_count)
+        self.group_count_spin.valueChanged.connect(self._group_count_changed)
+        form.addRow("Cantidad", self.group_count_spin)
+        left_layout.addWidget(config_box)
+
+        assign_box = QGroupBox("Asignar carpetas seleccionadas")
+        assign_layout = QVBoxLayout(assign_box)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Grupo"))
+        self.assign_group_spin = QSpinBox()
+        self.assign_group_spin.setRange(1, self.group_count)
+        self.assign_group_spin.setValue(1)
+        row.addWidget(self.assign_group_spin)
+        self.assign_btn = QPushButton("Asignar")
+        self.assign_btn.clicked.connect(self._assign_selected)
+        row.addWidget(self.assign_btn)
+        assign_layout.addLayout(row)
+        self.all_g1_btn = QPushButton("Todo a Grupo 1")
+        self.all_g1_btn.clicked.connect(self._all_to_group_one)
+        self.folder_groups_btn = QPushButton("Una carpeta por grupo")
+        self.folder_groups_btn.clicked.connect(self._one_group_per_folder)
+        assign_layout.addWidget(self.all_g1_btn)
+        assign_layout.addWidget(self.folder_groups_btn)
+        left_layout.addWidget(assign_box)
+
+        hint = QLabel(
+            "Cada carpeta/tanda pertenece a un grupo. Despues elegis el grupo activo en Enfase y "
+            "Promedios; cada grupo genera su propio waterfall y su propia imagen MASW. En MASW se "
+            "combinan las imagenes normalizadas con pesos."
+        )
+        hint.setWordWrap(True)
+        left_layout.addWidget(hint)
+        left_layout.addStretch(1)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(4, 4, 8, 8)
+        self.summary_label = QLabel("")
+        self.summary_label.setWordWrap(True)
+        right_layout.addWidget(self.summary_label)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Grupo", "Carpeta", "Capturas", "Distancias", "OK"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        right_layout.addWidget(self.table, stretch=1)
+
+        root.addWidget(left)
+        root.addWidget(right)
+        root.setSizes([320, 900])
+
+    def _folders(self) -> list[str]:
+        return sorted({shot.folder_name for shot in self.dataset.shots})
+
+    def refresh(self) -> None:
+        folders = self._folders()
+        for folder in folders:
+            self.assignments.setdefault(folder, 1)
+        self._clamp_assignments()
+        self._populate_table()
+
+    def _clamp_assignments(self) -> None:
+        self.group_count = max(1, int(self.group_count or 1))
+        valid = set(self._folders())
+        for folder in list(self.assignments):
+            if folder not in valid:
+                self.assignments.pop(folder, None)
+                continue
+            self.assignments[folder] = _folder_group_id(folder, self.group_count, self.assignments)
+
+    def _emit_changed(self) -> None:
+        self._clamp_assignments()
+        if self.on_changed is not None:
+            self.on_changed(self.group_count, self.assignments)
+
+    def _group_count_changed(self, value: int) -> None:
+        if self._loading:
+            return
+        self.group_count = max(1, int(value))
+        self.assign_group_spin.setRange(1, self.group_count)
+        self._emit_changed()
+        self._populate_table()
+
+    def _selected_folders(self) -> list[str]:
+        rows = sorted({idx.row() for idx in self.table.selectedIndexes()})
+        folders: list[str] = []
+        for row in rows:
+            item = self.table.item(row, 1)
+            if item is not None:
+                folders.append(item.text())
+        return folders
+
+    def _assign_selected(self) -> None:
+        folders = self._selected_folders()
+        if not folders:
+            self.summary_label.setText("Selecciona una o mas carpetas para asignarlas.")
+            return
+        group_id = int(self.assign_group_spin.value())
+        for folder in folders:
+            self.assignments[folder] = group_id
+        self._emit_changed()
+        self._populate_table()
+
+    def _all_to_group_one(self) -> None:
+        self.group_count = max(1, int(self.group_count_spin.value()))
+        for folder in self._folders():
+            self.assignments[folder] = 1
+        self._emit_changed()
+        self._populate_table()
+
+    def _one_group_per_folder(self) -> None:
+        folders = self._folders()
+        if not folders:
+            return
+        self._loading = True
+        self.group_count = min(len(folders), self.group_count_spin.maximum())
+        self.group_count_spin.setValue(self.group_count)
+        self.assign_group_spin.setRange(1, self.group_count)
+        self._loading = False
+        for idx, folder in enumerate(folders, start=1):
+            self.assignments[folder] = min(idx, self.group_count)
+        self._emit_changed()
+        self._populate_table()
+
+    def _populate_table(self) -> None:
+        folders = self._folders()
+        by_folder: dict[str, dict[str, object]] = {
+            folder: {"count": 0, "ok": 0, "distances": set()} for folder in folders
+        }
+        for shot in self.dataset.shots:
+            info = by_folder.setdefault(shot.folder_name, {"count": 0, "ok": 0, "distances": set()})
+            info["count"] = int(info["count"]) + 1
+            ann = self.annotations.get(shot.shot_id)
+            if ann is not None:
+                info["distances"].add(format_distance_label(ann.distance_m))
+                if ann.accepted and ann.reviewed:
+                    info["ok"] = int(info["ok"]) + 1
+            else:
+                info["distances"].add(format_distance_label(shot.distance_m))
+
+        self._loading = True
+        self.table.setRowCount(len(folders))
+        for row, folder in enumerate(folders):
+            group_id = _folder_group_id(folder, self.group_count, self.assignments)
+            info = by_folder[folder]
+            distances = sorted(info["distances"])
+            values = [
+                _group_name(group_id),
+                folder,
+                str(info["count"]),
+                ", ".join(distances[:8]) + (" ..." if len(distances) > 8 else ""),
+                str(info["ok"]),
+            ]
+            for col, value in enumerate(values):
+                item = self.table.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    self.table.setItem(row, col, item)
+                item.setText(value)
+                item.setData(Qt.ItemDataRole.UserRole, group_id)
+                item.setForeground(QColor("#eeeeee" if self.dark_mode else "#111111"))
+                item.setBackground(QColor("#24272e" if self.dark_mode else "#ffffff"))
+        self._loading = False
+        counts = {
+            gid: sum(1 for folder in folders if _folder_group_id(folder, self.group_count, self.assignments) == gid)
+            for gid in range(1, self.group_count + 1)
+        }
+        summary = " | ".join(f"G{gid}: {counts[gid]} carpeta(s)" for gid in range(1, self.group_count + 1))
+        self.summary_label.setText(f"{len(folders)} carpetas asignadas | {summary}")
+
+    def set_dark_mode(self, dark: bool) -> None:
+        self.dark_mode = bool(dark)
+        self._populate_table()
+
+
 _ALIGN_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6", "#bcf60c", "#008080", "#9a6324"]
 
 
@@ -1896,6 +2164,8 @@ class AlignmentPanel(QWidget):
         dark_mode: bool = False,
         on_changed=None,
         disabled: dict[str, list[str]] | None = None,
+        group_count: int = 1,
+        group_assignments: dict[str, int] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1908,6 +2178,8 @@ class AlignmentPanel(QWidget):
         self.get_peak_to_peak = get_peak_to_peak
         self.dark_mode = dark_mode
         self.on_changed = on_changed
+        self.group_count = max(1, int(group_count or 1))
+        self.group_assignments = group_assignments if group_assignments is not None else {}
         self._loading = False
         # Carpeta -> (señales, promedio precalculado) del label actual.
         self._folders: list[tuple[str, list[tuple[FieldShot, PickAnnotation]]]] = []
@@ -1924,6 +2196,13 @@ class AlignmentPanel(QWidget):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(8, 8, 8, 8)
+        group_box = QHBoxLayout()
+        group_box.addWidget(QLabel("Grupo"))
+        self.group_combo = QComboBox()
+        self.group_combo.currentIndexChanged.connect(self._group_changed)
+        group_box.addWidget(self.group_combo, stretch=1)
+        left_layout.addLayout(group_box)
+
         pick_box = QHBoxLayout()
         pick_box.addWidget(QLabel("Label"))
         self.label_combo = QComboBox()
@@ -2015,13 +2294,19 @@ class AlignmentPanel(QWidget):
     def refresh(self) -> None:
         """Rearma la lista de labels desde las marcas actuales, conservando la
         seleccion si se puede."""
+        self._refresh_group_combo()
         current = self.label_combo.currentText()
+        group_id = self.current_group_id()
         labels = sorted(
             {
                 format_distance_label(ann.distance_m)
                 for shot in self.dataset.shots
                 for ann in (self.annotations.get(shot.shot_id),)
-                if ann is not None and ann.accepted
+                if (
+                    ann is not None
+                    and ann.accepted
+                    and _folder_group_id(shot.folder_name, self.group_count, self.group_assignments) == group_id
+                )
             }
         )
         self._loading = True
@@ -2031,6 +2316,42 @@ class AlignmentPanel(QWidget):
             self.label_combo.setCurrentText(current)
         self._loading = False
         self._label_changed()
+
+    def set_grouping(self, group_count: int, assignments: dict[str, int]) -> None:
+        self.group_count = max(1, int(group_count or 1))
+        self.group_assignments = assignments
+        self.refresh()
+
+    def current_group_id(self) -> int:
+        if not hasattr(self, "group_combo"):
+            return 1
+        data = self.group_combo.currentData()
+        try:
+            group_id = int(data)
+        except (TypeError, ValueError):
+            group_id = 1
+        return int(np.clip(group_id, 1, self.group_count))
+
+    def _refresh_group_combo(self) -> None:
+        if not hasattr(self, "group_combo"):
+            return
+        current = self.current_group_id()
+        self.group_combo.blockSignals(True)
+        self.group_combo.clear()
+        for gid in range(1, self.group_count + 1):
+            n_folders = len({
+                shot.folder_name for shot in self.dataset.shots
+                if _folder_group_id(shot.folder_name, self.group_count, self.group_assignments) == gid
+            })
+            self.group_combo.addItem(f"{_group_name(gid)} ({n_folders} carpetas)", gid)
+        idx = max(0, min(current - 1, self.group_combo.count() - 1))
+        self.group_combo.setCurrentIndex(idx)
+        self.group_combo.blockSignals(False)
+
+    def _group_changed(self, *_args) -> None:
+        if self._loading:
+            return
+        self.refresh()
 
     def _folder_average(
         self, pairs: list[tuple[FieldShot, PickAnnotation]]
@@ -2076,9 +2397,12 @@ class AlignmentPanel(QWidget):
         facil de ver el golpe, que define el 0. Precalcula los promedios en
         self._folder_traces."""
         by_folder: dict[str, list[tuple[FieldShot, PickAnnotation]]] = {}
+        group_id = self.current_group_id()
         for shot in self.dataset.shots:
             ann = self.annotations.get(shot.shot_id)
             if ann is None or not ann.accepted:
+                continue
+            if _folder_group_id(shot.folder_name, self.group_count, self.group_assignments) != group_id:
                 continue
             if format_distance_label(ann.distance_m) != label:
                 continue
