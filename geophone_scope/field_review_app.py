@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import re
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -216,6 +218,67 @@ def _group_name(group_id: int) -> str:
     return f"Grupo {int(group_id)}"
 
 
+def _group_disabled_key(label: str, group_id: int) -> str:
+    return f"{label}::grupo{int(group_id)}"
+
+
+def _project_disabled_for_group(
+    disabled: dict[str, list[str]] | None,
+    group_id: int,
+    group_count: int,
+) -> dict[str, list[str]] | None:
+    if not disabled:
+        return disabled
+    group_id = max(1, int(group_id or 1))
+    group_count = max(1, int(group_count or 1))
+    projected: dict[str, list[str]] = {}
+    for key, folders in disabled.items():
+        if "::grupo" in key:
+            label, _, suffix = key.partition("::grupo")
+            try:
+                gid = int(suffix)
+            except ValueError:
+                continue
+            if gid == group_id:
+                projected.setdefault(label, []).extend(folders)
+        elif group_count <= 1 or group_id == 1:
+            # Compatibilidad: rechazos viejos sin grupo pertenecen al flujo
+            # historico, que ahora queda como Grupo 1.
+            projected.setdefault(key, []).extend(folders)
+    return {label: sorted(set(folders)) for label, folders in projected.items() if folders}
+
+
+class SortTableWidgetItem(QTableWidgetItem):
+    def __lt__(self, other) -> bool:  # type: ignore[override]
+        if isinstance(other, QTableWidgetItem):
+            a = self.data(Qt.ItemDataRole.UserRole)
+            b = other.data(Qt.ItemDataRole.UserRole)
+            if a is not None and b is not None:
+                try:
+                    return a < b
+                except TypeError:
+                    return str(a) < str(b)
+        return super().__lt__(other)
+
+
+def _folder_date_text_and_sort(folder: str, folder_path: Path | None = None) -> tuple[str, float]:
+    match = re.search(r"(20\d{6})[_-](\d{6})", folder)
+    if match:
+        stamp = f"{match.group(1)}{match.group(2)}"
+        try:
+            dt = datetime.strptime(stamp, "%Y%m%d%H%M%S")
+            return dt.strftime("%Y-%m-%d %H:%M:%S"), float(stamp)
+        except ValueError:
+            pass
+    if folder_path is not None:
+        try:
+            ts = float(folder_path.stat().st_mtime)
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S"), ts
+        except OSError:
+            pass
+    return "", 0.0
+
+
 def _filtered_dataset_for_group(
     dataset: FieldDataset,
     group_id: int,
@@ -359,6 +422,16 @@ class FieldReviewWindow(QMainWindow):
             self.filter_distance_spin.blockSignals(True)
             self.filter_distance_spin.setValue(float(filter_distance))
             self.filter_distance_spin.blockSignals(False)
+        if hasattr(self, "alignment_panel"):
+            self.alignment_panel.restore_selection(
+                group_id=self._session.get("alignment_group_id"),
+                label=self._session.get("alignment_label"),
+                folder=self._session.get("alignment_folder"),
+            )
+        if hasattr(self, "average_panel"):
+            self.average_panel.restore_selection(
+                group_id=self._session.get("average_group_id"),
+            )
 
     def _session_target_row(self) -> int | None:
         """Fila visible de la muestra donde se dejo la sesion anterior; si no
@@ -386,6 +459,10 @@ class FieldReviewWindow(QMainWindow):
             "filter_distance": float(self.filter_distance_spin.value()),
             "dark_mode": bool(self.dark_mode),
         }
+        if hasattr(self, "alignment_panel"):
+            data.update(self.alignment_panel.selection_state())
+        if hasattr(self, "average_panel"):
+            data.update(self.average_panel.selection_state())
         try:
             save_session(self.session_path, data)
         except Exception:
@@ -600,12 +677,22 @@ class FieldReviewWindow(QMainWindow):
             alignment_offsets=self.alignment_offsets,
             alignment_shot_offsets=self.alignment_shot_offsets,
             disabled_folders=self.disabled_folders,
+            group_count=self.group_count,
+            group_assignments=self.group_assignments,
         )
         self.filter_panel = FilterPanel(
             settings=self.filter_settings,
             get_current=self._filter_preview_data,
             dark_mode=self.dark_mode,
             on_changed=self._filter_settings_changed,
+        )
+        self.grouping_panel = GroupingPanel(
+            dataset=self.dataset,
+            annotations=self.annotations,
+            group_count=self.group_count,
+            assignments=self.group_assignments,
+            dark_mode=self.dark_mode,
+            on_changed=self._grouping_changed,
         )
         self.alignment_panel = AlignmentPanel(
             dataset=self.dataset,
@@ -617,8 +704,11 @@ class FieldReviewWindow(QMainWindow):
             dark_mode=self.dark_mode,
             on_changed=self._alignment_offsets_changed,
             disabled=self.disabled_folders,
+            group_count=self.group_count,
+            group_assignments=self.group_assignments,
         )
         self.tabs.addTab(self.filter_panel, "Filtros")
+        self.tabs.addTab(self.grouping_panel, "Agrupamiento")
         self.tabs.addTab(self.alignment_panel, "Enfase")
         self.tabs.addTab(self.average_panel, "Promedios / arrivals")
         self.tabs.addTab(self.waterfall_panel, "Waterfall")
@@ -636,6 +726,8 @@ class FieldReviewWindow(QMainWindow):
             self.average_panel.refresh()
         elif widget is self.filter_panel:
             self.filter_panel.refresh_preview()
+        elif widget is self.grouping_panel:
+            self.grouping_panel.refresh()
         elif widget is self.alignment_panel:
             self.alignment_panel.refresh()
 
@@ -664,6 +756,18 @@ class FieldReviewWindow(QMainWindow):
         except Exception:
             pass
 
+    def _grouping_changed(self, group_count: int, assignments: dict[str, int]) -> None:
+        self.group_count = max(1, int(group_count or 1))
+        self.group_assignments = assignments
+        try:
+            save_dispersion_groups(self.dispersion_groups_path, self.group_count, self.group_assignments)
+        except Exception:
+            pass
+        if hasattr(self, "alignment_panel"):
+            self.alignment_panel.set_grouping(self.group_count, self.group_assignments)
+        if hasattr(self, "average_panel"):
+            self.average_panel.set_grouping(self.group_count, self.group_assignments)
+
     def _alignment_offsets_changed(self) -> None:
         try:
             save_alignment_offsets(self.alignment_offsets_path, self.alignment_offsets)
@@ -673,19 +777,26 @@ class FieldReviewWindow(QMainWindow):
             pass
 
     def _show_waterfall_tab(
-        self, common_time, distances, matrix, arrivals, hammer_global, n_averages
+        self, common_time, distances, matrix, arrivals, hammer_global, n_averages,
+        group_id: int = 1, group_name: str | None = None
     ) -> None:
-        self.waterfall_panel.populate(common_time, distances, matrix, arrivals, hammer_global, n_averages)
+        self.waterfall_panel.populate(
+            common_time, distances, matrix, arrivals, hammer_global, n_averages, group_id, group_name
+        )
         self.tabs.setCurrentWidget(self.waterfall_panel)
 
-    def _show_masw_tab(self, common_time, distances, matrix) -> None:
-        self.masw_panel.set_data(common_time, distances, matrix)
+    def _show_masw_tab(
+        self, common_time, distances, matrix, group_id: int = 1, group_name: str | None = None
+    ) -> None:
+        self.masw_panel.set_group_data(common_time, distances, matrix, group_id=group_id, group_name=group_name)
         self.tabs.setCurrentWidget(self.masw_panel)
 
-    def _auto_masw_tab(self, common_time, distances, matrix) -> None:
+    def _auto_masw_tab(
+        self, common_time, distances, matrix, group_id: int = 1, group_name: str | None = None
+    ) -> None:
         self.tabs.setCurrentWidget(self.masw_panel)
         QApplication.processEvents()
-        self.masw_panel.run_auto(common_time, distances, matrix)
+        self.masw_panel.run_auto(common_time, distances, matrix, group_id=group_id, group_name=group_name)
 
     def _flip_distance_group(self, distance_m: float) -> None:
         """Boton 'Invertir traza' del waterfall: invierte el punto completo
@@ -1283,11 +1394,14 @@ class FieldReviewWindow(QMainWindow):
         if current is None:
             return
         shot, ann = current
+        ann.reviewed = True
         ann.accepted = bool(checked)
         ann.source = "manual"
         self._update_table_row(self._current_row, shot)
         self._refresh_plot()
         self._autosave_annotations()
+        estado, _color = self._estado_display(ann.reviewed, ann.accepted)
+        self.status_label.setText(f"{shot.folder_name}/{shot.capture_name}: {estado}")
 
     def _notes_changed(self) -> None:
         current = self._current()
@@ -1371,6 +1485,8 @@ class FieldReviewWindow(QMainWindow):
             self.masw_panel.set_dark_mode(self.dark_mode)
         if hasattr(self, "filter_panel"):
             self.filter_panel.set_dark_mode(self.dark_mode)
+        if hasattr(self, "grouping_panel"):
+            self.grouping_panel.set_dark_mode(self.dark_mode)
         if hasattr(self, "alignment_panel"):
             self.alignment_panel.set_dark_mode(self.dark_mode)
 
@@ -1686,6 +1802,8 @@ class FieldReviewWindow(QMainWindow):
             save_filter_settings(self.filter_settings_path, self.filter_settings)
             save_alignment_offsets(self.alignment_offsets_path, self.alignment_offsets)
             save_alignment_shot_offsets(self.alignment_shot_offsets_path, self.alignment_shot_offsets)
+            save_disabled_folders(self.disabled_folders_path, self.disabled_folders)
+            save_dispersion_groups(self.dispersion_groups_path, self.group_count, self.group_assignments)
             self._save_session()
             self._save_masw_state()
         finally:
@@ -1982,8 +2100,8 @@ class GroupingPanel(QWidget):
         self.summary_label = QLabel("")
         self.summary_label.setWordWrap(True)
         right_layout.addWidget(self.summary_label)
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["Grupo", "Carpeta", "Capturas", "Distancias", "OK"])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["Grupo", "Carpeta", "Capturas", "Distancias", "OK", "Fecha carpeta"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1993,6 +2111,8 @@ class GroupingPanel(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSortingEnabled(True)
         right_layout.addWidget(self.table, stretch=1)
 
         root.addWidget(left)
@@ -2075,41 +2195,53 @@ class GroupingPanel(QWidget):
     def _populate_table(self) -> None:
         folders = self._folders()
         by_folder: dict[str, dict[str, object]] = {
-            folder: {"count": 0, "ok": 0, "distances": set()} for folder in folders
+            folder: {"count": 0, "ok": 0, "distances": set(), "distance_values": set(), "path": None}
+            for folder in folders
         }
         for shot in self.dataset.shots:
-            info = by_folder.setdefault(shot.folder_name, {"count": 0, "ok": 0, "distances": set()})
+            info = by_folder.setdefault(
+                shot.folder_name,
+                {"count": 0, "ok": 0, "distances": set(), "distance_values": set(), "path": None},
+            )
+            info["path"] = shot.folder
             info["count"] = int(info["count"]) + 1
             ann = self.annotations.get(shot.shot_id)
             if ann is not None:
                 info["distances"].add(format_distance_label(ann.distance_m))
+                info["distance_values"].add(float(ann.distance_m))
                 if ann.accepted and ann.reviewed:
                     info["ok"] = int(info["ok"]) + 1
             else:
                 info["distances"].add(format_distance_label(shot.distance_m))
+                info["distance_values"].add(float(shot.distance_m))
 
         self._loading = True
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(folders))
         for row, folder in enumerate(folders):
             group_id = _folder_group_id(folder, self.group_count, self.assignments)
             info = by_folder[folder]
             distances = sorted(info["distances"])
+            distance_values = sorted(float(v) for v in info["distance_values"])
+            date_text, date_sort = _folder_date_text_and_sort(folder, info.get("path"))
             values = [
-                _group_name(group_id),
-                folder,
-                str(info["count"]),
-                ", ".join(distances[:8]) + (" ..." if len(distances) > 8 else ""),
-                str(info["ok"]),
+                (_group_name(group_id), group_id),
+                (folder, folder.lower()),
+                (str(info["count"]), int(info["count"])),
+                (", ".join(distances[:8]) + (" ..." if len(distances) > 8 else ""), distance_values[0] if distance_values else 0.0),
+                (str(info["ok"]), int(info["ok"])),
+                (date_text, date_sort),
             ]
-            for col, value in enumerate(values):
+            for col, (value, sort_value) in enumerate(values):
                 item = self.table.item(row, col)
                 if item is None:
-                    item = QTableWidgetItem()
+                    item = SortTableWidgetItem()
                     self.table.setItem(row, col, item)
                 item.setText(value)
-                item.setData(Qt.ItemDataRole.UserRole, group_id)
+                item.setData(Qt.ItemDataRole.UserRole, sort_value)
                 item.setForeground(QColor("#eeeeee" if self.dark_mode else "#111111"))
                 item.setBackground(QColor("#24272e" if self.dark_mode else "#ffffff"))
+        self.table.setSortingEnabled(True)
         self._loading = False
         counts = {
             gid: sum(1 for folder in folders if _folder_group_id(folder, self.group_count, self.assignments) == gid)
@@ -2181,6 +2313,9 @@ class AlignmentPanel(QWidget):
         self.group_count = max(1, int(group_count or 1))
         self.group_assignments = group_assignments if group_assignments is not None else {}
         self._loading = False
+        self._saved_group_id: int | None = None
+        self._saved_label: str | None = None
+        self._saved_folder: str | None = None
         # Carpeta -> (señales, promedio precalculado) del label actual.
         self._folders: list[tuple[str, list[tuple[FieldShot, PickAnnotation]]]] = []
         self._folder_traces: dict[str, tuple[np.ndarray, np.ndarray]] = {}
@@ -2295,7 +2430,8 @@ class AlignmentPanel(QWidget):
         """Rearma la lista de labels desde las marcas actuales, conservando la
         seleccion si se puede."""
         self._refresh_group_combo()
-        current = self.label_combo.currentText()
+        current = self._saved_label or self.label_combo.currentText()
+        saved_folder = self._saved_folder
         group_id = self.current_group_id()
         labels = sorted(
             {
@@ -2316,11 +2452,39 @@ class AlignmentPanel(QWidget):
             self.label_combo.setCurrentText(current)
         self._loading = False
         self._label_changed()
+        if saved_folder:
+            for idx, (folder, _pairs) in enumerate(self._folders):
+                if folder == saved_folder:
+                    self._index = idx
+                    self._show_current()
+                    break
+        self._saved_group_id = None
+        self._saved_label = None
+        self._saved_folder = None
 
     def set_grouping(self, group_count: int, assignments: dict[str, int]) -> None:
         self.group_count = max(1, int(group_count or 1))
         self.group_assignments = assignments
         self.refresh()
+
+    def restore_selection(
+        self,
+        group_id: int | None = None,
+        label: str | None = None,
+        folder: str | None = None,
+    ) -> None:
+        self._saved_group_id = int(group_id) if group_id is not None else None
+        self._saved_label = str(label) if label else None
+        self._saved_folder = str(folder) if folder else None
+        self.refresh()
+
+    def selection_state(self) -> dict[str, object | None]:
+        current = self._current()
+        return {
+            "alignment_group_id": self.current_group_id(),
+            "alignment_label": self.label_combo.currentText() or None,
+            "alignment_folder": current[0] if current is not None else None,
+        }
 
     def current_group_id(self) -> int:
         if not hasattr(self, "group_combo"):
@@ -2335,7 +2499,7 @@ class AlignmentPanel(QWidget):
     def _refresh_group_combo(self) -> None:
         if not hasattr(self, "group_combo"):
             return
-        current = self.current_group_id()
+        current = self._saved_group_id or self.current_group_id()
         self.group_combo.blockSignals(True)
         self.group_combo.clear()
         for gid in range(1, self.group_count + 1):
@@ -2424,9 +2588,39 @@ class AlignmentPanel(QWidget):
         label = self.label_combo.currentText()
         return folder in self.offsets.get(label, {})
 
+    def _disabled_label_key(self, label: str | None = None) -> str:
+        label = label if label is not None else self.label_combo.currentText()
+        if self.group_count <= 1:
+            return label
+        return _group_disabled_key(label, self.current_group_id())
+
+    def _disabled_keys_for_label(self, label: str | None = None) -> set[str]:
+        label = label if label is not None else self.label_combo.currentText()
+        keys = {self._disabled_label_key(label)}
+        if self.group_count > 1 and self.current_group_id() == 1:
+            keys.add(label)
+        return keys
+
+    def _all_disabled_keys_for_label(self, label: str) -> set[str]:
+        keys = {label}
+        if self.group_count > 1:
+            keys.update(_group_disabled_key(label, gid) for gid in range(1, self.group_count + 1))
+        return keys
+
+    def _remove_rejection(self, label: str, folder: str) -> None:
+        for disabled_key in self._all_disabled_keys_for_label(label):
+            entry = self.disabled.get(disabled_key)
+            if entry and folder in entry:
+                entry.remove(folder)
+
+    def _set_rejection(self, label: str, folder: str) -> None:
+        disabled_key = self._disabled_label_key(label)
+        entry = self.disabled.setdefault(disabled_key, [])
+        if folder not in entry:
+            entry.append(folder)
+
     def _is_rejected(self, folder: str) -> bool:
-        label = self.label_combo.currentText()
-        return folder in self.disabled.get(label, ())
+        return any(folder in self.disabled.get(key, ()) for key in self._disabled_keys_for_label())
 
     def _folder_default_offset_s(self, folder: str) -> float:
         label = self.label_combo.currentText()
@@ -2485,6 +2679,27 @@ class AlignmentPanel(QWidget):
         self._index = int(np.clip(self._index + delta, 0, len(self._folders) - 1))
         self._show_current()
 
+    def _advance_after_decision(self) -> None:
+        if self._folders and self._index + 1 < len(self._folders):
+            self._index += 1
+            self._show_current()
+            return
+
+        start_group = max(0, self.group_combo.currentIndex())
+        start_label = self.label_combo.currentIndex()
+        for group_idx in range(start_group, self.group_combo.count()):
+            if group_idx != start_group:
+                self.group_combo.setCurrentIndex(group_idx)
+                start_label = -1
+            for label_idx in range(start_label + 1, self.label_combo.count()):
+                self.label_combo.setCurrentIndex(label_idx)
+                if self._folders:
+                    return
+            start_label = -1
+
+        self._show_current()
+        self.status_label.setText("Enfase terminado: no quedan mas carpetas, labels ni grupos.")
+
     def _offset_changed(self, _value_ms: float) -> None:
         if self._loading:
             return
@@ -2496,6 +2711,7 @@ class AlignmentPanel(QWidget):
             return
         folder, pairs = current
         label = self.label_combo.currentText()
+        self._remove_rejection(label, folder)
         self.offsets.setdefault(label, {})[folder] = float(self.offset_spin.value()) / 1000.0
         # Los offsets por señal viejos tienen prioridad sobre el de carpeta y
         # pelearian con este ajuste: se limpian (el ajuste fino ahora es el
@@ -2504,7 +2720,7 @@ class AlignmentPanel(QWidget):
             self.shot_offsets.pop(shot.shot_id, None)
         if self.on_changed is not None:
             self.on_changed()
-        self._move(1)
+        self._advance_after_decision()
 
     def _toggle_reject(self, checked: bool) -> None:
         if self._loading:
@@ -2512,16 +2728,18 @@ class AlignmentPanel(QWidget):
         current = self._current()
         if current is None:
             return
-        folder, _pairs = current
+        folder, pairs = current
         label = self.label_combo.currentText()
-        entry = self.disabled.setdefault(label, [])
-        if checked and folder not in entry:
-            entry.append(folder)
-        elif not checked and folder in entry:
-            entry.remove(folder)
+        if checked:
+            self.offsets.get(label, {}).pop(folder, None)
+            for shot, _ann in pairs:
+                self.shot_offsets.pop(shot.shot_id, None)
+            self._set_rejection(label, folder)
+        else:
+            self._remove_rejection(label, folder)
         if self.on_changed is not None:
             self.on_changed()
-        self._show_current()
+        self._advance_after_decision()
 
     def _reset_folder(self) -> None:
         current = self._current()
@@ -2530,9 +2748,7 @@ class AlignmentPanel(QWidget):
         folder, _pairs = current
         label = self.label_combo.currentText()
         self.offsets.get(label, {}).pop(folder, None)
-        entry = self.disabled.get(label)
-        if entry and folder in entry:
-            entry.remove(folder)
+        self._remove_rejection(label, folder)
         if self.on_changed is not None:
             self.on_changed()
         self._show_current()
@@ -2541,8 +2757,9 @@ class AlignmentPanel(QWidget):
         label = self.label_combo.currentText()
         if label in self.offsets:
             self.offsets[label] = {}
-        if label in self.disabled:
-            self.disabled[label] = []
+        for disabled_key in self._disabled_keys_for_label(label):
+            if disabled_key in self.disabled:
+                self.disabled[disabled_key] = []
         for _folder, pairs in self._folders:
             for shot, _ann in pairs:
                 self.shot_offsets.pop(shot.shot_id, None)
@@ -2637,6 +2854,8 @@ class AverageReviewPanel(QWidget):
         alignment_offsets: dict[str, dict[str, float]] | None = None,
         alignment_shot_offsets: dict[str, float] | None = None,
         disabled_folders: dict[str, list[str]] | None = None,
+        group_count: int = 1,
+        group_assignments: dict[str, int] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2650,6 +2869,8 @@ class AverageReviewPanel(QWidget):
         self.alignment_offsets = alignment_offsets
         self.alignment_shot_offsets = alignment_shot_offsets
         self.disabled_folders = disabled_folders
+        self.group_count = max(1, int(group_count or 1))
+        self.group_assignments = group_assignments if group_assignments is not None else {}
         self.arrivals_path = default_average_arrivals_path(self.output_dir)
         self.arrivals = load_average_arrivals(self.arrivals_path)
         self.averages: list[dict] = []
@@ -2659,6 +2880,8 @@ class AverageReviewPanel(QWidget):
         self.arrival_line: pg.InfiniteLine | None = None
         self._computing = False
         self._last_signature: tuple | None = None
+        self._cache_by_group: dict[int, tuple[tuple, list[dict], dict | None]] = {}
+        self._saved_group_id: int | None = None
 
         self._build_ui()
 
@@ -2672,6 +2895,7 @@ class AverageReviewPanel(QWidget):
         self._last_signature = None
 
     def refresh(self, force: bool = False) -> None:
+        self._refresh_group_combo()
         self._refresh_averages(force=force)
 
     def show_waterfall(self) -> None:
@@ -2688,6 +2912,53 @@ class AverageReviewPanel(QWidget):
     def save_arrivals(self) -> None:
         save_average_arrivals(self.arrivals_path, self.arrivals)
 
+    def set_grouping(self, group_count: int, assignments: dict[str, int]) -> None:
+        self.group_count = max(1, int(group_count or 1))
+        self.group_assignments = assignments
+        self._cache_by_group = {}
+        self._last_signature = None
+        self.refresh(force=False)
+
+    def restore_selection(self, group_id: int | None = None) -> None:
+        self._saved_group_id = int(group_id) if group_id is not None else None
+        self.refresh(force=False)
+
+    def selection_state(self) -> dict[str, int]:
+        return {"average_group_id": self.current_group_id()}
+
+    def current_group_id(self) -> int:
+        if not hasattr(self, "group_combo"):
+            return 1
+        data = self.group_combo.currentData()
+        try:
+            group_id = int(data)
+        except (TypeError, ValueError):
+            group_id = 1
+        return int(np.clip(group_id, 1, self.group_count))
+
+    def _refresh_group_combo(self) -> None:
+        if not hasattr(self, "group_combo"):
+            return
+        current = self._saved_group_id or self.current_group_id()
+        self.group_combo.blockSignals(True)
+        self.group_combo.clear()
+        for gid in range(1, self.group_count + 1):
+            n_folders = len({
+                shot.folder_name for shot in self.dataset.shots
+                if _folder_group_id(shot.folder_name, self.group_count, self.group_assignments) == gid
+            })
+            self.group_combo.addItem(f"{_group_name(gid)} ({n_folders} carpetas)", gid)
+        idx = max(0, min(current - 1, self.group_combo.count() - 1))
+        self.group_combo.setCurrentIndex(idx)
+        self.group_combo.blockSignals(False)
+        self._saved_group_id = None
+
+    def _group_changed(self, *_args) -> None:
+        if self._loading:
+            return
+        self._last_signature = None
+        self._refresh_averages(force=False)
+
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -2699,6 +2970,12 @@ class AverageReviewPanel(QWidget):
         left_layout.setContentsMargins(8, 8, 8, 8)
         self.summary_label = QLabel("Promedios")
         left_layout.addWidget(self.summary_label)
+        group_row = QHBoxLayout()
+        group_row.addWidget(QLabel("Grupo"))
+        self.group_combo = QComboBox()
+        self.group_combo.currentIndexChanged.connect(self._group_changed)
+        group_row.addWidget(self.group_combo, stretch=1)
+        left_layout.addLayout(group_row)
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["Rev", "Label", "N", "Arrival s"])
@@ -2769,30 +3046,59 @@ class AverageReviewPanel(QWidget):
     def _refresh_averages(self, force: bool = False) -> None:
         if self._computing:
             return
+        group_id = self.current_group_id()
+        group_dataset = _filtered_dataset_for_group(
+            self.dataset, group_id, self.group_count, self.group_assignments
+        )
+        disabled_for_group = _project_disabled_for_group(self.disabled_folders, group_id, self.group_count)
         signature = (
-            annotations_signature(self.dataset, self.annotations),
+            annotations_signature(group_dataset, self.annotations),
             filter_settings_signature(self.filter_settings),
             alignment_offsets_signature(self.alignment_offsets),
             alignment_shot_offsets_signature(self.alignment_shot_offsets),
-            disabled_folders_signature(self.disabled_folders),
+            disabled_folders_signature(disabled_for_group),
+            dispersion_groups_signature(self.group_count, self.group_assignments),
+            group_id,
         )
+        cached = self._cache_by_group.get(group_id)
+        if not force and cached is not None and cached[0] == signature:
+            self.averages = cached[1]
+            self.hammer_global = cached[2]
+            self._last_signature = signature
+            self._populate_table()
+            filt = self.filter_settings
+            filter_txt = ""
+            if filt is not None and filt.enabled:
+                filter_txt = f" | filtro {filt.low_hz:g}-{filt.high_hz:g} Hz o{filt.order}"
+            self.summary_label.setText(
+                f"{_group_name(group_id)}: {len(self.averages)} promedios (sin cambios){filter_txt} | {self.output_dir}"
+            )
+            if self.averages:
+                row = min(max(self._current_row, 0), len(self.averages) - 1)
+                self.table.selectRow(row)
+                self._select_row(row)
+            else:
+                self._clear_current_average()
+            return
         if not force and self.averages and signature == self._last_signature:
-            self.summary_label.setText(f"{len(self.averages)} promedios (sin cambios) | {self.output_dir}")
+            self.summary_label.setText(
+                f"{_group_name(group_id)}: {len(self.averages)} promedios (sin cambios) | {self.output_dir}"
+            )
             return
         self._computing = True
         self.refresh_btn.setEnabled(False)
-        self.summary_label.setText("Calculando promedios...")
-        self.status_label.setText("Calculando promedios, un momento...")
+        self.summary_label.setText(f"Calculando promedios de {_group_name(group_id)}...")
+        self.status_label.setText(f"Calculando promedios de {_group_name(group_id)}, un momento...")
         QApplication.processEvents()
         try:
             groups, hammer_global = compute_average_groups(
-                self.dataset,
+                group_dataset,
                 self.annotations,
                 prefer_filtered=self.prefer_filtered,
                 filter_settings=self.filter_settings,
                 alignment_offsets=self.alignment_offsets,
                 alignment_shot_offsets=self.alignment_shot_offsets,
-                disabled_folders=self.disabled_folders,
+                disabled_folders=disabled_for_group,
             )
         except Exception as exc:
             QMessageBox.critical(self, "No se pudieron calcular promedios", str(exc))
@@ -2803,6 +3109,7 @@ class AverageReviewPanel(QWidget):
         self.averages = groups
         self.hammer_global = hammer_global
         self._last_signature = signature
+        self._cache_by_group[group_id] = (signature, self.averages, self.hammer_global)
         for avg in self.averages:
             label = str(avg["label"])
             if label not in self.arrivals:
@@ -2817,13 +3124,27 @@ class AverageReviewPanel(QWidget):
         filter_txt = ""
         if filt is not None and filt.enabled:
             filter_txt = f" | filtro {filt.low_hz:g}-{filt.high_hz:g} Hz o{filt.order}"
-        self.summary_label.setText(f"{len(self.averages)} promedios{filter_txt} | {self.output_dir}")
+        self.summary_label.setText(
+            f"{_group_name(group_id)}: {len(self.averages)} promedios{filter_txt} | {self.output_dir}"
+        )
         if self.averages:
             row = min(max(self._current_row, 0), len(self.averages) - 1)
             self.table.selectRow(row)
             self._select_row(row)
+        else:
+            self._clear_current_average()
         self._computing = False
         self.refresh_btn.setEnabled(True)
+
+    def _clear_current_average(self) -> None:
+        self._current_row = -1
+        self.label_value.setText("-")
+        self.arrival_value.setText("-")
+        self.notes_edit.setText("")
+        self.hammer_plot.clear()
+        self.geo_plot.clear()
+        self._style_plots()
+        self.status_label.setText("No hay promedios para el grupo seleccionado.")
 
     def _populate_table(self) -> None:
         self.table.setRowCount(len(self.averages))
@@ -2944,8 +3265,12 @@ class AverageReviewPanel(QWidget):
         self.status_label.setText("Exportando waterfall a disco, un momento...")
         QApplication.processEvents()
         try:
+            group_id = self.current_group_id()
+            group_dataset = _filtered_dataset_for_group(
+                self.dataset, group_id, self.group_count, self.group_assignments
+            )
             result = export_processed(
-                self.dataset,
+                group_dataset,
                 self.annotations,
                 self.output_dir,
                 prefer_filtered=self.prefer_filtered,
@@ -2953,7 +3278,7 @@ class AverageReviewPanel(QWidget):
                 filter_settings=self.filter_settings,
                 alignment_offsets=self.alignment_offsets,
                 alignment_shot_offsets=self.alignment_shot_offsets,
-                disabled_folders=self.disabled_folders,
+                disabled_folders=_project_disabled_for_group(self.disabled_folders, group_id, self.group_count),
             )
         except Exception as exc:
             QMessageBox.critical(self, "No se pudo exportar waterfall", str(exc))
@@ -2988,7 +3313,17 @@ class AverageReviewPanel(QWidget):
             return
         common_time, distances, matrix = built
         if self.on_show_waterfall is not None:
-            self.on_show_waterfall(common_time, distances, matrix, self.arrivals, self.hammer_global, len(self.averages))
+            group_id = self.current_group_id()
+            self.on_show_waterfall(
+                common_time,
+                distances,
+                matrix,
+                self.arrivals,
+                self.hammer_global,
+                len(self.averages),
+                group_id,
+                _group_name(group_id),
+            )
         self.status_label.setText(f"Waterfall actualizado con {len(distances)} promedios")
 
     def _style_plots(self) -> None:
@@ -3040,6 +3375,7 @@ class WaterfallPanel(QWidget):
         self._crosshair_h: pg.InfiniteLine | None = None
         self._proxy = None
         self._last_data: dict | None = None
+        self._data_by_group: dict[int, dict] = {}
         self._hidden_distances: set[float] = set()
         self._build_ui()
 
@@ -3051,6 +3387,10 @@ class WaterfallPanel(QWidget):
             "Sin datos todavia. Calcula los promedios en la pestaña anterior y presiona 'Ver waterfall'."
         )
         top.addWidget(self.info_label, stretch=1)
+        top.addWidget(QLabel("Grupo"))
+        self.group_combo = QComboBox()
+        self.group_combo.currentIndexChanged.connect(self._waterfall_group_changed)
+        top.addWidget(self.group_combo)
         self.raw_amplitude_check = QCheckBox("Amplitud real (ver atenuacion)")
         self.raw_amplitude_check.setToolTip(
             "Por defecto cada traza se normaliza a su propio pico para comparar formas.\n"
@@ -3180,6 +3520,36 @@ class WaterfallPanel(QWidget):
         self._proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved, rateLimit=60, slot=self._on_mouse_moved)
         self._apply_theme()
 
+    def _update_group_combo(self, select_group: int | None = None) -> None:
+        if not hasattr(self, "group_combo"):
+            return
+        current = int(select_group or (self._last_data or {}).get("group_id", 1))
+        self.group_combo.blockSignals(True)
+        self.group_combo.clear()
+        for group_id in sorted(self._data_by_group):
+            data = self._data_by_group[group_id]
+            label = str(data.get("group_name", _group_name(group_id)))
+            n = int(data.get("n_averages", 0))
+            self.group_combo.addItem(f"{label} ({n} promedios)", group_id)
+        idx = self.group_combo.findData(current)
+        if idx < 0 and self.group_combo.count():
+            idx = 0
+        if idx >= 0:
+            self.group_combo.setCurrentIndex(idx)
+        self.group_combo.blockSignals(False)
+
+    def _waterfall_group_changed(self, _idx: int) -> None:
+        data = self.group_combo.currentData()
+        if data is None:
+            return
+        group_id = int(data)
+        selected = self._data_by_group.get(group_id)
+        if selected is None:
+            return
+        self._last_data = selected
+        self._rebuild_trace_list(selected["distances"])
+        self._redraw()
+
     def _trace_item_changed(self, _item: QListWidgetItem) -> None:
         self._hidden_distances = {
             self.trace_list.item(i).data(Qt.ItemDataRole.UserRole)
@@ -3287,7 +3657,10 @@ class WaterfallPanel(QWidget):
         arrivals: dict[str, AverageArrivalAnnotation] | None,
         hammer_global: dict | None,
         n_averages: int,
+        group_id: int = 1,
+        group_name: str | None = None,
     ) -> None:
+        group_id = int(group_id or 1)
         self._last_data = {
             "common_time": common_time,
             "distances": distances,
@@ -3295,7 +3668,11 @@ class WaterfallPanel(QWidget):
             "arrivals": arrivals,
             "hammer_global": hammer_global,
             "n_averages": n_averages,
+            "group_id": group_id,
+            "group_name": group_name or _group_name(group_id),
         }
+        self._data_by_group[group_id] = self._last_data
+        self._update_group_combo(group_id)
         self._rebuild_trace_list(distances)
         self._redraw()
 
@@ -3304,6 +3681,18 @@ class WaterfallPanel(QWidget):
     def get_state(self) -> dict:
         d = self._last_data
         hammer = d.get("hammer_global") if d else None
+        group_states = {}
+        for group_id, data in self._data_by_group.items():
+            group_hammer = data.get("hammer_global")
+            group_states[str(group_id)] = {
+                "group_id": int(group_id),
+                "group_name": str(data.get("group_name", _group_name(group_id))),
+                "n_averages": int(data.get("n_averages", 0)),
+                "hammer_n": (group_hammer.get("n") if isinstance(group_hammer, dict) else None),
+                "hammer_inverted": (
+                    bool(group_hammer.get("inverted")) if isinstance(group_hammer, dict) else None
+                ),
+            }
         return {
             "hidden_distances": [float(v) for v in sorted(self._hidden_distances)],
             "trim_enabled": bool(self.trim_enabled_check.isChecked()),
@@ -3312,20 +3701,43 @@ class WaterfallPanel(QWidget):
             "raw_amplitude": bool(self.raw_amplitude_check.isChecked()),
             "kfilter_mode": self.kfilter_combo.currentText(),
             "n_averages": int(d["n_averages"]) if d else 0,
+            "group_id": int(d.get("group_id", 1)) if d else 1,
+            "group_name": str(d.get("group_name", "Grupo 1")) if d else "Grupo 1",
+            "active_group": int(d.get("group_id", 1)) if d else 1,
+            "groups": group_states,
             "has_data": d is not None,
             "hammer_n": (hammer.get("n") if isinstance(hammer, dict) else None),
             "hammer_inverted": (bool(hammer.get("inverted")) if isinstance(hammer, dict) else None),
         }
 
     def get_arrays(self) -> dict:
+        if not self._data_by_group and self._last_data is None:
+            return {}
+        arrays = {}
+        if self._data_by_group:
+            group_ids = np.array(sorted(self._data_by_group), dtype=np.int32)
+            arrays["wf_group_ids"] = group_ids
+            for raw_gid in group_ids:
+                group_id = int(raw_gid)
+                data = self._data_by_group[group_id]
+                prefix = f"wf_g{group_id}"
+                arrays[f"{prefix}_common_time"] = np.asarray(data["common_time"], dtype=np.float64)
+                arrays[f"{prefix}_distances"] = np.asarray(data["distances"], dtype=np.float64)
+                arrays[f"{prefix}_matrix"] = np.asarray(data["matrix"], dtype=np.float64)
+                hammer = data.get("hammer_global")
+                if isinstance(hammer, dict):
+                    try:
+                        ht, hm = hammer_global_time_signal(hammer)
+                        arrays[f"{prefix}_hammer_time"] = np.asarray(ht, dtype=np.float64)
+                        arrays[f"{prefix}_hammer_mean"] = np.asarray(hm, dtype=np.float64)
+                    except Exception:
+                        pass
         d = self._last_data
         if d is None:
-            return {}
-        arrays = {
-            "wf_common_time": np.asarray(d["common_time"], dtype=np.float64),
-            "wf_distances": np.asarray(d["distances"], dtype=np.float64),
-            "wf_matrix": np.asarray(d["matrix"], dtype=np.float64),
-        }
+            return arrays
+        arrays["wf_common_time"] = np.asarray(d["common_time"], dtype=np.float64)
+        arrays["wf_distances"] = np.asarray(d["distances"], dtype=np.float64)
+        arrays["wf_matrix"] = np.asarray(d["matrix"], dtype=np.float64)
         hammer = d.get("hammer_global")
         if isinstance(hammer, dict):
             try:
@@ -3367,6 +3779,40 @@ class WaterfallPanel(QWidget):
                 spin.blockSignals(True)
                 spin.setValue(float(state[key]))
                 spin.blockSignals(False)
+        groups_state = state.get("groups", {}) if isinstance(state.get("groups"), dict) else {}
+        if "wf_group_ids" in arrays:
+            self._data_by_group = {}
+            for raw_gid in np.asarray(arrays["wf_group_ids"]).astype(int):
+                gid = int(raw_gid)
+                prefix = f"wf_g{gid}"
+                if f"{prefix}_matrix" not in arrays:
+                    continue
+                meta = groups_state.get(str(gid), {}) if isinstance(groups_state, dict) else {}
+                hammer_global = None
+                if f"{prefix}_hammer_time" in arrays and f"{prefix}_hammer_mean" in arrays:
+                    hammer_global = {
+                        "time_s": np.asarray(arrays[f"{prefix}_hammer_time"], dtype=np.float64),
+                        "hammer_mean_v": np.asarray(arrays[f"{prefix}_hammer_mean"], dtype=np.float64),
+                        "n": meta.get("hammer_n"),
+                        "inverted": bool(meta.get("hammer_inverted")),
+                    }
+                self._data_by_group[gid] = {
+                    "common_time": np.asarray(arrays[f"{prefix}_common_time"], dtype=np.float64),
+                    "distances": [float(d) for d in arrays[f"{prefix}_distances"]],
+                    "matrix": np.asarray(arrays[f"{prefix}_matrix"], dtype=np.float64),
+                    "arrivals": arrivals,
+                    "hammer_global": hammer_global,
+                    "n_averages": int(meta.get("n_averages", 0)),
+                    "group_id": gid,
+                    "group_name": str(meta.get("group_name", _group_name(gid))),
+                }
+            if self._data_by_group:
+                active_group = int(state.get("active_group", state.get("group_id", min(self._data_by_group))))
+                self._last_data = self._data_by_group.get(active_group) or self._data_by_group[min(self._data_by_group)]
+                self._update_group_combo(int(self._last_data.get("group_id", 1)))
+                self._rebuild_trace_list(self._last_data["distances"])
+                self._redraw()
+                return
         if "wf_matrix" not in arrays:
             return
         hammer_global = None
@@ -3384,6 +3830,8 @@ class WaterfallPanel(QWidget):
             arrivals,
             hammer_global,
             int(state.get("n_averages", 0)),
+            int(state.get("group_id", 1)),
+            str(state.get("group_name", _group_name(int(state.get("group_id", 1))))),
         )
 
     def _visible_distances_and_matrix(
@@ -3407,6 +3855,7 @@ class WaterfallPanel(QWidget):
         arrivals = self._last_data["arrivals"]
         hammer_global = self._last_data["hammer_global"]
         n_averages = self._last_data["n_averages"]
+        group_name = self._last_data.get("group_name", "Grupo 1")
         raw_amplitude = self.raw_amplitude_check.isChecked()
 
         self.plot.clear()
@@ -3417,7 +3866,7 @@ class WaterfallPanel(QWidget):
 
         if common_time.size == 0 or not distances:
             self.info_label.setText(
-                f"{n_averages} promedios | sin trazas visibles (recorte o filtro vacio)"
+                f"{group_name}: {n_averages} promedios | sin trazas visibles (recorte o filtro vacio)"
             )
             return
 
@@ -3485,7 +3934,7 @@ class WaterfallPanel(QWidget):
 
         extra = " + hammer global" if hammer_added else ""
         mode = "amplitud real (atenuacion visible)" if raw_amplitude else "normalizada por traza"
-        self.info_label.setText(f"{n_averages} promedios{extra} | escala: {mode}")
+        self.info_label.setText(f"{group_name}: {n_averages} promedios{extra} | escala: {mode}")
 
     def _flip_selected_trace(self) -> None:
         if self._last_data is None:
@@ -3540,7 +3989,9 @@ class WaterfallPanel(QWidget):
                 self, "MASW", "No hay trazas visibles con el recorte/filtro actual de la pestaña Waterfall."
             )
             return
-        callback(common_time, distances, matrix)
+        group_id = int(self._last_data.get("group_id", 1))
+        group_name = str(self._last_data.get("group_name", _group_name(group_id)))
+        callback(common_time, distances, matrix, group_id, group_name)
 
 
 class MaswPanel(QWidget):
@@ -3573,6 +4024,16 @@ class MaswPanel(QWidget):
         self._raw_time: np.ndarray | None = None
         self._raw_distances: list[float] | None = None
         self._raw_matrix: np.ndarray | None = None
+        self._raw_groups: dict[int, dict[str, object]] = {}
+        self._active_data_group_id = 1
+        self._group_weights: dict[int, float] = {}
+        self._group_results: dict[int, dict[str, object]] = {}
+        self._weight_slider_max = 2.0
+        self._weight_sliders: dict[int, QSlider] = {}
+        self._weight_value_labels: dict[int, QLabel] = {}
+        self._freq_log_scale = False
+        self._intensity_log_scale = False
+        self._show_frequency_energy = False
         self._last_result: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
         # Picks por modo: modo 0 = fundamental, 1 = primer modo superior, etc.
         # `self.picks` es un alias (misma identidad de dict) al modo activo, que
@@ -3668,6 +4129,9 @@ class MaswPanel(QWidget):
         self.fmax_spin.setToolTip("Frecuencia maxima de la imagen (banda del geofono: 200 Hz)")
         self.calc_btn = QPushButton("Calcular imagen")
         self.calc_btn.clicked.connect(self._calculate)
+        self.clear_group_data_btn = QPushButton("Limpiar grupos MASW")
+        self.clear_group_data_btn.setToolTip("Borra los waterfalls cargados en MASW para empezar una combinacion nueva.")
+        self.clear_group_data_btn.clicked.connect(lambda: self.clear_group_data())
         for label_text, widget in (
             ("c min", self.cmin_spin),
             ("c max", self.cmax_spin),
@@ -3678,8 +4142,61 @@ class MaswPanel(QWidget):
             controls.addWidget(QLabel(label_text))
             controls.addWidget(widget)
         controls.addWidget(self.calc_btn)
+        controls.addWidget(self.clear_group_data_btn)
         controls.addStretch(1)
         layout.addLayout(controls)
+
+        self.weight_box = QGroupBox("Pesos para combinar imagenes normalizadas")
+        self.weight_layout = QVBoxLayout(self.weight_box)
+        self.weight_hint_label = QLabel(
+            "Carga waterfalls desde cada grupo. La imagen combinada usa Icomb(f,c)=sum(wg * Ig(f,c)/max_c Ig(f,c))."
+        )
+        self.weight_hint_label.setWordWrap(True)
+        self.weight_layout.addWidget(self.weight_hint_label)
+        weight_limit_row = QHBoxLayout()
+        weight_limit_row.addWidget(QLabel("Max peso"))
+        self.weight_max_spin = QDoubleSpinBox()
+        self.weight_max_spin.setRange(0.01, 1000.0)
+        self.weight_max_spin.setDecimals(2)
+        self.weight_max_spin.setSingleStep(0.25)
+        self.weight_max_spin.setValue(self._weight_slider_max)
+        self.weight_max_spin.setToolTip(
+            "Fija el maximo de las barras de peso. La imagen combinada se renormaliza "
+            "despues de sumar y la escala de color queda siempre en 0..1."
+        )
+        self.weight_max_spin.valueChanged.connect(self._weight_max_changed)
+        weight_limit_row.addWidget(self.weight_max_spin)
+        weight_limit_row.addStretch(1)
+        self.weight_layout.addLayout(weight_limit_row)
+        layout.addWidget(self.weight_box)
+
+        display_row = QHBoxLayout()
+        display_row.addWidget(QLabel("Vista"))
+        self.freq_log_btn = QPushButton("Eje f log")
+        self.freq_log_btn.setCheckable(True)
+        self.freq_log_btn.setToolTip(
+            "Alterna el eje horizontal de frecuencia entre escala lineal y log10. "
+            "Los picks y regiones siguen guardandose en Hz."
+        )
+        self.freq_log_btn.toggled.connect(self._freq_log_changed)
+        self.energy_freq_btn = QPushButton("Energía/f")
+        self.energy_freq_btn.setCheckable(True)
+        self.energy_freq_btn.setToolTip(
+            "Muestra/oculta una curva auxiliar con max_c I(f,c) para ver cuanta energia queda por frecuencia."
+        )
+        self.energy_freq_btn.toggled.connect(self._energy_frequency_changed)
+        self.intensity_log_btn = QPushButton("Intensidad log")
+        self.intensity_log_btn.setCheckable(True)
+        self.intensity_log_btn.setToolTip(
+            "Muestra la intensidad con una transformacion logaritmica visual. "
+            "No cambia los picks ni el calculo; solo levanta energia debil."
+        )
+        self.intensity_log_btn.toggled.connect(self._intensity_log_changed)
+        display_row.addWidget(self.freq_log_btn)
+        display_row.addWidget(self.energy_freq_btn)
+        display_row.addWidget(self.intensity_log_btn)
+        display_row.addStretch(1)
+        layout.addLayout(display_row)
 
         pick_row = QHBoxLayout()
         self.pick_fmin_spin = QDoubleSpinBox()
@@ -3785,6 +4302,10 @@ class MaswPanel(QWidget):
         self._plot_item = pg.PlotItem()
         self.image_view = pg.ImageView(view=self._plot_item)
         self._plot_item.invertY(False)
+        try:
+            self._plot_item.vb.setAspectLocked(False)
+        except Exception:
+            pass
         for axis_name in ("bottom", "left"):
             self._plot_item.getAxis(axis_name).enableAutoSIPrefix(False)
         try:
@@ -3805,6 +4326,13 @@ class MaswPanel(QWidget):
         self._m0_vertices.setZValue(46)
         self._plot_item.addItem(self._m0_vertices)
         layout.addWidget(self.image_view, stretch=1)
+        self.energy_plot = pg.PlotWidget(title="Energía por frecuencia")
+        self.energy_plot.setMaximumHeight(140)
+        self.energy_plot.setLabel("bottom", "Frecuencia", units="Hz")
+        self.energy_plot.setLabel("left", "Energia", units="norm.")
+        self.energy_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.energy_plot.hide()
+        layout.addWidget(self.energy_plot)
         self.coord_label = QLabel("Move el mouse sobre la imagen para ver frecuencia / velocidad / amplitud")
         layout.addWidget(self.coord_label)
         self._plot_item.scene().sigMouseMoved.connect(self._on_mouse_moved)
@@ -3980,27 +4508,522 @@ class MaswPanel(QWidget):
     # ------------------------------------------------ etapa 1: dispersion
 
     def set_data(self, common_time: np.ndarray, distances: list[float], matrix: np.ndarray) -> None:
+        self.clear_group_data(reset_message=False)
+        self.set_group_data(common_time, distances, matrix, group_id=1, group_name="Grupo 1")
+
+    def set_group_data(
+        self,
+        common_time: np.ndarray,
+        distances: list[float],
+        matrix: np.ndarray,
+        group_id: int = 1,
+        group_name: str | None = None,
+    ) -> None:
+        group_id = max(1, int(group_id or 1))
+        group_name = group_name or _group_name(group_id)
         t_trim, m_trim = common_finite_window(common_time, matrix, t_min=0.0)
         if t_trim.size < 8:
             QMessageBox.warning(
                 self,
                 "MASW",
-                "El tramo comun a todas las distancias (sin NaN, desde t=0) es demasiado corto para calcular MASW.",
+                f"El tramo comun de {group_name} (sin NaN, desde t=0) es demasiado corto para calcular MASW.",
             )
             return
-        self._raw_time = t_trim
-        self._raw_distances = list(distances)
-        self._raw_matrix = m_trim
-        self._geophone_spacing_m = self._estimate_spacing_m(distances)
-        self._array_length_m = self._estimate_array_length(distances)
+        distances_list = [float(d) for d in distances]
+        self._raw_groups[group_id] = {
+            "name": group_name,
+            "time": np.asarray(t_trim, dtype=np.float64),
+            "distances": distances_list,
+            "matrix": np.asarray(m_trim, dtype=np.float64),
+            "spacing": self._estimate_spacing_m(distances_list),
+            "length": self._estimate_array_length(distances_list),
+        }
+        self._group_weights.setdefault(group_id, 1.0)
+        self._active_data_group_id = group_id
+        self._last_result = None
+        self._group_results = {}
         self._reset_all_modes()
+        self._update_combined_geometry()
+        self._update_weight_controls()
         self.inner_tabs.setCurrentIndex(0)
         spacing_txt = f"{self._geophone_spacing_m:.2f} m" if self._geophone_spacing_m else "desconocido"
         length_txt = f"{self._array_length_m:.1f} m" if self._array_length_m else "desconocido"
+        loaded = ", ".join(
+            f"G{gid}({len(self._raw_groups[gid]['distances'])} canales)" for gid in sorted(self._raw_groups)
+        )
         self.info_label.setText(
-            f"Datos listos: {len(distances)} canales (distancias), ventana comun 0-{t_trim[-1]:.3f} s, "
-            f"espaciado geofonos ~{spacing_txt}, largo del arreglo L~{length_txt}. "
-            "Ajusta los parametros y presiona 'Calcular imagen'."
+            f"{group_name} cargado. Grupos en MASW: {loaded}. "
+            f"Limites combinados: dx~{spacing_txt}, L~{length_txt}. "
+            "Ajusta parametros/pesos y presiona 'Calcular imagen'."
+        )
+
+    def clear_group_data(self, reset_message: bool = True) -> None:
+        self._raw_groups = {}
+        self._group_weights = {}
+        self._group_results = {}
+        self._weight_sliders = {}
+        self._weight_value_labels = {}
+        self._raw_time = None
+        self._raw_distances = None
+        self._raw_matrix = None
+        self._last_result = None
+        self._geophone_spacing_m = None
+        self._array_length_m = None
+        self._reset_all_modes()
+        if hasattr(self, "weight_layout"):
+            self._update_weight_controls()
+        if reset_message and hasattr(self, "info_label"):
+            self.info_label.setText(
+                "Sin datos todavia. Anda a la pestaña Waterfall y presiona 'Ver MASW'."
+            )
+
+    def _update_combined_geometry(self) -> None:
+        if not self._raw_groups:
+            return
+        active = self._raw_groups.get(self._active_data_group_id) or next(iter(self._raw_groups.values()))
+        self._raw_time = np.asarray(active["time"], dtype=np.float64)
+        self._raw_matrix = np.asarray(active["matrix"], dtype=np.float64)
+        dist_union = sorted({
+            float(d)
+            for group in self._raw_groups.values()
+            for d in group.get("distances", [])
+        })
+        self._raw_distances = dist_union if dist_union else [float(d) for d in active["distances"]]
+        spacings = [
+            float(group["spacing"]) for group in self._raw_groups.values()
+            if group.get("spacing") is not None and float(group["spacing"]) > 0
+        ]
+        lengths = [
+            float(group["length"]) for group in self._raw_groups.values()
+            if group.get("length") is not None and float(group["length"]) > 0
+        ]
+        # Para la imagen combinada usamos limites conservadores: el peor dx
+        # (mayor aliasing espacial) y la menor apertura L.
+        self._geophone_spacing_m = max(spacings) if spacings else self._estimate_spacing_m(self._raw_distances or [])
+        self._array_length_m = min(lengths) if lengths else self._estimate_array_length(self._raw_distances or [])
+
+    def _delete_layout_item(self, item) -> None:
+        widget = item.widget()
+        if widget is not None:
+            widget.deleteLater()
+            return
+        layout = item.layout()
+        if layout is None:
+            return
+        while layout.count():
+            self._delete_layout_item(layout.takeAt(0))
+
+    def _update_weight_controls(self) -> None:
+        if not hasattr(self, "weight_layout"):
+            return
+        static_rows = 2 if hasattr(self, "weight_max_spin") else 1
+        while self.weight_layout.count() > static_rows:
+            self._delete_layout_item(self.weight_layout.takeAt(static_rows))
+        self._weight_sliders = {}
+        self._weight_value_labels = {}
+        slider_max = max(1, int(round(float(self._weight_slider_max) * 100.0)))
+        for group_id in sorted(self._raw_groups):
+            group = self._raw_groups[group_id]
+            weight = float(np.clip(self._group_weights.get(group_id, 1.0), 0.0, self._weight_slider_max))
+            self._group_weights[group_id] = weight
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(QLabel(str(group.get("name", _group_name(group_id)))))
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, slider_max)
+            slider.setSingleStep(5)
+            slider.setPageStep(10)
+            slider.setValue(int(np.clip(round(weight * 100.0), 0, slider_max)))
+            value_label = QLabel(f"{weight:.2f}")
+            slider.valueChanged.connect(lambda value, gid=group_id: self._weight_slider_changed(gid, value))
+            row.addWidget(slider, stretch=1)
+            row.addWidget(value_label)
+            self.weight_layout.addWidget(row_widget)
+            self._weight_sliders[group_id] = slider
+            self._weight_value_labels[group_id] = value_label
+
+    def _weight_max_changed(self, value: float) -> None:
+        self._weight_slider_max = max(0.01, float(value))
+        self._update_weight_controls()
+        if self._group_results:
+            self._recombine_group_results(preserve_view=True)
+        elif self._last_result is not None:
+            f, c, A = self._last_result
+            self._display_dispersion_image(f, c, A, self.info_label.text(), preserve_view=True)
+
+    def _weight_slider_changed(self, group_id: int, value: int) -> None:
+        weight = float(value) / 100.0
+        self._group_weights[int(group_id)] = weight
+        label = self._weight_value_labels.get(int(group_id))
+        if label is not None:
+            label.setText(f"{weight:.2f}")
+        if self._group_results:
+            self._recombine_group_results(preserve_view=True)
+
+    def _freq_log_changed(self, checked: bool) -> None:
+        view_range = self._current_dispersion_view_range()
+        self._freq_log_scale = bool(checked)
+        self._redraw_last_dispersion(preserve_view=True, view_range=view_range)
+
+    def _energy_frequency_changed(self, checked: bool) -> None:
+        self._show_frequency_energy = bool(checked)
+        self._refresh_frequency_energy_plot()
+
+    def _intensity_log_changed(self, checked: bool) -> None:
+        self._intensity_log_scale = bool(checked)
+        self._redraw_last_dispersion(preserve_view=True)
+
+    def _dispersion_level_max(self) -> float:
+        return 1.0
+
+    def _freq_to_x_array(self, f: np.ndarray | list[float]) -> np.ndarray:
+        arr = np.asarray(f, dtype=np.float64)
+        if not self._freq_log_scale:
+            return arr
+        out = np.full(arr.shape, np.nan, dtype=np.float64)
+        valid = arr > 0
+        out[valid] = np.log10(arr[valid])
+        return out
+
+    def _freq_to_x(self, f_val: float) -> float:
+        if not self._freq_log_scale:
+            return float(f_val)
+        return float(np.log10(max(float(f_val), 1e-12)))
+
+    def _x_to_freq(self, x_val: float) -> float:
+        if not self._freq_log_scale:
+            return float(x_val)
+        x_val = float(x_val)
+        if x_val > 12:
+            return float("inf")
+        if x_val < -12:
+            return 0.0
+        return float(10.0 ** x_val)
+
+    def _current_dispersion_view_range(self) -> tuple[float, float, float, float] | None:
+        if not hasattr(self, "_plot_item"):
+            return None
+        try:
+            (x0, x1), (y0, y1) = self._plot_item.vb.viewRange()
+        except Exception:
+            return None
+        f0, f1 = self._x_to_freq(float(x0)), self._x_to_freq(float(x1))
+        if not all(np.isfinite(v) for v in (f0, f1, y0, y1)):
+            return None
+        f_min, f_max = min(f0, f1), max(f0, f1)
+        if self._last_result is not None:
+            f = np.asarray(self._last_result[0], dtype=np.float64)
+            valid = f[np.isfinite(f) & (f > 0 if self._freq_log_scale else np.ones(f.shape, dtype=bool))]
+            if valid.size:
+                f_min = max(f_min, float(valid[0]))
+                f_max = min(f_max, float(valid[-1]))
+                if f_max <= f_min:
+                    f_min, f_max = float(valid[0]), float(valid[-1])
+        return (f_min, f_max, float(y0), float(y1))
+
+    def _current_raw_dispersion_view_range(self) -> tuple[float, float, float, float] | None:
+        if not hasattr(self, "_plot_item"):
+            return None
+        try:
+            (x0, x1), (y0, y1) = self._plot_item.vb.viewRange()
+        except Exception:
+            return None
+        if not all(np.isfinite(v) for v in (x0, x1, y0, y1)):
+            return None
+        return (float(x0), float(x1), float(y0), float(y1))
+
+    def _restore_raw_dispersion_view_range(self, view_range: tuple[float, float, float, float] | None) -> None:
+        if view_range is None:
+            return
+        x0, x1, y0, y1 = view_range
+        if x1 <= x0 or y1 <= y0:
+            return
+        self._plot_item.setXRange(x0, x1, padding=0.0)
+        self._plot_item.setYRange(y0, y1, padding=0.0)
+
+    def _restore_dispersion_view_range(self, view_range: tuple[float, float, float, float] | None) -> None:
+        if view_range is None:
+            return
+        f0, f1, y0, y1 = view_range
+        if f1 <= f0 or y1 <= y0:
+            return
+        x0, x1 = self._freq_to_x(f0), self._freq_to_x(f1)
+        if not all(np.isfinite(v) for v in (x0, x1, y0, y1)):
+            return
+        self._plot_item.setXRange(min(x0, x1), max(x0, x1), padding=0.0)
+        self._plot_item.setYRange(y0, y1, padding=0.0)
+
+    def _redraw_last_dispersion(
+        self,
+        preserve_view: bool = True,
+        view_range: tuple[float, float, float, float] | None = None,
+    ) -> None:
+        if self._last_result is None:
+            self._refresh_frequency_energy_plot()
+            return
+        f, c, A = self._last_result
+        self._display_dispersion_image(
+            f,
+            c,
+            A,
+            self.info_label.text(),
+            preserve_view=preserve_view,
+            view_range=view_range,
+        )
+
+    def _axis_image_data(self, f: np.ndarray, A: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        f = np.asarray(f, dtype=np.float64)
+        A = np.asarray(A, dtype=np.float64)
+        if not self._freq_log_scale:
+            return f, A
+        valid_f = f > 0
+        if np.count_nonzero(valid_f) < 2:
+            return f, A
+        x_src = np.log10(f[valid_f])
+        A_src = A[valid_f, :]
+        x_grid = np.linspace(float(x_src[0]), float(x_src[-1]), x_src.size)
+        out = np.full((x_grid.size, A_src.shape[1]), np.nan, dtype=np.float64)
+        for j in range(A_src.shape[1]):
+            col = A_src[:, j]
+            valid = np.isfinite(col)
+            if np.count_nonzero(valid) >= 2:
+                out[:, j] = np.interp(x_grid, x_src[valid], col[valid], left=np.nan, right=np.nan)
+            elif np.count_nonzero(valid) == 1:
+                idx = int(np.flatnonzero(valid)[0])
+                out[np.argmin(np.abs(x_grid - x_src[idx])), j] = col[idx]
+        return x_grid, out
+
+    def _display_intensity_image(self, A: np.ndarray) -> np.ndarray:
+        A = np.asarray(A, dtype=np.float64)
+        finite_A = np.where(np.isfinite(A), A, 0.0)
+        finite_A = np.clip(finite_A, 0.0, None)
+        if not self._intensity_log_scale:
+            return finite_A
+        gain = 100.0
+        return np.log1p(gain * finite_A) / np.log1p(gain)
+
+    def _refresh_frequency_energy_plot(self) -> None:
+        if not hasattr(self, "energy_plot"):
+            return
+        self.energy_plot.setVisible(bool(self._show_frequency_energy))
+        self.energy_plot.clear()
+        if not self._show_frequency_energy or self._last_result is None:
+            return
+        f, _c, A = self._last_result
+        if f.size == 0 or A.size == 0:
+            return
+        with np.errstate(all="ignore"):
+            energy = np.nanmax(np.where(np.isfinite(A), A, 0.0), axis=1)
+        max_energy = float(np.max(energy)) if energy.size else 0.0
+        if max_energy > 0:
+            energy = energy / max_energy
+        x = self._freq_to_x_array(f)
+        valid = np.isfinite(x) & np.isfinite(energy)
+        if not np.any(valid):
+            return
+        bg = "#15181d" if self.dark_mode else "#ffffff"
+        fg = "#eeeeee" if self.dark_mode else "#222222"
+        self.energy_plot.setBackground(bg)
+        self.energy_plot.setLabel(
+            "bottom",
+            "log10 Frecuencia [Hz]" if self._freq_log_scale else "Frecuencia",
+            units=None if self._freq_log_scale else "Hz",
+        )
+        self.energy_plot.setLabel("left", "Energia", units="norm.")
+        for axis_name in ("bottom", "left"):
+            axis = self.energy_plot.getAxis(axis_name)
+            axis.setPen(pg.mkPen(fg))
+            axis.setTextPen(pg.mkPen(fg))
+        pen = pg.mkPen("#ff3b30" if self.dark_mode else "#b00000", width=1.8)
+        self.energy_plot.plot(x[valid], energy[valid], pen=pen)
+        self.energy_plot.setYRange(0.0, 1.0, padding=0.05)
+
+    @staticmethod
+    def _dispersion_colormap() -> pg.ColorMap:
+        return pg.ColorMap(
+            np.array([0.0, 0.28, 0.48, 0.68, 0.86, 1.0], dtype=np.float64),
+            np.array(
+                [
+                    [0, 0, 130, 255],
+                    [0, 90, 255, 255],
+                    [0, 190, 90, 255],
+                    [255, 230, 0, 255],
+                    [255, 0, 0, 255],
+                    [90, 0, 0, 255],
+                ],
+                dtype=np.ubyte,
+            ),
+        )
+
+    @staticmethod
+    def _normalize_dispersion_image(A: np.ndarray) -> np.ndarray:
+        A = np.asarray(A, dtype=np.float64)
+        finite_A = np.where(np.isfinite(A), A, 0.0)
+        denom = np.max(finite_A, axis=1, keepdims=True) if finite_A.size else np.array([[0.0]])
+        return np.divide(
+            finite_A,
+            denom,
+            out=np.zeros_like(finite_A, dtype=np.float64),
+            where=denom > 0,
+        )
+
+    @staticmethod
+    def _normalize_combined_dispersion_image(A: np.ndarray) -> np.ndarray:
+        A = np.asarray(A, dtype=np.float64)
+        finite_A = np.where(np.isfinite(A), A, 0.0)
+        max_value = float(np.max(finite_A)) if finite_A.size else 0.0
+        if max_value <= 0.0:
+            return np.zeros_like(finite_A, dtype=np.float64)
+        return finite_A / max_value
+
+    @staticmethod
+    def _interp_image_to_f(f_src: np.ndarray, A_src: np.ndarray, f_ref: np.ndarray) -> np.ndarray:
+        f_src = np.asarray(f_src, dtype=np.float64)
+        A_src = np.asarray(A_src, dtype=np.float64)
+        f_ref = np.asarray(f_ref, dtype=np.float64)
+        if f_src.shape == f_ref.shape and np.allclose(f_src, f_ref, rtol=0.0, atol=1e-9):
+            return A_src.copy()
+        out = np.full((f_ref.size, A_src.shape[1]), np.nan, dtype=np.float64)
+        for j in range(A_src.shape[1]):
+            col = A_src[:, j]
+            valid = np.isfinite(col)
+            if np.count_nonzero(valid) >= 2:
+                out[:, j] = np.interp(f_ref, f_src[valid], col[valid], left=np.nan, right=np.nan)
+            elif np.count_nonzero(valid) == 1:
+                idx = int(np.flatnonzero(valid)[0])
+                out[np.argmin(np.abs(f_ref - f_src[idx])), j] = col[idx]
+        return out
+
+    def _display_dispersion_image(
+        self,
+        f: np.ndarray,
+        c: np.ndarray,
+        A: np.ndarray,
+        status: str,
+        preserve_view: bool = False,
+        view_range: tuple[float, float, float, float] | None = None,
+    ) -> None:
+        saved_view = view_range
+        saved_raw_view = None if view_range is not None else (
+            self._current_raw_dispersion_view_range() if preserve_view else None
+        )
+        dc = float(c[1] - c[0]) if len(c) > 1 else 1.0
+        # Zona de aliasing espacial: por debajo de c = 2*dx*f la longitud de
+        # onda (lambda = c/f) es menor que 2*dx (Nyquist espacial del tendido)
+        # y la imagen no es confiable. Se enmascara a NaN para NO graficarla y
+        # se excluye del picking (ver _valid_velocity_mask). El array completo
+        # queda en _last_result para que la matematica del pick tenga la grilla
+        # entera; solo el display se enmascara.
+        A_display = np.asarray(A, dtype=np.float64).copy()
+        dx = self._geophone_spacing_m
+        length = self._array_length_m
+        if dx and dx > 0:
+            alias_c = 2.0 * dx * f[:, None]
+            A_display[c[None, :] < alias_c] = np.nan
+        if length and length > 0:
+            lam_c = length * f[:, None]
+            A_display[c[None, :] > lam_c] = np.nan
+        A_display = self._display_intensity_image(A_display)
+        x_axis, A_display = self._axis_image_data(f, A_display)
+        dx_axis = float(x_axis[1] - x_axis[0]) if len(x_axis) > 1 else 1.0
+        level_max = self._dispersion_level_max()
+        self.image_view.setImage(
+            A_display,
+            pos=[float(x_axis[0]), float(c[0])],
+            scale=[dx_axis, dc],
+            autoRange=saved_view is None and saved_raw_view is None,
+            autoLevels=False,
+            levels=(0.0, level_max),
+            autoHistogramRange=False,
+        )
+        try:
+            self._plot_item.vb.setAspectLocked(False)
+        except Exception:
+            pass
+        try:
+            self.image_view.setLevels(0.0, level_max)
+            self.image_view.ui.histogram.setHistogramRange(0.0, level_max, padding=0.0)
+        except Exception:
+            pass
+        self._plot_item.setLabel(
+            "bottom",
+            "log10 Frecuencia [Hz]" if self._freq_log_scale else "Frecuencia",
+            units=None if self._freq_log_scale else "Hz",
+        )
+        self._plot_item.setLabel("left", "Velocidad de fase [m/s]")
+        try:
+            self.image_view.setColorMap(self._dispersion_colormap())
+        except Exception:
+            pass
+        self._draw_alias_boundary(f, c)
+        self._draw_lambda_max_boundary(f, c)
+        self._refresh_pick_scatter()
+        self._refresh_m0_draw()
+        if saved_view is not None:
+            self._restore_dispersion_view_range(saved_view)
+        elif saved_raw_view is not None:
+            self._restore_raw_dispersion_view_range(saved_raw_view)
+        self._refresh_frequency_energy_plot()
+        parts = []
+        if dx and dx > 0:
+            parts.append(f"c ≥ 2·dx·f (dx={dx:.2f} m, λ ≥ {2.0 * dx:.2f} m)")
+        if length and length > 0:
+            parts.append(f"c ≤ L·f (L={length:.1f} m, λ ≤ L)")
+        if parts:
+            alias_txt = "Banda válida de picking: " + " y ".join(parts) + "."
+        else:
+            alias_txt = "Sin espaciado ni largo de arreglo conocidos: no se aplican los limites de λ."
+        self.alias_info_label.setText(alias_txt)
+        self.info_label.setText(status)
+
+    def _recombine_group_results(self, preserve_view: bool = False) -> None:
+        if not self._group_results:
+            return
+        first = self._group_results[sorted(self._group_results)[0]]
+        f = np.asarray(first["f"], dtype=np.float64)
+        c = np.asarray(first["c"], dtype=np.float64)
+        combined = np.zeros((f.size, c.size), dtype=np.float64)
+        parts: list[str] = []
+        for gid in sorted(self._group_results):
+            result = self._group_results[gid]
+            weight = float(self._group_weights.get(gid, 1.0))
+            combined += weight * np.asarray(result["A_norm"], dtype=np.float64)
+            parts.append(f"G{gid} w={weight:.2f}")
+        combined = self._normalize_combined_dispersion_image(combined)
+        self._last_result = (f, c, combined)
+        self._display_dispersion_image(
+            f,
+            c,
+            combined,
+            f"Imagen combinada lista: {', '.join(parts)}. "
+            f"f<={f[-1]:.1f} Hz, c=[{c[0]:.0f},{c[-1]:.0f}] m/s. "
+            "Ahora marca la cresta: 'Auto-pick' o click manual.",
+            preserve_view=preserve_view,
+        )
+
+    def _legacy_single_group_if_needed(self) -> None:
+        if self._raw_groups or self._raw_matrix is None or self._raw_time is None or self._raw_distances is None:
+            return
+        distances = [float(d) for d in self._raw_distances]
+        self._raw_groups = {
+            1: {
+                "name": "Grupo 1",
+                "time": np.asarray(self._raw_time, dtype=np.float64),
+                "distances": distances,
+                "matrix": np.asarray(self._raw_matrix, dtype=np.float64),
+                "spacing": self._estimate_spacing_m(distances),
+                "length": self._estimate_array_length(distances),
+            }
+        }
+        self._group_weights.setdefault(1, 1.0)
+        self._update_combined_geometry()
+        self._update_weight_controls()
+
+    def _group_summary(self) -> str:
+        return ", ".join(
+            f"G{gid}({len(self._raw_groups[gid]['distances'])} canales)"
+            for gid in sorted(self._raw_groups)
         )
 
     @staticmethod
@@ -4029,15 +5052,22 @@ class MaswPanel(QWidget):
         span = float(values[-1] - values[0])
         return span if span > 1e-9 else None
 
-    def run_auto(self, common_time: np.ndarray, distances: list[float], matrix: np.ndarray) -> None:
+    def run_auto(
+        self,
+        common_time: np.ndarray,
+        distances: list[float],
+        matrix: np.ndarray,
+        group_id: int = 1,
+        group_name: str | None = None,
+    ) -> None:
         """Flujo MASW completo sin interaccion: imagen con los parametros
         actuales de la pestaña (defaults pensados para el tendido de campo),
         auto-pick con filtros de calidad (umbral de amplitud adaptativo,
         limites fisicos del tendido, rechazo de outliers) e inversion Monte
         Carlo. Cada parametro elegido queda visible en los controles para
         poder revisarlo o repetir el proceso a mano."""
-        self.set_data(common_time, distances, matrix)
-        if self._raw_matrix is None:
+        self.set_group_data(common_time, distances, matrix, group_id=group_id, group_name=group_name)
+        if not self._raw_groups:
             return
         self._calculate()
         if self._last_result is None:
@@ -4046,7 +5076,7 @@ class MaswPanel(QWidget):
         fell_back = False
         try:
             freqs, c_obs = auto_extract_dispersion_curve(
-                f, c, A, np.asarray(self._raw_distances, dtype=np.float64)
+                f, c, self._normalize_dispersion_image(A), np.asarray(self._raw_distances, dtype=np.float64)
             )
             self._reset_all_modes()
             self.picks.update({float(fv): float(cv) for fv, cv in zip(freqs, c_obs)})
@@ -4088,7 +5118,8 @@ class MaswPanel(QWidget):
             )
 
     def _calculate(self) -> None:
-        if self._raw_matrix is None:
+        self._legacy_single_group_if_needed()
+        if not self._raw_groups:
             QMessageBox.warning(self, "MASW", "Todavia no hay datos. Anda a la pestaña Waterfall y presiona 'Ver MASW'.")
             return
         if self.cmax_spin.value() <= self.cmin_spin.value():
@@ -4098,67 +5129,50 @@ class MaswPanel(QWidget):
             QMessageBox.warning(self, "MASW", "f max debe ser mayor que f min.")
             return
         self.calc_btn.setEnabled(False)
-        self.info_label.setText("Calculando imagen de dispersion (metodo phase-shift)...")
+        self.info_label.setText("Calculando imagen de dispersion por grupo (metodo phase-shift)...")
         QApplication.processEvents()
         try:
-            u = self._raw_matrix.T  # (n_time, n_channels)
-            fs = 1.0 / float(np.median(np.diff(self._raw_time)))
-            f, c, A = phase_shift_dispersion_image(
-                u,
-                np.asarray(self._raw_distances, dtype=np.float64),
-                fs,
-                c_min=float(self.cmin_spin.value()),
-                c_max=float(self.cmax_spin.value()),
-                c_step=float(self.cstep_spin.value()),
-                f_max=float(self.fmax_spin.value()),
-                f_min=float(self.fmin_spin.value()),
-            )
+            f_ref: np.ndarray | None = None
+            c_ref: np.ndarray | None = None
+            results: dict[int, dict[str, object]] = {}
+            for group_id in sorted(self._raw_groups):
+                group = self._raw_groups[group_id]
+                time = np.asarray(group["time"], dtype=np.float64)
+                matrix = np.asarray(group["matrix"], dtype=np.float64)
+                distances = np.asarray(group["distances"], dtype=np.float64)
+                u = matrix.T  # (n_time, n_channels)
+                fs = 1.0 / float(np.median(np.diff(time)))
+                f, c, A = phase_shift_dispersion_image(
+                    u,
+                    distances,
+                    fs,
+                    c_min=float(self.cmin_spin.value()),
+                    c_max=float(self.cmax_spin.value()),
+                    c_step=float(self.cstep_spin.value()),
+                    f_max=float(self.fmax_spin.value()),
+                    f_min=float(self.fmin_spin.value()),
+                )
+                if f_ref is None:
+                    f_ref = f
+                    c_ref = c
+                    A_on_ref = A
+                else:
+                    if c_ref is None or c.shape != c_ref.shape or not np.allclose(c, c_ref):
+                        raise ValueError("Los grupos generaron grillas de velocidad distintas")
+                    A_on_ref = self._interp_image_to_f(f, A, f_ref)
+                results[group_id] = {
+                    "f": np.asarray(f_ref, dtype=np.float64),
+                    "c": np.asarray(c_ref, dtype=np.float64),
+                    "A": np.asarray(A_on_ref, dtype=np.float64),
+                    "A_norm": self._normalize_dispersion_image(A_on_ref),
+                    "name": str(group.get("name", _group_name(group_id))),
+                }
         except Exception as exc:
             QMessageBox.critical(self, "MASW", f"No se pudo calcular: {exc}")
             self.calc_btn.setEnabled(True)
             return
-        self._last_result = (f, c, A)
-        df = float(f[1] - f[0]) if len(f) > 1 else 1.0
-        dc = float(c[1] - c[0]) if len(c) > 1 else 1.0
-        # Zona de aliasing espacial: por debajo de c = 2*dx*f la longitud de
-        # onda (lambda = c/f) es menor que 2*dx (Nyquist espacial del tendido)
-        # y la imagen no es confiable. Se enmascara a NaN para NO graficarla y
-        # se excluye del picking (ver _valid_velocity_mask). El array completo
-        # queda en _last_result para que la matematica del pick tenga la grilla
-        # entera; solo el display se enmascara.
-        A_display = np.asarray(A, dtype=np.float64).copy()
-        dx = self._geophone_spacing_m
-        length = self._array_length_m
-        if dx and dx > 0:
-            alias_c = 2.0 * dx * f[:, None]  # (n_f, 1) velocidad minima valida por frecuencia
-            A_display[c[None, :] < alias_c] = np.nan
-        if length and length > 0:
-            lam_c = length * f[:, None]  # (n_f, 1) velocidad maxima valida (lambda <= L)
-            A_display[c[None, :] > lam_c] = np.nan
-        self.image_view.setImage(A_display, pos=[float(f[0]), float(c[0])], scale=[df, dc], autoRange=True)
-        self._plot_item.setLabel("bottom", "Frecuencia [Hz]")
-        self._plot_item.setLabel("left", "Velocidad de fase [m/s]")
-        try:
-            self.image_view.setColorMap(pg.colormap.get("viridis"))
-        except Exception:
-            pass
-        self._draw_alias_boundary(f, c)
-        self._draw_lambda_max_boundary(f, c)
-        self._refresh_pick_scatter()
-        parts = []
-        if dx and dx > 0:
-            parts.append(f"c ≥ 2·dx·f (dx={dx:.2f} m, λ ≥ {2.0 * dx:.2f} m)")
-        if length and length > 0:
-            parts.append(f"c ≤ L·f (L={length:.1f} m, λ ≤ L)")
-        if parts:
-            alias_txt = "Banda válida de picking: " + " y ".join(parts) + "."
-        else:
-            alias_txt = "Sin espaciado ni largo de arreglo conocidos: no se aplican los limites de λ."
-        self.alias_info_label.setText(alias_txt)
-        self.info_label.setText(
-            f"Imagen lista: {len(self._raw_distances)} canales, f<={f[-1]:.1f} Hz, "
-            f"c=[{c[0]:.0f},{c[-1]:.0f}] m/s. Ahora marca la cresta: 'Auto-pick' o click manual."
-        )
+        self._group_results = results
+        self._recombine_group_results()
         self.calc_btn.setEnabled(True)
 
     def _alias_min_velocity(self, f_val: float) -> float:
@@ -4409,7 +5423,7 @@ class MaswPanel(QWidget):
             for fv in sorted(picks):
                 spots.append(
                     {
-                        "pos": (float(fv), float(picks[fv])),
+                        "pos": (self._freq_to_x(float(fv)), float(picks[fv])),
                         "brush": pg.mkBrush(color),
                         "pen": pen,
                         "size": size,
@@ -4440,7 +5454,10 @@ class MaswPanel(QWidget):
             return
         pen = pg.mkPen("#ff3b30", width=2, style=Qt.PenStyle.DashLine)
         self._alias_line = self._plot_item.plot(
-            f[inside], np.clip(c_alias[inside], float(c[0]), float(c[-1])), pen=pen
+            self._freq_to_x_array(f[inside]),
+            np.clip(c_alias[inside], float(c[0]), float(c[-1])),
+            pen=pen,
+            connect="finite",
         )
         self._alias_line.setZValue(40)
 
@@ -4463,7 +5480,10 @@ class MaswPanel(QWidget):
             return
         pen = pg.mkPen("#ffcc00", width=2, style=Qt.PenStyle.DashLine)
         self._lambda_max_line = self._plot_item.plot(
-            f[inside], np.clip(c_lam[inside], float(c[0]), float(c[-1])), pen=pen
+            self._freq_to_x_array(f[inside]),
+            np.clip(c_lam[inside], float(c[0]), float(c[-1])),
+            pen=pen,
+            connect="finite",
         )
         self._lambda_max_line.setZValue(40)
 
@@ -4545,16 +5565,17 @@ class MaswPanel(QWidget):
                     continue
                 xs = [p[0] for p in poly]
                 ys = [p[1] for p in poly]
+                display_xs = [self._freq_to_x(float(x)) for x in xs]
                 _append_break()
-                line_x.extend(xs + [xs[0]])
+                line_x.extend(display_xs + [display_xs[0]])
                 line_y.extend(ys + [ys[0]])
                 for x, y in poly:
                     vert_spots.append(
-                        {"pos": (float(x), float(y)), "brush": pg.mkBrush(color),
+                        {"pos": (self._freq_to_x(float(x)), float(y)), "brush": pg.mkBrush(color),
                          "pen": pg.mkPen("#000000", width=1), "size": 8}
                     )
                 lbl = pg.TextItem(f"M{mode}", color=color, anchor=(0.5, 1.0))
-                lbl.setPos(float(np.mean(xs)), float(np.max(ys)))
+                lbl.setPos(float(np.nanmean(display_xs)), float(np.max(ys)))
                 lbl.setZValue(47)
                 self._plot_item.addItem(lbl)
                 self._region_labels.append(lbl)
@@ -4563,12 +5584,13 @@ class MaswPanel(QWidget):
             color = self._mode_color(self._active_mode)
             dxs = [p[0] for p in self._m0_draft]
             dys = [p[1] for p in self._m0_draft]
+            display_dxs = [self._freq_to_x(float(x)) for x in dxs]
             _append_break()
-            line_x.extend(dxs)
+            line_x.extend(display_dxs)
             line_y.extend(dys)
             for x, y in self._m0_draft:
                 vert_spots.append(
-                    {"pos": (float(x), float(y)), "brush": pg.mkBrush(color),
+                    {"pos": (self._freq_to_x(float(x)), float(y)), "brush": pg.mkBrush(color),
                      "pen": pg.mkPen("#ffffff", width=1), "size": 8}
                 )
 
@@ -4586,7 +5608,7 @@ class MaswPanel(QWidget):
         if not self._plot_item.sceneBoundingRect().contains(event.scenePos()):
             return
         point = self._plot_item.vb.mapSceneToView(event.scenePos())
-        f_val, c_val = float(point.x()), float(point.y())
+        f_val, c_val = self._x_to_freq(float(point.x())), float(point.y())
         f, c, _A = self._last_result
         # Mientras se dibuja el poligono M0 el click agrega un vertice y no
         # toca los picks (tiene prioridad sobre los modos de picking).
@@ -4665,7 +5687,7 @@ class MaswPanel(QWidget):
             self._dragging_pick = None
             if self.picks:
                 start_point = self._plot_item.vb.mapSceneToView(ev.buttonDownScenePos())
-                f_val = float(start_point.x())
+                f_val = self._x_to_freq(float(start_point.x()))
                 nearest = min(self.picks, key=lambda k: abs(k - f_val))
                 f_range = float(f[-1] - f[0]) if f.size > 1 else 1.0
                 bin_width = float(f[1] - f[0]) if f.size > 1 else f_range
@@ -4687,14 +5709,13 @@ class MaswPanel(QWidget):
         if not self._plot_item.sceneBoundingRect().contains(pos):
             return
         point = self._plot_item.vb.mapSceneToView(pos)
-        f_val, c_val = float(point.x()), float(point.y())
+        f_val, c_val = self._x_to_freq(float(point.x())), float(point.y())
         amp_txt = ""
         if self._last_result is not None:
             f, c, A = self._last_result
             if f.size and c.size and f[0] <= f_val <= f[-1] and c[0] <= c_val <= c[-1]:
-                df = float(f[1] - f[0]) if f.size > 1 else 1.0
                 dc = float(c[1] - c[0]) if c.size > 1 else 1.0
-                i = int(np.clip(round((f_val - f[0]) / df), 0, f.size - 1))
+                i = int(np.argmin(np.abs(f - f_val)))
                 j = int(np.clip(round((c_val - c[0]) / dc), 0, c.size - 1))
                 amp_txt = f"   |   amplitud = {A[i, j]:.4f}"
         self.coord_label.setText(f"f = {f_val:.2f} Hz   |   c = {c_val:.1f} m/s{amp_txt}")
@@ -5301,6 +6322,29 @@ class MaswPanel(QWidget):
                 str(mode): [[[float(x), float(y)] for (x, y) in poly] for poly in polys]
                 for mode, polys in self._regions_by_mode.items()
             },
+            "raw_groups": {
+                str(group_id): {
+                    "name": str(group.get("name", _group_name(group_id))),
+                    "spacing": (
+                        float(group["spacing"]) if group.get("spacing") is not None else None
+                    ),
+                    "length": (
+                        float(group["length"]) if group.get("length") is not None else None
+                    ),
+                }
+                for group_id, group in self._raw_groups.items()
+            },
+            "group_weights": {
+                str(group_id): float(weight)
+                for group_id, weight in sorted(self._group_weights.items())
+            },
+            "weight_slider_max": float(self._weight_slider_max),
+            "display_options": {
+                "freq_log": bool(self._freq_log_scale),
+                "intensity_log": bool(self._intensity_log_scale),
+                "show_frequency_energy": bool(self._show_frequency_energy),
+            },
+            "active_data_group": int(self._active_data_group_id),
             "geophone_spacing_m": (
                 float(self._geophone_spacing_m) if self._geophone_spacing_m else None
             ),
@@ -5309,7 +6353,7 @@ class MaswPanel(QWidget):
             ),
             "inner_tab": int(self.inner_tabs.currentIndex()),
             "backend": self.backend_combo.currentData() if hasattr(self, "backend_combo") else None,
-            "has_data": self._raw_matrix is not None,
+            "has_data": bool(self._raw_groups) or self._raw_matrix is not None,
             "has_inv_result": self._inv_result is not None,
             "inv_scalars": (
                 {
@@ -5326,6 +6370,15 @@ class MaswPanel(QWidget):
         a la imagen y arrays del resultado de inversion (con prefijos para
         compartir un unico .npz con el waterfall)."""
         arrays: dict = {}
+        if self._raw_groups:
+            group_ids = np.array(sorted(self._raw_groups), dtype=np.int32)
+            arrays["masw_group_ids"] = group_ids
+            for group_id in group_ids:
+                group = self._raw_groups[int(group_id)]
+                prefix = f"masw_g{int(group_id)}"
+                arrays[f"{prefix}_time"] = np.asarray(group["time"], dtype=np.float64)
+                arrays[f"{prefix}_distances"] = np.asarray(group["distances"], dtype=np.float64)
+                arrays[f"{prefix}_matrix"] = np.asarray(group["matrix"], dtype=np.float64)
         if self._raw_matrix is not None and self._raw_time is not None and self._raw_distances is not None:
             arrays["masw_time"] = np.asarray(self._raw_time, dtype=np.float64)
             arrays["masw_distances"] = np.asarray(self._raw_distances, dtype=np.float64)
@@ -5362,7 +6415,58 @@ class MaswPanel(QWidget):
             if key in inv:
                 spin.setValue(cast(inv[key]))
 
-        if "masw_matrix" in arrays:
+        self._group_weights = {
+            int(group_id): float(weight)
+            for group_id, weight in state.get("group_weights", {}).items()
+        } if isinstance(state.get("group_weights"), dict) else {}
+        if "weight_slider_max" in state:
+            self._weight_slider_max = max(0.01, float(state["weight_slider_max"]))
+            if hasattr(self, "weight_max_spin"):
+                self.weight_max_spin.blockSignals(True)
+                self.weight_max_spin.setValue(self._weight_slider_max)
+                self.weight_max_spin.blockSignals(False)
+        display_options = state.get("display_options", {}) if isinstance(state.get("display_options"), dict) else {}
+        self._freq_log_scale = bool(display_options.get("freq_log", False))
+        self._intensity_log_scale = bool(display_options.get("intensity_log", False))
+        self._show_frequency_energy = bool(display_options.get("show_frequency_energy", False))
+        for btn, checked in (
+            (getattr(self, "freq_log_btn", None), self._freq_log_scale),
+            (getattr(self, "intensity_log_btn", None), self._intensity_log_scale),
+            (getattr(self, "energy_freq_btn", None), self._show_frequency_energy),
+        ):
+            if btn is not None:
+                btn.blockSignals(True)
+                btn.setChecked(bool(checked))
+                btn.blockSignals(False)
+        raw_group_meta = state.get("raw_groups", {}) if isinstance(state.get("raw_groups"), dict) else {}
+        if "masw_group_ids" in arrays:
+            self._raw_groups = {}
+            for raw_gid in np.asarray(arrays["masw_group_ids"]).astype(int):
+                gid = int(raw_gid)
+                prefix = f"masw_g{gid}"
+                if f"{prefix}_matrix" not in arrays:
+                    continue
+                distances = [float(d) for d in arrays.get(f"{prefix}_distances", np.array([], dtype=np.float64))]
+                meta = raw_group_meta.get(str(gid), {}) if isinstance(raw_group_meta, dict) else {}
+                self._raw_groups[gid] = {
+                    "name": str(meta.get("name", _group_name(gid))),
+                    "time": np.asarray(arrays[f"{prefix}_time"], dtype=np.float64),
+                    "distances": distances,
+                    "matrix": np.asarray(arrays[f"{prefix}_matrix"], dtype=np.float64),
+                    "spacing": (
+                        float(meta["spacing"]) if meta.get("spacing") is not None
+                        else self._estimate_spacing_m(distances)
+                    ),
+                    "length": (
+                        float(meta["length"]) if meta.get("length") is not None
+                        else self._estimate_array_length(distances)
+                    ),
+                }
+                self._group_weights.setdefault(gid, 1.0)
+            self._active_data_group_id = int(state.get("active_data_group", 1) or 1)
+            self._update_combined_geometry()
+            self._update_weight_controls()
+        elif "masw_matrix" in arrays:
             self._raw_time = np.asarray(arrays["masw_time"], dtype=np.float64)
             self._raw_distances = [float(d) for d in arrays["masw_distances"]]
             self._raw_matrix = np.asarray(arrays["masw_matrix"], dtype=np.float64)
@@ -5372,6 +6476,7 @@ class MaswPanel(QWidget):
             self._array_length_m = (
                 state.get("array_length_m") or self._estimate_array_length(self._raw_distances)
             )
+            self._legacy_single_group_if_needed()
 
         rbm: dict[int, list[list[tuple[float, float]]]] = {}
         raw_rbm = state.get("regions_by_mode")
@@ -5460,6 +6565,7 @@ class MaswPanel(QWidget):
             (self.earth_plot, "Earth (Vs) Model"),
             (self.inv_plot, "Dispersion Curve"),
             (self.profile_plot, "Final Vs Model"),
+            (self.energy_plot, "Energia por frecuencia"),
         ):
             plot.setBackground(bg)
             plot.setTitle(title, color=fg)
@@ -5467,5 +6573,6 @@ class MaswPanel(QWidget):
                 axis = plot.getAxis(axis_name)
                 axis.setPen(pg.mkPen(fg))
                 axis.setTextPen(pg.mkPen(fg))
+        self._refresh_frequency_energy_plot()
 
 
