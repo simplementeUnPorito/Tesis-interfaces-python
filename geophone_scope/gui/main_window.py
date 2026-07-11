@@ -436,7 +436,7 @@ class MainWindow(QMainWindow):
         elif pkt.b2 == 0x05:
             # Exact Fs sub-packet: b1:b0 is uint16 Hz. Legacy HELLO still
             # arrives for older clients, but only this packet can carry exact
-            # rates such as 1020 Hz.
+            # rates such as the current native 2604 Hz.
             node_idx = pkt.node_id
             fs_hz = pkt.hello_fs_exact_hz
             if 0 <= node_idx < config.MAX_NODES and fs_hz > 0:

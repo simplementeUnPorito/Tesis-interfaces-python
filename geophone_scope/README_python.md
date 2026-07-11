@@ -255,7 +255,7 @@ Contenido principal:
 | `0xFE` | READY (n_slaves_ready) |
 
 **Nota:** `Fs` no tiene constante nominal en `config.py` — siempre viene del
-HELLO del esclavo (el PSoC reporta 1020 Hz en el firmware actual). La app
+HELLO del esclavo (el PSoC reporta 2604 Hz para `N=1` en el firmware actual). La app
 la lee de `PTYPE_STATUS` al arrancar.
 
 ## Formato de datos guardados (.mat)
@@ -264,7 +264,7 @@ la lee de `PTYPE_STATUS` al arrancar.
 from scipy.io import loadmat
 d = loadmat("muestra_20260701_143022.mat")
 raw_slave1 = d["node1_raw"].ravel()   # float32 array en voltios
-fs = float(d["fs"].squeeze())         # 1020.0 (valor real reportado por el PSoC)
+fs = float(d["fs"].squeeze())         # 2604.0 (valor real reportado por el PSoC, N=1)
 fir_cmd = str(d["node1_fir_cmd"])
 ```
 

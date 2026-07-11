@@ -32,19 +32,18 @@ SUBCMD_VDAC: int       = 0xAA  # Set VDAC byte (0-255)
 SUBCMD_DEBUG: int      = 0xA7  # Debug node on/off
 SUBCMD_VER: int        = 0xB2  # Single capture (Ver)
 SUBCMD_LATENCY: int    = 0xAF  # Start latency probe
-SUBCMD_ADC_CONFIG: int = 0xBA  # ADC range: 1=+/-2.5 V, 2=+/-0.512 V
+SUBCMD_ADC_CONFIG: int = 0xBA  # ADC range: 1=+/-2.5, 2=+/-0.512, 3=+/-1.024, 4=+/-0.625 V
 
 # ── Acquisition parameters ───────────────────────────────────────────────────
-# NOTE: intentionally NO nominal/default sample-rate constant. The PSoC's ADC
-# rate depends on its analog front-end programming and can be reconfigured at
-# any time, so Fs must ALWAYS come from the slave's HELLO (see
-# MainWindow._effective_fs / NodeData.fs_known) — never a guessed fallback.
+# Hardware timing/export must use the slave HELLO (see MainWindow._effective_fs
+# / NodeData.fs_known). DEFAULT_SAMPLE_RATE_HZ below is the canonical N=1
+# startup fallback used for placeholder buffers before that report arrives.
 SAMPLES_PER_BATCH: int = 30        # Samples per ESP-NOW batch
 PSOC_CAPTURE_MAX_BATCHES: int = 512  # PSoC store-and-forward RAM limit
 TEST_DEFAULT_SECONDS: float = 0.2    # Short directed debug burst
 TEST_MIN_SECONDS: float = 0.1
 TEST_MAX_SECONDS: float = 1.0
-DEFAULT_SAMPLE_RATE_HZ: int = 1020 # Measured default before exact HELLO arrives
+DEFAULT_SAMPLE_RATE_HZ: int = 2604 # Native N=1 default before exact HELLO arrives
 DISP_SAMP: int    = DEFAULT_SAMPLE_RATE_HZ * 3   # Startup placeholder; ~3 s
 MAX_BUF_S: int    = 10             # Default circular buffer length, seconds
 MAX_BUF: int      = DEFAULT_SAMPLE_RATE_HZ * MAX_BUF_S  # Startup placeholder; ~10 s
@@ -65,10 +64,12 @@ VDAC_MAX: int    = 255
 VDAC_FULL_SCALE_V: float = VDAC_MAX * VDAC_STEP
 
 # ── ADC scaling ──────────────────────────────────────────────────────────────
-# PSoC ADC configs exposed by the firmware/web UI. Both run at 1020 Hz.
+# PSoC ADC configs exposed by the firmware/web UI. All run at 2604 Hz for N=1.
 ADC_CONFIGS = [
-    {"code": 1, "label": "+/-2.5 V", "range_v": 2.5, "fs_hz": 1020, "counts_per_volt": 131_072 / 2.5},
-    {"code": 2, "label": "+/-0.512 V", "range_v": 0.512, "fs_hz": 1020, "counts_per_volt": 131_072 / 0.512},
+    {"code": 1, "label": "+/-2.5 V", "range_v": 2.5, "fs_hz": 2604, "counts_per_volt": 131_072 / 2.5},
+    {"code": 2, "label": "+/-0.512 V", "range_v": 0.512, "fs_hz": 2604, "counts_per_volt": 131_072 / 0.512},
+    {"code": 3, "label": "+/-1.024 V", "range_v": 1.024, "fs_hz": 2604, "counts_per_volt": 131_072 / 1.024},
+    {"code": 4, "label": "+/-0.625 V", "range_v": 0.625, "fs_hz": 2604, "counts_per_volt": 131_072 / 0.625},
 ]
 ADC_COUNTS_PER_VOLT: float = ADC_CONFIGS[0]["counts_per_volt"]
 
