@@ -91,14 +91,14 @@ En la ventana:
   todas sus trazas superpuestas (un color por carpeta) y le das a cada carpeta
   un offset en ms (positivo = esa tanda se corre a la izquierda). Los offsets
   entran en promedios, waterfall, MASW y export, y persisten en
-  `Crudos\Canchita\alignment_offsets.json`;
+  `procesados\Canchita\alignment_offsets.json`;
 - la pestaña `Filtros` define un pasa-banda Butterworth aplicado con `filtfilt`
   (fase cero, no corre los triggers) con corte bajo/alto y orden a elegir; un
   corte en 0 desactiva ese extremo. La vista previa muestra la captura actual
   de `Capturas` en tiempo y en espectro (original vs filtrada) para elegir la
   banda. Con `Aplicar` activado el filtro entra en promedios, waterfall, MASW
   y export; los parámetros persisten en
-  `Crudos\Canchita\filter_settings.json`;
+  `procesados\Canchita\filter_settings.json`;
 - **campañas con fs distinta** (3 s @ 2929 Hz del 3/7 y 10.59 s @ 1020 Hz del
   7/7, ventana larga para ver bajas frecuencias ~1 Hz): dentro de cada grupo
   de distancia las capturas se resamplean (`resample_poly`) a una fs común —
@@ -179,7 +179,7 @@ con recuperación de modelos sintéticos de 2 capas.
 Las marcas se guardan solas al cerrar en:
 
 ```bash
-C:\Github\Tesis\Crudos\Canchita\field_review_annotations.json
+C:\Github\Tesis\procesados\Canchita\field_review_annotations.json
 ```
 
 También se puede exportar sin abrir la GUI, usando las marcas ya guardadas:
@@ -191,8 +191,14 @@ También se puede exportar sin abrir la GUI, usando las marcas ya guardadas:
 La salida por defecto queda en:
 
 ```bash
-C:\Github\Tesis\Crudos\Canchita_procesado
+C:\Github\Tesis\procesados\Canchita_procesado
 ```
+
+Todo lo que genera la app (anotaciones, sesión, estado MASW, filtros,
+offsets de enfase, export `_procesado`) vive en `procesados\` en la raíz del
+repo — nunca adentro de `Crudos\`, que son solo los datos crudos del
+hardware. `procesados\` está en `.gitignore` (ver
+`field_review_data.py:_procesados_dir_for`).
 
 Contenido principal:
 

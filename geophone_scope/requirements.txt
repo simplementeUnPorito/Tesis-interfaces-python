@@ -16,3 +16,12 @@ evodcinv>=2.2
 # swprepost: escribe el .target real de Dinver (Geopsy) para el export a esa
 # herramienta. Sin el, el export geopsy cae a un texto simple.
 swprepost>=2.0
+# ADsurf (motor in-proc, AD/PyTorch): el paquete en si va vendorizado como
+# submodulo git en third-party/ADsurf (no esta en PyPI), pero sus
+# dependencias pesadas (torch) si se instalan con pip. CPU alcanza:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install tqdm pandas seaborn
+torch
+tqdm
+pandas
+seaborn

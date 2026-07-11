@@ -24,7 +24,8 @@ from scipy.signal import butter, correlate, resample_poly, sosfiltfilt
 
 
 SCHEMA = "geophone_field_review_v1"
-DEFAULT_RAW_ROOT = Path(__file__).resolve().parents[3] / "Crudos" / "Canchita"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_RAW_ROOT = _REPO_ROOT / "Crudos" / "Canchita"
 DEFAULT_ANNOTATIONS_NAME = "field_review_annotations.json"
 DEFAULT_AVERAGE_ARRIVALS_NAME = "average_arrivals.json"
 DEFAULT_FILTER_SETTINGS_NAME = "filter_settings.json"
@@ -35,6 +36,21 @@ DEFAULT_DISPERSION_GROUPS_NAME = "dispersion_groups.json"
 DEFAULT_SESSION_NAME = "field_review_session.json"
 DEFAULT_MASW_STATE_NAME = "field_review_masw_state.json"
 DEFAULT_MASW_ARRAYS_NAME = "field_review_masw_state.npz"
+
+# Todo lo que genera la app (anotaciones, sesion, estado MASW, export
+# _procesado, etc.) va a <repo>/procesados/, nunca adentro de Crudos/: Crudos/
+# son los datos crudos del hardware y no se ensucian con archivos de la app.
+# procesados/ esta en .gitignore (igual que Crudos/).
+_PROCESADOS_ROOT = _REPO_ROOT / "procesados"
+
+
+def _procesados_dir_for(raw_root: str | Path) -> Path:
+    """Carpeta en procesados/ que espeja el dataset (mismo nombre que raw_root),
+    donde van las anotaciones/sesion/estado que antes se guardaban en raw_root."""
+    raw_root = Path(raw_root).resolve()
+    d = _PROCESADOS_ROOT / raw_root.name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 @dataclass(frozen=True)
@@ -448,7 +464,7 @@ def save_average_arrivals(
 
 
 def default_filter_settings_path(raw_root: str | Path) -> Path:
-    return Path(raw_root).resolve() / DEFAULT_FILTER_SETTINGS_NAME
+    return _procesados_dir_for(raw_root) / DEFAULT_FILTER_SETTINGS_NAME
 
 
 def load_filter_settings(path: str | Path) -> FilterSettings:
@@ -483,7 +499,7 @@ def save_filter_settings(path: str | Path, settings: FilterSettings) -> Path:
 
 
 def default_alignment_offsets_path(raw_root: str | Path) -> Path:
-    return Path(raw_root).resolve() / DEFAULT_ALIGNMENT_OFFSETS_NAME
+    return _procesados_dir_for(raw_root) / DEFAULT_ALIGNMENT_OFFSETS_NAME
 
 
 def load_alignment_offsets(path: str | Path) -> dict[str, dict[str, float]]:
@@ -538,7 +554,7 @@ def alignment_offsets_signature(offsets: dict[str, dict[str, float]] | None) -> 
 
 
 def default_alignment_shot_offsets_path(raw_root: str | Path) -> Path:
-    return Path(raw_root).resolve() / DEFAULT_ALIGNMENT_SHOT_OFFSETS_NAME
+    return _procesados_dir_for(raw_root) / DEFAULT_ALIGNMENT_SHOT_OFFSETS_NAME
 
 
 def load_alignment_shot_offsets(path: str | Path) -> dict[str, float]:
@@ -590,7 +606,7 @@ def alignment_shot_offsets_signature(shot_offsets: dict[str, float] | None) -> t
 
 
 def default_disabled_folders_path(raw_root: str | Path) -> Path:
-    return Path(raw_root).resolve() / DEFAULT_DISABLED_FOLDERS_NAME
+    return _procesados_dir_for(raw_root) / DEFAULT_DISABLED_FOLDERS_NAME
 
 
 def load_disabled_folders(path: str | Path) -> dict[str, list[str]]:
@@ -640,7 +656,7 @@ def disabled_folders_signature(disabled: dict[str, list[str]] | None) -> tuple:
 
 
 def default_dispersion_groups_path(raw_root: str | Path) -> Path:
-    return Path(raw_root).resolve() / DEFAULT_DISPERSION_GROUPS_NAME
+    return _procesados_dir_for(raw_root) / DEFAULT_DISPERSION_GROUPS_NAME
 
 
 def load_dispersion_groups(path: str | Path) -> tuple[int, dict[str, int]]:
@@ -721,7 +737,7 @@ def is_folder_disabled(
 
 
 def default_session_path(raw_root: str | Path) -> Path:
-    return Path(raw_root).resolve() / DEFAULT_SESSION_NAME
+    return _procesados_dir_for(raw_root) / DEFAULT_SESSION_NAME
 
 
 def load_session(path: str | Path) -> dict[str, Any]:
@@ -747,11 +763,11 @@ def save_session(path: str | Path, session: dict[str, Any]) -> Path:
 
 
 def default_masw_state_path(raw_root: str | Path) -> Path:
-    return Path(raw_root).resolve() / DEFAULT_MASW_STATE_NAME
+    return _procesados_dir_for(raw_root) / DEFAULT_MASW_STATE_NAME
 
 
 def default_masw_arrays_path(raw_root: str | Path) -> Path:
-    return Path(raw_root).resolve() / DEFAULT_MASW_ARRAYS_NAME
+    return _procesados_dir_for(raw_root) / DEFAULT_MASW_ARRAYS_NAME
 
 
 def load_masw_state(path: str | Path) -> dict[str, Any]:
@@ -1543,12 +1559,12 @@ def safe_filename(value: str) -> str:
 
 
 def default_annotations_path(raw_root: str | Path) -> Path:
-    return Path(raw_root).resolve() / DEFAULT_ANNOTATIONS_NAME
+    return _procesados_dir_for(raw_root) / DEFAULT_ANNOTATIONS_NAME
 
 
 def default_output_dir(raw_root: str | Path) -> Path:
     raw_root = Path(raw_root).resolve()
-    return raw_root.parent / f"{raw_root.name}_procesado"
+    return _PROCESADOS_ROOT / f"{raw_root.name}_procesado"
 
 
 def default_average_arrivals_path(output_dir: str | Path) -> Path:

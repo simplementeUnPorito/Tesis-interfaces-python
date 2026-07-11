@@ -46,6 +46,11 @@ try:
 except ImportError:  # pragma: no cover
     from masw_inversion import monte_carlo_inversion
 
+try:
+    from . import masw_adsurf
+except ImportError:  # pragma: no cover - ejecucion como script
+    import masw_adsurf
+
 
 # --------------------------------------------------------------------------
 # Registro de backends
@@ -56,7 +61,7 @@ BACKENDS: list[tuple[str, str, str]] = [
     ("evodcinv", "evodcinv + disba (multimodo)", "inproc"),
     ("disba_mc", "disba + Monte Carlo propio (multimodo)", "inproc"),
     ("maswavespy", "maswavespy (port numpy, 1 modo)", "inproc"),
-    ("adsurf", "ADsurf (exportar / lanzar)", "export"),
+    ("adsurf", "ADsurf (AD/PyTorch, multimodo)", "inproc"),
     ("geopsy", "Geopsy · Dinver (exportar / lanzar)", "export"),
 ]
 
@@ -98,7 +103,9 @@ def backend_available(key: str) -> bool:
         return _disba_available()
     if key == "maswavespy":
         return True  # el port numpy siempre esta
-    if key in ("adsurf", "geopsy"):
+    if key == "adsurf":
+        return masw_adsurf.available()
+    if key == "geopsy":
         return True  # export siempre disponible
     return False
 
@@ -113,7 +120,7 @@ def backend_status(key: str) -> str:
         extra = " (+combination)" if _maswavespy_combination_available() else ""
         return "listo (port numpy" + extra + ")"
     if key == "adsurf":
-        return "export" + (" + launch" if _which("adsurf") else "")
+        return "listo (AD/PyTorch)" if masw_adsurf.available() else "falta: submodulo third-party/ADsurf + pip install torch"
     if key == "geopsy":
         return "export" + (" + launch" if (_which("dinver") or _which("geopsy")) else "")
     return "?"
@@ -139,6 +146,11 @@ def run_inversion(key: str, curves_by_mode: dict[int, tuple[np.ndarray, np.ndarr
         res = maswavespy_port_inversion(curves_by_mode, **_filter_kwargs(
             params, ("n_layers", "n_iter", "bs", "bh", "nu", "rho", "mode")))
         res["engine"] = "maswavespy(port)"
+        return res
+    if key == "adsurf":
+        res = masw_adsurf.adsurf_inversion(curves_by_mode, **_filter_kwargs(
+            params, ("n_layers", "maxiter", "lr", "seed", "vs_min_ms", "vs_max_ms", "nu", "rho")))
+        res["engine"] = "ADsurf(AD)"
         return res
     raise ValueError(f"Backend in-proc desconocido: {key}")
 
@@ -411,6 +423,11 @@ def export_curves(tool: str, curves_by_mode: dict[int, tuple[np.ndarray, np.ndar
 
 
 def _which(name: str) -> str | None:
+    vendored = _vendored_geopsy_bin()
+    if vendored is not None:
+        for cand in (vendored / f"{name}.exe", vendored / name):
+            if cand.exists():
+                return str(cand)
     return shutil.which(name)
 
 
@@ -418,17 +435,85 @@ def launch_tool(tool: str, files: list[Path]) -> tuple[bool, str]:
     """Intenta abrir la herramienta externa con los archivos exportados. Devuelve
     (lanzado, mensaje). No falla si la herramienta no esta: solo informa."""
     exe = None
+    note = ""
     if tool == "geopsy":
         exe = _which("dinver") or _which("geopsy")
+        if not exe:
+            ok, msg = ensure_geopsy()
+            note = msg + " "
+            if ok:
+                exe = _which("dinver") or _which("geopsy")
     elif tool == "adsurf":
         exe = _which("adsurf")
     if not exe:
-        return False, f"No encontre el ejecutable de {tool} en el PATH; usa los archivos exportados."
+        return False, f"{note}No encontre el ejecutable de {tool} en el PATH; usa los archivos exportados."
     try:
         subprocess.Popen([exe], cwd=str(files[0].parent) if files else None)
-        return True, f"{tool} lanzado ({exe}). Cargá los archivos exportados en su carpeta."
+        return True, f"{note}{tool} lanzado ({exe}). Cargá los archivos exportados en su carpeta."
     except Exception as exc:  # pragma: no cover
-        return False, f"No pude lanzar {tool}: {exc}"
+        return False, f"{note}No pude lanzar {tool}: {exc}"
+
+
+# --------------------------------------------------------------------------
+# Geopsy/Dinver vendorizado (paquete portable win64 de geopsy.org, sin
+# instalador: se descarga un zip y se extrae en third-party/geopsy). No es
+# pip-instalable (es una app de escritorio compilada en C++/Qt), por eso se
+# vendoriza como binario en vez de como submodulo git de codigo fuente.
+# --------------------------------------------------------------------------
+
+_GEOPSY_ZIP_URL = "https://www.geopsy.org/download/archives/geopsypack-win64-3.5.2.zip"
+
+
+def _repo_root() -> Path | None:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "third-party").is_dir():
+            return parent
+    return None
+
+
+def _vendored_geopsy_bin() -> Path | None:
+    root = _repo_root()
+    if root is None:
+        return None
+    base = root / "third-party" / "geopsy"
+    if not base.is_dir():
+        return None
+    for cand in sorted(base.glob("geopsypack-*/bin"), reverse=True):
+        if (cand / "dinver.exe").exists():
+            return cand
+    return None
+
+
+def ensure_geopsy() -> tuple[bool, str]:
+    """Descarga y extrae el paquete portable win64 de Geopsy/Dinver si no
+    esta ya vendorizado en third-party/geopsy. Devuelve (ok, mensaje)."""
+    existing = _vendored_geopsy_bin()
+    if existing is not None:
+        return True, f"Geopsy/Dinver ya esta en {existing}."
+    if sys.platform != "win32":
+        return False, "Solo hay paquete portable automatico para Windows (win64); instala Geopsy manualmente para tu plataforma."
+    root = _repo_root()
+    if root is None:
+        return False, "No encontre la raiz del repo (carpeta third-party)."
+    import urllib.request
+    import zipfile
+
+    dest_dir = root / "third-party" / "geopsy"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = dest_dir / "geopsypack-win64.zip"
+    try:
+        urllib.request.urlretrieve(_GEOPSY_ZIP_URL, zip_path)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(dest_dir)
+    except Exception as exc:
+        return False, f"No pude descargar/extraer Geopsy: {exc}"
+    finally:
+        zip_path.unlink(missing_ok=True)
+    bin_dir = _vendored_geopsy_bin()
+    if bin_dir is None:
+        return False, "Se descargo el paquete pero no encontre bin/dinver.exe adentro."
+    return True, f"Geopsy/Dinver descargado e instalado en {bin_dir}."
 
 
 # --------------------------------------------------------------------------

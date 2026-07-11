@@ -990,3 +990,69 @@ de la signature. Test de UI extendido en `test_alignment_panel.py`: toggle,
 persistencia visual al navegar, limpieza en ambos resets. pyflakes limpio
 (saqué `is_folder_disabled` de los imports de field_review_app.py: solo se
 usa dentro de field_review_data.py).
+
+## 2026-07-09 — Reorganización: `procesados/` en vez de `Crudos/`, motores MASW reales, ADsurf/Geopsy vendorizados
+
+**Motivación del usuario:** todo lo que la app genera (anotaciones, sesión,
+estado MASW, filtros, offsets de enfase, export `_procesado`) vivía adentro
+de `Crudos/`, mezclado con los datos crudos del hardware. Además el motor
+`adsurf` de la pestaña MASW era un placeholder de solo-exportar (no invertía
+nada in-proc) y `geopsy` fallaba con "no encontré el ejecutable" porque nunca
+había un `dinver.exe` real disponible.
+
+**`Crudos/` → `procesados/` (raíz del repo):** `field_review_data.py` ganó
+`_procesados_dir_for(raw_root)` y `_PROCESADOS_ROOT` (`<repo>/procesados/`).
+Los 9 `default_*_path(raw_root)` (anotaciones, filtro, offsets de enfase,
+offsets por shot, carpetas deshabilitadas, grupos de dispersión, sesión,
+estado MASW json+npz) y `default_output_dir(raw_root)` ahora resuelven ahí
+en vez de adentro/al lado de `raw_root`. `Crudos/` sigue siendo *solo* la
+entrada cruda (`DEFAULT_RAW_ROOT` sin cambios). Se migró todo lo ya generado
+(`Crudos/Canchita/field_review_annotations.json` y demás jsons sueltos,
+`Crudos/Canchita_procesado/`, `Crudos/Canchita_procesado.zip`,
+`Crudos/Canchita_grupo1_procesado/`) a `procesados/`, incluyendo los ~374
+archivos que estaban trackeados en git pese a que `Crudos/` ya figuraba en
+`.gitignore` (se hizo `git mv` + `git rm --cached -r procesados/` para que
+`procesados/` quede realmente ignorado, no repetir el mismo problema).
+`Crudos/Canchita_grupo1_paquete_tutor.zip` y `Crudos/Crudos.zip` se dejaron
+donde estaban: son archivos armados a mano (paquete para el tutor / backup),
+no genera nada el código para ellos.
+
+**Motor `adsurf` pasó de "exportar/lanzar" a in-proc de verdad:**
+vendorizado como submódulo git en `third-party/ADsurf`
+(github.com/liufeng2317/ADsurf) + wrapper nuevo `masw_adsurf.py`. Corre la
+inversión real por diferenciación automática (PyTorch/Adam) contra TODOS los
+modos. Encontrados y esquivados dos bugs de la librería original: compara
+`self.device=="cpu"` contra un string (rompe si le pasás `torch.device`, hay
+que pasarle el string `"cpu"`), y `inversion_method="vs-and-thick"` dispara
+early-stopping casi al toque (se usa `"vs"`, converge normal). Requiere
+`pip install torch tqdm pandas seaborn` (CPU alcanza, no hace falta CUDA).
+
+**Motor `geopsy` (Dinver) ahora lanza de verdad:** geopsy.org publica un zip
+portable sin instalador (`geopsypack-win64-*.zip`, GPL3). Se vendoriza en
+`third-party/geopsy/` (gitignored, ~80MB — no es código fuente propio, es un
+binario de terceros, por eso NO es submódulo git sino una descarga). Nueva
+`masw_backends.ensure_geopsy()` lo descarga/extrae solo si falta (p.ej. clon
+nuevo del repo) y `_which()` lo encuentra ahí aunque no esté en el PATH del
+sistema. Verificado con `dinver.exe --version` (imprime versiones reales de
+Qt6/DinverCore, sin DLLs faltantes) y lanzando el proceso real vía
+`launch_tool("geopsy", ...)`.
+
+**Testing "de verdad" (no funciones sueltas reimplementadas):** se instanció
+`MaswPanel` real y se le restauró el estado MASW real guardado
+(`procesados/Canchita/field_review_masw_state.json` + `.npz`, 112 picks
+reales del dataset Canchita), y se corrieron los 5 motores del combo
+`backend_combo` llamando exactamente a `_run_selected_inversion()` /
+`_export_to_tool()` — los mismos métodos que disparan los botones de la UI,
+no reimplementaciones — con resultados finitos y misfit razonable en los 5
+(evodcinv 0.0103, disba_mc 0.0116, maswavespy 7.06 [%rel, otra escala],
+ADsurf 0.0098 km/s RMSE, geopsy exportó `.target` real). También se instanció
+`FieldReviewWindow` completa (constructor real, con dataset real de 700+
+shots) y se corrió `review_field_data.py --export-only` end-to-end (598
+muestras, 21 promedios, manifest + waterfall PNG/PDF), confirmando que todo
+cae en `procesados/` y `Crudos/` queda intacto.
+
+**Pendiente / no automatizable:** confirmación visual con captura de
+pantalla de la GUI real no se pudo completar porque la sesión de Windows
+estaba bloqueada en el momento; toda la verificación de esta sesión fue
+programática pero contra las clases y métodos reales, no contra scripts de
+prueba reimplementados.

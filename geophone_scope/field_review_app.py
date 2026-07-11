@@ -4008,8 +4008,10 @@ class MaswPanel(QWidget):
 
     Multi-modo: se pueden definir N regiones (una por modo, M0 fundamental,
     M1 primer modo superior, ...) y el auto-pick arma una curva de dispersion
-    experimental por modo. La inversion corre sobre el modo activo (selector);
-    si esta instalado evodcinv/disba puede hacer inversion conjunta multimodo."""
+    experimental por modo. Con maswavespy la inversion corre sobre el modo
+    activo (selector); evodcinv/disba, disba+MC propio y ADsurf (AD/PyTorch,
+    ver masw_adsurf.py y third-party/ADsurf) hacen inversion conjunta
+    multimodo con TODAS las curvas."""
 
     # Colores por modo (M0 fundamental, M1, M2, ...). Se cicla si hay mas.
     _MODE_COLORS = ["#ff3b30", "#34c759", "#0a84ff", "#ff9f0a", "#bf5af2", "#ffd60a"]
@@ -4033,7 +4035,12 @@ class MaswPanel(QWidget):
         self._weight_value_labels: dict[int, QLabel] = {}
         self._freq_log_scale = False
         self._intensity_log_scale = False
-        self._show_frequency_energy = False
+        # Si esta activo, la imagen mostrada normaliza cada FRECUENCIA por su
+        # propio maximo (In(f,c) = I(f,c)/max_c I(f,c)) en vez de por un unico
+        # maximo global. Resalta a que velocidad viajo cada frecuencia (util
+        # para ver modos superiores) sin cambiar los picks: argmax por fila es
+        # invariante a un reescalado positivo, sea global o por fila.
+        self._intensity_per_freq = False
         self._last_result: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
         # Picks por modo: modo 0 = fundamental, 1 = primer modo superior, etc.
         # `self.picks` es un alias (misma identidad de dict) al modo activo, que
@@ -4179,12 +4186,15 @@ class MaswPanel(QWidget):
             "Los picks y regiones siguen guardandose en Hz."
         )
         self.freq_log_btn.toggled.connect(self._freq_log_changed)
-        self.energy_freq_btn = QPushButton("Energía/f")
-        self.energy_freq_btn.setCheckable(True)
-        self.energy_freq_btn.setToolTip(
-            "Muestra/oculta una curva auxiliar con max_c I(f,c) para ver cuanta energia queda por frecuencia."
+        self.intensity_per_freq_btn = QPushButton("Intensidad por frecuencia")
+        self.intensity_per_freq_btn.setCheckable(True)
+        self.intensity_per_freq_btn.setToolTip(
+            "Normaliza cada frecuencia por su propio maximo (In(f,c)=I(f,c)/max_c I(f,c)) en vez "
+            "de un unico maximo global. Resalta a que velocidad viajo cada frecuencia -- util para "
+            "distinguir el modo fundamental de los superiores. No cambia los picks (el argmax por "
+            "frecuencia es el mismo con cualquiera de las dos normalizaciones), solo el contraste."
         )
-        self.energy_freq_btn.toggled.connect(self._energy_frequency_changed)
+        self.intensity_per_freq_btn.toggled.connect(self._intensity_per_freq_changed)
         self.intensity_log_btn = QPushButton("Intensidad log")
         self.intensity_log_btn.setCheckable(True)
         self.intensity_log_btn.setToolTip(
@@ -4193,7 +4203,7 @@ class MaswPanel(QWidget):
         )
         self.intensity_log_btn.toggled.connect(self._intensity_log_changed)
         display_row.addWidget(self.freq_log_btn)
-        display_row.addWidget(self.energy_freq_btn)
+        display_row.addWidget(self.intensity_per_freq_btn)
         display_row.addWidget(self.intensity_log_btn)
         display_row.addStretch(1)
         layout.addLayout(display_row)
@@ -4326,13 +4336,6 @@ class MaswPanel(QWidget):
         self._m0_vertices.setZValue(46)
         self._plot_item.addItem(self._m0_vertices)
         layout.addWidget(self.image_view, stretch=1)
-        self.energy_plot = pg.PlotWidget(title="Energía por frecuencia")
-        self.energy_plot.setMaximumHeight(140)
-        self.energy_plot.setLabel("bottom", "Frecuencia", units="Hz")
-        self.energy_plot.setLabel("left", "Energia", units="norm.")
-        self.energy_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.energy_plot.hide()
-        layout.addWidget(self.energy_plot)
         self.coord_label = QLabel("Move el mouse sobre la imagen para ver frecuencia / velocidad / amplitud")
         layout.addWidget(self.coord_label)
         self._plot_item.scene().sigMouseMoved.connect(self._on_mouse_moved)
@@ -4385,10 +4388,11 @@ class MaswPanel(QWidget):
         for key, label, _kind in masw_backends.BACKENDS:
             self.backend_combo.addItem(label, key)
         self.backend_combo.setToolTip(
-            "Herramienta con la que se invierte. Los 'inproc' corren dentro de la app; "
-            "las externas (ADsurf, Geopsy/Dinver) exportan las curvas y, si estan en el PATH, "
-            "se lanzan. maswavespy usa el port numpy (1 modo); evodcinv y disba+MC usan TODAS "
-            "las curvas de modo."
+            "Herramienta con la que se invierte. Los 'inproc' (evodcinv, disba+MC, "
+            "maswavespy, ADsurf) corren dentro de la app; Geopsy/Dinver es la unica "
+            "externa (exporta las curvas y, si esta en el PATH, se lanza). maswavespy "
+            "usa el port numpy (1 modo); evodcinv, disba+MC y ADsurf usan TODAS las "
+            "curvas de modo."
         )
         self.backend_combo.currentIndexChanged.connect(self._backend_changed)
         engine_layout.addWidget(self.backend_combo)
@@ -4666,12 +4670,28 @@ class MaswPanel(QWidget):
         self._freq_log_scale = bool(checked)
         self._redraw_last_dispersion(preserve_view=True, view_range=view_range)
 
-    def _energy_frequency_changed(self, checked: bool) -> None:
-        self._show_frequency_energy = bool(checked)
-        self._refresh_frequency_energy_plot()
-
     def _intensity_log_changed(self, checked: bool) -> None:
         self._intensity_log_scale = bool(checked)
+        self._redraw_last_dispersion(preserve_view=True)
+
+    def _combined_display_array(self, A_full: np.ndarray, A_scale: np.ndarray | None = None) -> np.ndarray:
+        """Aplica la normalizacion de color que corresponda segun el toggle
+        'Intensidad por frecuencia': por fila (In=I/max_c I, resalta modos) o
+        por un unico maximo global (contraste natural entre grupos).
+
+        `A_scale` (si se da) es una version enmascarada (NaN fuera de la
+        banda anti-aliasing/lambda_max) que se usa SOLO para calcular el
+        maximo de normalizacion, para que el contraste se ajuste a la banda
+        valida de picking; el plano que se devuelve (y se grafica) es
+        siempre `A_full`, el plano entero -- las curvas de aliasing/apertura
+        quedan como sugerencia dibujada encima (`_draw_alias_boundary`,
+        `_draw_lambda_max_boundary`), no recortan la imagen."""
+        if self._intensity_per_freq:
+            return self._normalize_dispersion_image(A_full, A_scale)
+        return self._normalize_global_dispersion_image(A_full, A_scale)
+
+    def _intensity_per_freq_changed(self, checked: bool) -> None:
+        self._intensity_per_freq = bool(checked)
         self._redraw_last_dispersion(preserve_view=True)
 
     def _dispersion_level_max(self) -> float:
@@ -4760,7 +4780,6 @@ class MaswPanel(QWidget):
         view_range: tuple[float, float, float, float] | None = None,
     ) -> None:
         if self._last_result is None:
-            self._refresh_frequency_energy_plot()
             return
         f, c, A = self._last_result
         self._display_dispersion_image(
@@ -4803,42 +4822,6 @@ class MaswPanel(QWidget):
         gain = 100.0
         return np.log1p(gain * finite_A) / np.log1p(gain)
 
-    def _refresh_frequency_energy_plot(self) -> None:
-        if not hasattr(self, "energy_plot"):
-            return
-        self.energy_plot.setVisible(bool(self._show_frequency_energy))
-        self.energy_plot.clear()
-        if not self._show_frequency_energy or self._last_result is None:
-            return
-        f, _c, A = self._last_result
-        if f.size == 0 or A.size == 0:
-            return
-        with np.errstate(all="ignore"):
-            energy = np.nanmax(np.where(np.isfinite(A), A, 0.0), axis=1)
-        max_energy = float(np.max(energy)) if energy.size else 0.0
-        if max_energy > 0:
-            energy = energy / max_energy
-        x = self._freq_to_x_array(f)
-        valid = np.isfinite(x) & np.isfinite(energy)
-        if not np.any(valid):
-            return
-        bg = "#15181d" if self.dark_mode else "#ffffff"
-        fg = "#eeeeee" if self.dark_mode else "#222222"
-        self.energy_plot.setBackground(bg)
-        self.energy_plot.setLabel(
-            "bottom",
-            "log10 Frecuencia [Hz]" if self._freq_log_scale else "Frecuencia",
-            units=None if self._freq_log_scale else "Hz",
-        )
-        self.energy_plot.setLabel("left", "Energia", units="norm.")
-        for axis_name in ("bottom", "left"):
-            axis = self.energy_plot.getAxis(axis_name)
-            axis.setPen(pg.mkPen(fg))
-            axis.setTextPen(pg.mkPen(fg))
-        pen = pg.mkPen("#ff3b30" if self.dark_mode else "#b00000", width=1.8)
-        self.energy_plot.plot(x[valid], energy[valid], pen=pen)
-        self.energy_plot.setYRange(0.0, 1.0, padding=0.05)
-
     @staticmethod
     def _dispersion_colormap() -> pg.ColorMap:
         return pg.ColorMap(
@@ -4857,10 +4840,17 @@ class MaswPanel(QWidget):
         )
 
     @staticmethod
-    def _normalize_dispersion_image(A: np.ndarray) -> np.ndarray:
+    def _normalize_dispersion_image(A: np.ndarray, A_scale: np.ndarray | None = None) -> np.ndarray:
+        """Normaliza por fila (In = I / max_c I). `A_scale` (si se da) es de
+        donde sale el maximo por fila -- se puede pasar una version
+        enmascarada (banda valida de picking) para que el contraste se
+        calcule ahi, mientras se sigue mostrando/devolviendo `A` completo
+        (plano entero, sin recortar por aliasing/lambda_max)."""
         A = np.asarray(A, dtype=np.float64)
+        scale_src = np.asarray(A_scale, dtype=np.float64) if A_scale is not None else A
+        finite_scale = np.where(np.isfinite(scale_src), scale_src, 0.0)
+        denom = np.max(finite_scale, axis=1, keepdims=True) if finite_scale.size else np.array([[0.0]])
         finite_A = np.where(np.isfinite(A), A, 0.0)
-        denom = np.max(finite_A, axis=1, keepdims=True) if finite_A.size else np.array([[0.0]])
         return np.divide(
             finite_A,
             denom,
@@ -4869,10 +4859,15 @@ class MaswPanel(QWidget):
         )
 
     @staticmethod
-    def _normalize_combined_dispersion_image(A: np.ndarray) -> np.ndarray:
+    def _normalize_global_dispersion_image(A: np.ndarray, A_scale: np.ndarray | None = None) -> np.ndarray:
+        """Igual que `_normalize_dispersion_image` pero con un unico maximo
+        global en vez de uno por fila; `A_scale` opcional para calcular ese
+        maximo sobre una banda distinta a la que se devuelve."""
         A = np.asarray(A, dtype=np.float64)
+        scale_src = np.asarray(A_scale, dtype=np.float64) if A_scale is not None else A
+        finite_scale = np.where(np.isfinite(scale_src), scale_src, 0.0)
+        max_value = float(np.max(finite_scale)) if finite_scale.size else 0.0
         finite_A = np.where(np.isfinite(A), A, 0.0)
-        max_value = float(np.max(finite_A)) if finite_A.size else 0.0
         if max_value <= 0.0:
             return np.zeros_like(finite_A, dtype=np.float64)
         return finite_A / max_value
@@ -4909,32 +4904,53 @@ class MaswPanel(QWidget):
             self._current_raw_dispersion_view_range() if preserve_view else None
         )
         dc = float(c[1] - c[0]) if len(c) > 1 else 1.0
-        # Zona de aliasing espacial: por debajo de c = 2*dx*f la longitud de
-        # onda (lambda = c/f) es menor que 2*dx (Nyquist espacial del tendido)
-        # y la imagen no es confiable. Se enmascara a NaN para NO graficarla y
-        # se excluye del picking (ver _valid_velocity_mask). El array completo
-        # queda en _last_result para que la matematica del pick tenga la grilla
-        # entera; solo el display se enmascara.
+        # Zona de aliasing espacial (c < 2*dx*f) y techo de apertura (c > L*f):
+        # ya NO se recorta la imagen ahi -- se sigue graficando el plano
+        # entero, y esos limites quedan solo como curvas de sugerencia
+        # dibujadas encima (_draw_alias_boundary / _draw_lambda_max_boundary).
+        # Se arma igual una version enmascarada nada mas para que la
+        # normalizacion de color (por fila o global, toggle "Intensidad por
+        # frecuencia") ajuste el contraste a la banda valida de picking, sin
+        # que quede lavado por un maximo que caiga fuera de esa banda; lo que
+        # se termina mostrando es siempre el plano completo, sin recortar.
         A_display = np.asarray(A, dtype=np.float64).copy()
+        A_scale = A_display.copy()
         dx = self._geophone_spacing_m
         length = self._array_length_m
         if dx and dx > 0:
             alias_c = 2.0 * dx * f[:, None]
-            A_display[c[None, :] < alias_c] = np.nan
+            A_scale[c[None, :] < alias_c] = np.nan
         if length and length > 0:
             lam_c = length * f[:, None]
-            A_display[c[None, :] > lam_c] = np.nan
+            A_scale[c[None, :] > lam_c] = np.nan
+        A_display = self._combined_display_array(A_display, A_scale)
         A_display = self._display_intensity_image(A_display)
         x_axis, A_display = self._axis_image_data(f, A_display)
         dx_axis = float(x_axis[1] - x_axis[0]) if len(x_axis) > 1 else 1.0
         level_max = self._dispersion_level_max()
+        # Al redibujar por un toggle de vista (preserve_view=True) el usuario
+        # puede haber ajustado a mano el rango de colores/histograma; se
+        # guarda antes de setImage() (que si no, lo pisa) y se reaplica
+        # despues en vez de forzar siempre (0, level_max).
+        histogram = self.image_view.ui.histogram
+        saved_levels = None
+        saved_hist_range = None
+        if preserve_view:
+            try:
+                saved_levels = histogram.getLevels()
+            except Exception:
+                saved_levels = None
+            try:
+                saved_hist_range = histogram.getHistogramRange()
+            except Exception:
+                saved_hist_range = None
         self.image_view.setImage(
             A_display,
             pos=[float(x_axis[0]), float(c[0])],
             scale=[dx_axis, dc],
             autoRange=saved_view is None and saved_raw_view is None,
             autoLevels=False,
-            levels=(0.0, level_max),
+            levels=saved_levels if saved_levels is not None else (0.0, level_max),
             autoHistogramRange=False,
         )
         try:
@@ -4942,15 +4958,20 @@ class MaswPanel(QWidget):
         except Exception:
             pass
         try:
-            self.image_view.setLevels(0.0, level_max)
-            self.image_view.ui.histogram.setHistogramRange(0.0, level_max, padding=0.0)
+            levels_min, levels_max = saved_levels if saved_levels is not None else (0.0, level_max)
+            self.image_view.setLevels(levels_min, levels_max)
+            if saved_hist_range is not None:
+                histogram.setHistogramRange(saved_hist_range[0], saved_hist_range[1], padding=0.0)
+            else:
+                histogram.setHistogramRange(0.0, level_max, padding=0.0)
         except Exception:
             pass
-        self._plot_item.setLabel(
-            "bottom",
-            "log10 Frecuencia [Hz]" if self._freq_log_scale else "Frecuencia",
-            units=None if self._freq_log_scale else "Hz",
-        )
+        # Eje log real (AxisItem.logMode): la posicion de la imagen ya esta en
+        # log10(f) (ver _axis_image_data); esto solo cambia el dibujo de los
+        # ticks para que la separacion sea logaritmica pero las etiquetas
+        # sigan mostrando Hz (10, 20, ..., 100, ...) en vez de log10(f).
+        self._plot_item.getAxis("bottom").setLogMode(self._freq_log_scale)
+        self._plot_item.setLabel("bottom", "Frecuencia", units="Hz")
         self._plot_item.setLabel("left", "Velocidad de fase [m/s]")
         try:
             self.image_view.setColorMap(self._dispersion_colormap())
@@ -4964,7 +4985,6 @@ class MaswPanel(QWidget):
             self._restore_dispersion_view_range(saved_view)
         elif saved_raw_view is not None:
             self._restore_raw_dispersion_view_range(saved_raw_view)
-        self._refresh_frequency_energy_plot()
         parts = []
         if dx and dx > 0:
             parts.append(f"c ≥ 2·dx·f (dx={dx:.2f} m, λ ≥ {2.0 * dx:.2f} m)")
@@ -4990,7 +5010,12 @@ class MaswPanel(QWidget):
             weight = float(self._group_weights.get(gid, 1.0))
             combined += weight * np.asarray(result["A_norm"], dtype=np.float64)
             parts.append(f"G{gid} w={weight:.2f}")
-        combined = self._normalize_combined_dispersion_image(combined)
+        # combined queda CRUDO (sin normalizar): la normalizacion de color se
+        # aplica en _display_dispersion_image, despues de enmascarar la zona
+        # de aliasing/lambda_max, para que el maximo por fila se calcule solo
+        # sobre la banda valida de picking. self._last_result mantiene la
+        # grilla entera sin enmascarar para que el pick (argmax) tenga todos
+        # los datos.
         self._last_result = (f, c, combined)
         self._display_dispersion_image(
             f,
@@ -5075,6 +5100,11 @@ class MaswPanel(QWidget):
         f, c, A = self._last_result
         fell_back = False
         try:
+            # auto_extract_dispersion_curve espera amplitud normalizada por
+            # frecuencia (su umbral de calidad compara contra el pico de cada
+            # fila); A puede venir globalmente normalizada si el toggle
+            # "Intensidad por frecuencia" esta apagado, asi que se normaliza
+            # por fila aca sin importar el estado del toggle de visualizacion.
             freqs, c_obs = auto_extract_dispersion_curve(
                 f, c, self._normalize_dispersion_image(A), np.asarray(self._raw_distances, dtype=np.float64)
             )
@@ -5900,7 +5930,7 @@ class MaswPanel(QWidget):
             hint = "Exporta las curvas y, si está en el PATH, lanza la herramienta."
         else:
             self.run_inv_btn.setText("Correr inversión")
-            scope = "todas las curvas" if key in ("evodcinv", "disba_mc") else "1 modo (fundamental/activo)"
+            scope = "todas las curvas" if key in ("evodcinv", "disba_mc", "adsurf") else "1 modo (fundamental/activo)"
             hint = f"Usa {scope}."
         self.backend_status_label.setText(f"{status} · {hint} · {n} modo(s) con curva")
 
@@ -6342,7 +6372,7 @@ class MaswPanel(QWidget):
             "display_options": {
                 "freq_log": bool(self._freq_log_scale),
                 "intensity_log": bool(self._intensity_log_scale),
-                "show_frequency_energy": bool(self._show_frequency_energy),
+                "intensity_per_freq": bool(self._intensity_per_freq),
             },
             "active_data_group": int(self._active_data_group_id),
             "geophone_spacing_m": (
@@ -6428,11 +6458,11 @@ class MaswPanel(QWidget):
         display_options = state.get("display_options", {}) if isinstance(state.get("display_options"), dict) else {}
         self._freq_log_scale = bool(display_options.get("freq_log", False))
         self._intensity_log_scale = bool(display_options.get("intensity_log", False))
-        self._show_frequency_energy = bool(display_options.get("show_frequency_energy", False))
+        self._intensity_per_freq = bool(display_options.get("intensity_per_freq", False))
         for btn, checked in (
             (getattr(self, "freq_log_btn", None), self._freq_log_scale),
+            (getattr(self, "intensity_per_freq_btn", None), self._intensity_per_freq),
             (getattr(self, "intensity_log_btn", None), self._intensity_log_scale),
-            (getattr(self, "energy_freq_btn", None), self._show_frequency_energy),
         ):
             if btn is not None:
                 btn.blockSignals(True)
@@ -6565,7 +6595,6 @@ class MaswPanel(QWidget):
             (self.earth_plot, "Earth (Vs) Model"),
             (self.inv_plot, "Dispersion Curve"),
             (self.profile_plot, "Final Vs Model"),
-            (self.energy_plot, "Energia por frecuencia"),
         ):
             plot.setBackground(bg)
             plot.setTitle(title, color=fg)
@@ -6573,6 +6602,5 @@ class MaswPanel(QWidget):
                 axis = plot.getAxis(axis_name)
                 axis.setPen(pg.mkPen(fg))
                 axis.setTextPen(pg.mkPen(fg))
-        self._refresh_frequency_energy_plot()
 
 

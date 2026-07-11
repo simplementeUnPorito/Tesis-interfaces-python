@@ -13,7 +13,19 @@ in-proc + exportadores) está pensado justamente para sumar estos sin tocar la U
   paquete real necesita compilar Cython). Su `combination.CombineDCs` (numpy) se usa
   para exportar/combinar.
 - **swprepost** (Vantassel) — export a **Dinver `.target` real** (XML gzip) por modo,
-  reemplazando el texto hecho a mano. `pip install swprepost`. ← recién sumado.
+  reemplazando el texto hecho a mano. `pip install swprepost`.
+- **ADsurf** (github.com/liufeng2317/ADsurf) — inversión multimodal por
+  diferenciación automática (PyTorch/Adam, forward propio tipo disba). Vendorizado
+  como submodulo git en `third-party/ADsurf` (no está en PyPI); wrapper in-proc en
+  `masw_adsurf.py`. Motor `adsurf`, usa TODAS las curvas de modo (deben ser
+  consecutivas 0..N). Requiere `pip install torch tqdm pandas seaborn` (CPU alcanza).
+- **Geopsy/Dinver** (geopsy.org) — motor `geopsy` sigue siendo "export/lanzar" (es
+  una app de escritorio C++/Qt, no una librería Python), pero ahora el paquete
+  portable win64 se vendoriza automáticamente: `masw_backends.ensure_geopsy()`
+  descarga y extrae el zip oficial (`geopsypack-win64-*.zip`, sin instalador) en
+  `third-party/geopsy/` (gitignored, ~80MB, se baja on-demand) y `_which()` lo
+  encuentra ahí aunque no esté en el PATH del sistema. Se dispara solo al primer
+  "Exportar / lanzar" si no lo encuentra.
 
 ## Recomendado sumar (alto valor)
 
@@ -49,9 +61,6 @@ crudo, no la curva.
 ## Opcionales / nicho
 - **pysurf96** (surf96/CPS forward): cross-check del forward de disba (¿coinciden las
   curvas teóricas?). Bajo-medio. Base de BayHunter, así que entra con (1).
-- **ADsurf** (github.com/liufeng2317/ADsurf): inversión multimodal por diferenciación
-  automática (también forward disba). Hoy exportamos para él; vendorizarlo para correr
-  in-proc es posible pero es código de investigación con sus deps. Bajo.
 - **DisbaTomo**: tomografía 2D/3D de Vs con disba — otro caso de uso (perfil lateral),
   no 1-D. Fuera de alcance por ahora.
 - **CC-FJpy** (frequency-Bessel): extracción de modos superiores de ruido ambiental.
