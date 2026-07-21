@@ -12,7 +12,7 @@ esta app es útil para post-proceso y análisis en PC.
 ## Instalación
 
 ```bash
-cd src/python/geophone_scope
+cd software/python/geophone_scope
 pip install -r requirements.txt
 ```
 
@@ -45,7 +45,7 @@ usa `raw_f32le.bin`; si alguna vez querés revisar las señales filtradas podés
 agregar `--filtered`.
 
 ```bash
-cd C:\Github\Tesis\src\python\geophone_scope
+cd C:\Github\Tesis\software\python\geophone_scope
 .\.venv\Scripts\python.exe review_field_data.py --scan-only
 .\.venv\Scripts\python.exe review_field_data.py
 ```
@@ -179,7 +179,7 @@ con recuperación de modelos sintéticos de 2 capas.
 Las marcas se guardan solas al cerrar en:
 
 ```bash
-C:\Github\Tesis\procesados\Canchita\field_review_annotations.json
+C:\Github\Tesis\data\processed\Canchita\field_review_annotations.json
 ```
 
 También se puede exportar sin abrir la GUI, usando las marcas ya guardadas:
@@ -191,13 +191,13 @@ También se puede exportar sin abrir la GUI, usando las marcas ya guardadas:
 La salida por defecto queda en:
 
 ```bash
-C:\Github\Tesis\procesados\Canchita_procesado
+C:\Github\Tesis\data\processed\Canchita_procesado
 ```
 
 Todo lo que genera la app (anotaciones, sesión, estado MASW, filtros,
-offsets de enfase, export `_procesado`) vive en `procesados\` en la raíz del
-repo — nunca adentro de `Crudos\`, que son solo los datos crudos del
-hardware. `procesados\` está en `.gitignore` (ver
+offsets de enfase, export `_procesado`) vive en `data\processed\` — nunca
+adentro de `data\raw\`, que contiene solo los datos crudos del hardware.
+Ambas carpetas de datos están ignoradas por Git (ver
 `field_review_data.py:_procesados_dir_for`).
 
 Contenido principal:

@@ -10,6 +10,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 from dataclasses import asdict, dataclass, field, replace
@@ -24,8 +25,25 @@ from scipy.signal import butter, correlate, resample_poly, sosfiltfilt
 
 
 SCHEMA = "geophone_field_review_v1"
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_RAW_ROOT = _REPO_ROOT / "Crudos" / "Canchita"
+
+
+def _discover_data_root() -> Path:
+    """Resuelve el almacén de datos sin acoplar este repo al superproyecto."""
+    configured = os.environ.get("TESIS_DATA_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "data"
+        if (candidate / "raw").is_dir() or (candidate / "processed").is_dir():
+            return candidate
+
+    return here.parents[1] / "data"
+
+
+_DATA_ROOT = _discover_data_root()
+DEFAULT_RAW_ROOT = _DATA_ROOT / "raw" / "Canchita"
 DEFAULT_ANNOTATIONS_NAME = "field_review_annotations.json"
 DEFAULT_AVERAGE_ARRIVALS_NAME = "average_arrivals.json"
 DEFAULT_FILTER_SETTINGS_NAME = "filter_settings.json"
@@ -38,14 +56,12 @@ DEFAULT_MASW_STATE_NAME = "field_review_masw_state.json"
 DEFAULT_MASW_ARRAYS_NAME = "field_review_masw_state.npz"
 
 # Todo lo que genera la app (anotaciones, sesion, estado MASW, export
-# _procesado, etc.) va a <repo>/procesados/, nunca adentro de Crudos/: Crudos/
-# son los datos crudos del hardware y no se ensucian con archivos de la app.
-# procesados/ esta en .gitignore (igual que Crudos/).
-_PROCESADOS_ROOT = _REPO_ROOT / "procesados"
+# Los resultados van a data/processed y nunca se mezclan con data/raw.
+_PROCESADOS_ROOT = _DATA_ROOT / "processed"
 
 
 def _procesados_dir_for(raw_root: str | Path) -> Path:
-    """Carpeta en procesados/ que espeja el dataset (mismo nombre que raw_root),
+    """Carpeta en data/processed que espeja el dataset (mismo nombre que raw_root),
     donde van las anotaciones/sesion/estado que antes se guardaban en raw_root."""
     raw_root = Path(raw_root).resolve()
     d = _PROCESADOS_ROOT / raw_root.name

@@ -1,6 +1,14 @@
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 .venv/
 venv/
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+logs/
+*.log
+third-party/geopsy/
+data/raw/
+data/processed/

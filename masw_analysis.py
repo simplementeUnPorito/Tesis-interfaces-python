@@ -13,7 +13,7 @@ Método de procesamiento:
     diferencia de fase entre canales adyacentes.
 
 Uso:
-    python masw_analysis.py                              # busca ZIPs en Crudos/
+    python masw_analysis.py                              # busca capturas en data/raw/
     python masw_analysis.py muestra_20260608_174501.zip  # ZIP específico
     python masw_analysis.py C:/ruta/al/directorio        # carpeta extraída
     python masw_analysis.py --offset1 2 --spacing 2      # geometría en metros
@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 # Force UTF-8 on Windows consoles (cp1252 can't print some Unicode chars)
@@ -337,8 +338,14 @@ def _ask_geometry(n_channels: int) -> tuple[float, float]:
 
 
 def main():
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    crudos_dir = repo_root / "Crudos"
+    configured = os.environ.get("TESIS_DATA_ROOT")
+    if configured:
+        data_root = Path(configured).expanduser().resolve()
+    else:
+        module_root = Path(__file__).resolve().parent
+        superproject_data = module_root.parent.parent / "data"
+        data_root = superproject_data if superproject_data.is_dir() else module_root / "data"
+    crudos_dir = data_root / "raw"
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input", nargs="?", help="ZIP, directorio extraído, o directorio con ZIPs")
@@ -356,7 +363,7 @@ def main():
     if args.input:
         path = Path(args.input)
     elif crudos_dir.exists():
-        # Buscar el ZIP o carpeta más reciente en Crudos/
+        # Buscar el ZIP o carpeta más reciente en data/raw.
         candidates = sorted(crudos_dir.glob("*.zip")) + \
                      [d for d in sorted(crudos_dir.iterdir()) if d.is_dir() and (d / "metadata.json").exists()]
         if not candidates:

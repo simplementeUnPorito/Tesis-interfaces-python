@@ -1,0 +1,6 @@
+[submodule "third-party/maswavespy"]
+	path = third-party/maswavespy
+	url = https://github.com/Mazvel/maswavespy.git
+[submodule "third-party/ADsurf"]
+	path = third-party/ADsurf
+	url = https://github.com/liufeng2317/ADsurf.git

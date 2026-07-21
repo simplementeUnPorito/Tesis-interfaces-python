@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--raw-root",
         default=str(DEFAULT_RAW_ROOT),
-        help="Carpeta con los crudos. Default: C:\\Github\\Tesis\\Crudos\\Canchita",
+        help=f"Carpeta con los crudos. Default: {DEFAULT_RAW_ROOT}",
     )
     parser.add_argument(
         "--annotations",
