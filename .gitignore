@@ -9,6 +9,5 @@ build/
 dist/
 logs/
 *.log
-third-party/geopsy/
 data/raw/
 data/processed/

@@ -1,3 +1,4 @@
+/third-party/geopsy/** filter=lfs diff=lfs merge=lfs -text
 /geophone_scope/venv/lib/python3.12/site-packages/PyQt5/Qt5/lib/libicudata.so.56 filter=lfs diff=lfs merge=lfs -text
 /geophone_scope/venv/lib/python3.12/site-packages/numpy.libs/libscipy_openblas64_-32a4b2a6.so filter=lfs diff=lfs merge=lfs -text
 /geophone_scope/venv/lib/python3.12/site-packages/numpy/_core/_multiarray_umath.cpython-312-x86_64-linux-gnu.so filter=lfs diff=lfs merge=lfs -text
