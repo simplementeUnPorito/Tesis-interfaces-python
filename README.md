@@ -9,13 +9,13 @@ Aplicaciones de adquisición, revisión de campo y análisis MASW. Este reposito
 - `Ordenar Obsidian/`: herramientas de mantenimiento de notas.
 - `third-party/`: motores MASW externos como submódulos.
 
-El paquete binario Geopsy para Windows se conserva en `third-party/geopsy/` mediante Git LFS. GitHub guarda sus punteros y los objetos viven en el folderstore privado `Github-LFS/repositories/Tesis-software-python`.
+El paquete binario Geopsy para Windows se conserva en `third-party/geopsy/` mediante Git LFS. GitHub guarda sus punteros y los objetos viven en el folderstore privado `Github-LFS/repositories/Tesis-interfaces-python`.
 
 ## Instalación
 
 ```powershell
-git clone --recurse-submodules https://github.com/simplementeUnPorito/Tesis-software-python.git
-cd Tesis-software-python/geophone_scope
+git clone --recurse-submodules https://github.com/simplementeUnPorito/Tesis-interfaces-python.git
+cd Tesis-interfaces-python/geophone_scope
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt

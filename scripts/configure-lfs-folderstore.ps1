@@ -13,7 +13,7 @@ if ([string]::IsNullOrWhiteSpace($StoreRoot)) {
 
 $StoreRoot = [IO.Path]::GetFullPath($StoreRoot)
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$repoStorage = Join-Path $StoreRoot 'repositories\Tesis-software-python'
+$repoStorage = Join-Path $StoreRoot 'repositories\Tesis-interfaces-python'
 if ([string]::IsNullOrWhiteSpace($AdapterPath)) {
     $command = Get-Command lfs-folderstore -ErrorAction SilentlyContinue
     if ($command) { $AdapterPath = $command.Source }
@@ -32,4 +32,4 @@ if ($LASTEXITCODE -ne 0) { throw 'No se pudo inicializar Git LFS.' }
 & git -C $repoRoot config lfs.customtransfer.lfs-folder.args $storageConfig
 & git -C $repoRoot config lfs.customtransfer.lfs-folder.concurrent true
 & git -C $repoRoot config lfs.standalonetransferagent lfs-folder
-Write-Output "Git LFS configurado para Tesis-software-python en $repoStorage"
+Write-Output "Git LFS configurado para Tesis-interfaces-python en $repoStorage"
