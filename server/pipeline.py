@@ -33,6 +33,8 @@ if str(_GS) not in sys.path:
 
 import field_review_data as frd   # noqa: E402  (después del sys.path)
 
+from .catalog import scan_catalog   # noqa: E402
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -49,6 +51,8 @@ class Job:
     created_at: str = field(default_factory=_now)
     finished_at: str = ""
     folder: str = ""                # carpeta del dataset que quedó
+    captures: int = 0
+    nodes: int = 0
     shots: int = 0
     picks: int = 0
     error: str = ""
@@ -63,6 +67,8 @@ class Job:
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "folder": self.folder,
+            "captures": self.captures,
+            "nodes": self.nodes,
             "shots": self.shots,
             "picks": self.picks,
             "error": self.error,
@@ -108,6 +114,8 @@ class Pipeline:
                 created_at=d.get("created_at", ""),
                 finished_at=d.get("finished_at", ""),
                 folder=d.get("folder", ""),
+                captures=int(d.get("captures", 0)),
+                nodes=int(d.get("nodes", 0)),
                 shots=int(d.get("shots", 0)),
                 picks=int(d.get("picks", 0)),
                 error=d.get("error", ""),
@@ -176,6 +184,45 @@ class Pipeline:
         self._q.put(job_id)
         return True
 
+    # ── borrado (siempre pedido por un humano) ──────────────────────────────
+    def delete_folder(self, folder_name: str, with_zip: bool = False) -> dict:
+        """Borra una carpeta extraída. Nunca se llama sola.
+
+        Política: nada se borra automáticamente, ni por estar incompleto ni por
+        antigüedad. El ZIP original se conserva salvo pedido explícito, porque es
+        el dato tal como salió del campo y no siempre se puede volver a pedir.
+        """
+        import shutil
+
+        safe = Path(folder_name).name
+        if not safe or safe in (".", ".."):
+            return {"ok": False, "error": "nombre inválido"}
+        target = (self.raw_root / safe).resolve()
+        if not str(target).startswith(str(self.raw_root.resolve())):
+            return {"ok": False, "error": "fuera de raw_root"}
+        if not target.is_dir():
+            return {"ok": False, "error": "no existe"}
+
+        shutil.rmtree(target)
+        zips = []
+        if with_zip:
+            for job_id, job in list(self._jobs.items()):
+                if job.folder == safe:
+                    z = self.zips_root / f"{job_id}.zip"
+                    if z.exists():
+                        z.unlink()
+                        zips.append(z.name)
+        # El trabajo queda en la lista, marcado: el historial de lo que llegó no
+        # se pierde por haber borrado los archivos.
+        with self._lock:
+            for job in self._jobs.values():
+                if job.folder == safe:
+                    job.state = "borrado"
+                    job.log.append(f"{_now()} borrado por el usuario"
+                                   + (" (con ZIP)" if with_zip else " (ZIP conservado)"))
+        self._save_state()
+        return {"ok": True, "folder": safe, "zips_deleted": zips}
+
     # ── worker ──────────────────────────────────────────────────────────────
     def _set(self, job_id: str, **kw) -> None:
         with self._lock:
@@ -221,11 +268,19 @@ class Pipeline:
                   log_line=f"{len(shots)} disparos en esta carpeta "
                            f"({len(dataset.shots)} en total)")
 
+        # Sin par hammer+geo no hay disparo MASW: auto_pick_shot detecta el primer
+        # arribo EN la señal del martillo, así que sin fuente no hay nada que
+        # picar. Eso no invalida la captura — queda catalogada y visible como
+        # cualquier otra (ver catalog.py); lo único que no corre es el picking.
         if not shots:
-            # No es necesariamente un error: puede ser un ZIP sin par
-            # hammer+geo, que discover_dataset descarta a propósito.
-            self._set(job_id, state="listo", finished_at=_now(),
-                      log_line="sin disparos válidos (¿falta hammer o geo?)")
+            cat = scan_catalog(self.raw_root)
+            mias = next((f for f in cat["folders"] if f["folder"] == folder.name), None)
+            caps = len(mias["captures"]) if mias else 0
+            nodos = sum(len(c["nodes"]) for c in mias["captures"]) if mias else 0
+            self._set(job_id, captures=caps, nodes=nodos,
+                      state="listo", finished_at=_now(),
+                      log_line=f"{caps} captura(s), {nodos} nodo(s) catalogados; "
+                               f"sin picking (falta el martillo)")
             return
 
         self._set(job_id, log_line="picking automático del primer arribo")

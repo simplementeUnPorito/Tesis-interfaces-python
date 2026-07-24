@@ -26,49 +26,55 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from .catalog import folders_without_hammer, scan_catalog
 from .pipeline import Pipeline, frd
 
 MAX_UPLOAD = 256 * 1024 * 1024
 
 
 def _dataset_summary(pipeline: Pipeline) -> dict:
-    """Disparos descubiertos + el pick de cada uno.
+    """Catálogo de todo lo que llegó, con los picks encima cuando existen.
 
-    Se recalcula por pedido en vez de cachearse: descubrir es leer metadata, no
-    señales, y así la web nunca muestra un estado viejo si alguien toca el
-    volumen por fuera (la app PyQt, por ejemplo).
+    El catálogo manda: lista cada captura y cada nodo con señal, tenga martillo o
+    no. Los disparos MASW (que sí exigen el par hammer+geo) se superponen sobre esa
+    base. Antes esto usaba sólo discover_dataset y una captura de un nodo suelto
+    desaparecía de la vista, que es justo lo que no tiene que pasar.
+
+    Se recalcula por pedido en vez de cachearse: leer metadata es barato y así la
+    web nunca muestra un estado viejo si alguien toca el volumen por fuera (la app
+    PyQt, por ejemplo).
     """
+    cat = scan_catalog(pipeline.raw_root)
+
+    # Índice de picks por (carpeta, captura) para colgarlos del catálogo.
+    picks_por_captura: dict[tuple[str, str], dict] = {}
+    shot_count = 0
+    reviewed = 0
     try:
         dataset = frd.discover_dataset(pipeline.raw_root)
+        anns = frd.load_annotations(frd.default_annotations_path(pipeline.raw_root))
+        shot_count = len(dataset.shots)
+        reviewed = sum(1 for a in anns.values() if a.reviewed)
+        for shot in dataset.shots:
+            ann = anns.get(shot.shot_id)
+            picks_por_captura[(shot.folder_name, shot.capture_name)] = {
+                "shot_id": shot.shot_id,
+                "distance_m": shot.distance_m,
+                "trigger_s": None if ann is None else ann.trigger_s,
+                "source": None if ann is None else ann.source,
+                "reviewed": bool(ann and ann.reviewed),
+                "accepted": bool(ann and ann.accepted),
+            }
     except FileNotFoundError:
-        return {"folders": [], "shot_count": 0, "raw_root": str(pipeline.raw_root)}
+        pass   # todavía no llegó nada; el catálogo ya viene vacío
 
-    picks = frd.load_annotations(frd.default_annotations_path(pipeline.raw_root))
-    folders: dict[str, list[dict]] = {}
-    for shot in dataset.shots:
-        ann = picks.get(shot.shot_id)
-        folders.setdefault(shot.folder_name, []).append({
-            "shot_id": shot.shot_id,
-            "capture": shot.capture_name,
-            "order": shot.order,
-            "fs": shot.fs,
-            "distance_m": shot.distance_m,
-            "hammer_pcb": shot.hammer.pcb_id,
-            "geo_pcb": shot.geo.pcb_id,
-            "trigger_s": None if ann is None else ann.trigger_s,
-            "arrival_s": None if ann is None else ann.arrival_s,
-            "source": None if ann is None else ann.source,
-            "reviewed": bool(ann and ann.reviewed),
-            "accepted": bool(ann and ann.accepted),
-        })
-    for shots in folders.values():
-        shots.sort(key=lambda d: (d["order"], d["capture"]))
-    return {
-        "raw_root": str(pipeline.raw_root),
-        "shot_count": len(dataset.shots),
-        "reviewed_count": sum(1 for a in picks.values() if a.reviewed),
-        "folders": [{"folder": k, "shots": v} for k, v in sorted(folders.items())],
-    }
+    for folder in cat["folders"]:
+        for capture in folder["captures"]:
+            capture["pick"] = picks_por_captura.get((folder["folder"], capture["capture"]))
+
+    cat["shot_count"] = shot_count
+    cat["reviewed_count"] = reviewed
+    return cat
 
 
 INDEX_HTML = """<!doctype html>
@@ -116,7 +122,13 @@ preprocesan solas. Acá se ve qué está listo para validar.</p>
 </section>
 
 <section>
-  <h2>Disparos <span id="ds-count" class="tag listo" hidden></span></h2>
+  <h2>Capturas <span id="ds-count" class="tag listo" hidden></span></h2>
+  <p class="sub" style="margin:0 0 12px">Todo lo que llega se guarda, completo o no.
+  Nada se borra solo: las capturas sin martillo quedan marcadas y se borran únicamente
+  si vos lo pedís.</p>
+  <div class="row" style="margin-bottom:12px">
+    <button id="btn-del-sin-hammer">Borrar las capturas sin martillo</button>
+  </div>
   <div id="dataset"></div>
 </section>
 
@@ -167,23 +179,58 @@ function renderDataset(ds) {
     return;
   }
   badge.hidden = false;
-  badge.textContent = `${ds.shot_count} disparos · ${ds.reviewed_count || 0} validados`;
+  badge.textContent = `${ds.capture_count} capturas · ${ds.node_count} nodos · ` +
+                      `${ds.shot_count} disparos MASW · ${ds.reviewed_count || 0} validados`;
   host.innerHTML = ds.folders.map((f) => `
-    <h3 style="font-size:.9rem;margin:16px 0 6px">${f.folder}</h3>
+    <h3 style="font-size:.9rem;margin:16px 0 6px">${f.folder}
+      <button style="font-size:.75rem;font-weight:400;margin-left:8px"
+              onclick="borrarCarpeta('${f.folder.replace(/'/g, "\\\\'")}')">borrar</button>
+    </h3>
     <div class="wrap"><table><thead><tr>
-      <th>Captura</th><th class="num">fs</th><th class="num">dist (m)</th>
-      <th class="num">trigger (s)</th><th>pick</th><th>validado</th>
+      <th>Captura</th><th>Nodos</th><th class="num">fs</th><th class="num">seg</th>
+      <th>Estado</th><th class="num">trigger (s)</th><th>validado</th>
     </tr></thead><tbody>
-    ${f.shots.map((s) => `<tr>
-      <td>${s.capture}</td>
-      <td class="num">${fmt(s.fs, 0)}</td>
-      <td class="num">${fmt(s.distance_m, 2)}</td>
-      <td class="num">${s.trigger_s === null ? '—' : fmt(s.trigger_s, 4)}</td>
-      <td>${s.source || '—'}</td>
-      <td>${s.reviewed ? 'sí' : 'no'}</td>
-    </tr>`).join('')}
+    ${f.captures.map((c) => {
+      const nodos = c.nodes.map((n) =>
+        `${n.role === 'hammer' ? '🔨' : n.role === 'geo' ? '📈' : '•'} ` +
+        `${n.pcb_id || n.index}`).join(', ');
+      const segs = Math.max(...c.nodes.map((n) => n.seconds || 0));
+      // Sin martillo no hay primer arribo que picar: se dice, no se esconde.
+      const estado = c.pickable
+        ? '<span class="tag listo">completa</span>'
+        : `<span class="tag pendiente">sin ${c.has_hammer ? 'geófono' : 'martillo'}</span>`;
+      const p = c.pick;
+      return `<tr>
+        <td>${c.capture}</td>
+        <td>${nodos}</td>
+        <td class="num">${fmt(c.nodes[0] && c.nodes[0].fs, 0)}</td>
+        <td class="num">${fmt(segs, 2)}</td>
+        <td>${estado}</td>
+        <td class="num">${p && p.trigger_s !== null ? fmt(p.trigger_s, 4) : '—'}</td>
+        <td>${p && p.reviewed ? 'sí' : '—'}</td>
+      </tr>`;
+    }).join('')}
     </tbody></table></div>`).join('');
 }
+
+async function borrarCarpeta(folder) {
+  if (!confirm(`¿Borrar la carpeta "${folder}"?\\n\\nSe borran los datos extraídos. ` +
+               `El ZIP original se conserva.`)) return;
+  await fetch(`api/delete?folder=${encodeURIComponent(folder)}`, {method: 'POST'});
+  tick();
+}
+
+document.getElementById('btn-del-sin-hammer').addEventListener('click', async () => {
+  const r = await fetch('api/dataset', {cache: 'no-store'}).then((x) => x.json());
+  const sin = (r.folders || []).filter(
+    (f) => f.captures.length && !f.captures.some((c) => c.has_hammer)).map((f) => f.folder);
+  if (!sin.length) { alert('No hay capturas sin martillo.'); return; }
+  if (!confirm(`¿Borrar ${sin.length} carpeta(s) sin martillo?\\n\\n` + sin.join('\\n') +
+               `\\n\\nSe borran los datos extraídos; los ZIP originales se conservan.`)) return;
+  const res = await fetch('api/delete-sin-hammer', {method: 'POST'}).then((x) => x.json());
+  alert(`Borradas: ${(res.deleted || []).length}`);
+  tick();
+});
 
 tick();
 setInterval(tick, 3000);
@@ -246,6 +293,24 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path.rstrip("/") or "/"
         if path == "/ingest":
             self._ingest()
+        elif path == "/api/delete":
+            # Borrado explícito de una carpeta. Nada se borra solo: ni por estar
+            # incompleta, ni por antigüedad. El ZIP se conserva salvo zip=1.
+            qs = parse_qs(urlparse(self.path).query)
+            folder = (qs.get("folder") or [""])[0]
+            with_zip = (qs.get("zip") or ["0"])[0] == "1"
+            res = self.pipeline.delete_folder(folder, with_zip=with_zip)
+            self._json(200 if res.get("ok") else 400, res)
+        elif path == "/api/delete-sin-hammer":
+            # Barrido de las capturas sin martillo, pedido a mano. Conservador:
+            # sólo carpetas donde NINGUNA captura tiene martillo.
+            qs = parse_qs(urlparse(self.path).query)
+            with_zip = (qs.get("zip") or ["0"])[0] == "1"
+            borradas, errores = [], []
+            for name in folders_without_hammer(self.pipeline.raw_root):
+                res = self.pipeline.delete_folder(name, with_zip=with_zip)
+                (borradas if res.get("ok") else errores).append(res.get("folder", name))
+            self._json(200, {"ok": True, "deleted": borradas, "errors": errores})
         elif path == "/api/requeue":
             qs = parse_qs(urlparse(self.path).query)
             job_id = (qs.get("job_id") or [""])[0]
