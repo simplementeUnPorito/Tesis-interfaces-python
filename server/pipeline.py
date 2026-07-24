@@ -84,9 +84,13 @@ class Pipeline:
     alguna vez hace falta, subir a un pool es cambiar este bucle.
     """
 
-    def __init__(self, data_root: Path) -> None:
+    def __init__(self, data_root: Path, raw_root: Path | None = None) -> None:
         self.data_root = Path(data_root)
-        self.raw_root = self.data_root / "raw"
+        # raw_root separado del data_root a propósito: apunta al MISMO árbol de
+        # datos que ya usa la app PyQt (data/raw), así todo lo adquirido hasta hoy
+        # aparece en la web sin migrar nada, y lo que ingesta el servidor queda
+        # donde la app de escritorio también lo ve. Un solo dato, dos interfaces.
+        self.raw_root = Path(raw_root) if raw_root else (self.data_root / "raw")
         self.zips_root = self.data_root / "zips"
         self.state_path = self.data_root / "jobs.json"
         for d in (self.raw_root, self.zips_root):

@@ -364,18 +364,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--data-root", default=None,
-                    help="dónde viven zips/, raw/ y jobs.json "
-                         "(por defecto <repo>/data/server)")
+                    help="dónde viven zips/ y jobs.json (por defecto <repo>/data/server)")
+    ap.add_argument("--raw-root", default=None,
+                    help="árbol de datasets, compartido con la app PyQt "
+                         "(por defecto <repo>/data/raw)")
     args = ap.parse_args(argv)
 
-    if args.data_root:
-        data_root = Path(args.data_root)
-    else:
-        # src/interfaces/python/server/app.py -> subir 4 = raíz del superproyecto
-        data_root = Path(__file__).resolve().parents[4] / "data" / "server"
+    # src/interfaces/python/server/app.py -> subir 4 = raíz del superproyecto
+    repo = Path(__file__).resolve().parents[4]
+    data_root = Path(args.data_root) if args.data_root else repo / "data" / "server"
+    # Por defecto data/raw, que es donde ya vive todo lo adquirido y lo que lee
+    # review_field_data. Es a propósito: la web no tiene un dato propio: muestra
+    # el mismo que la app de escritorio.
+    raw_root = Path(args.raw_root) if args.raw_root else repo / "data" / "raw"
     data_root.mkdir(parents=True, exist_ok=True)
+    raw_root.mkdir(parents=True, exist_ok=True)
 
-    Handler.pipeline = Pipeline(data_root)
+    Handler.pipeline = Pipeline(data_root, raw_root=raw_root)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"servidor de datos en http://{args.host}:{args.port}")
     print(f"datos en {data_root}")
