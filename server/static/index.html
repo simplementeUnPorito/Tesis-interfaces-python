@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Servidor de datos - Geophone</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>Servidor de datos</h1>
+  <button id="btn-theme" class="theme-toggle" type="button" aria-label="Cambiar tema">🌓</button>
+</header>
+<p class="sub">Las capturas llegan de la SPA del maestro, se descomprimen y se
+preprocesan solas. Acá se ve qué está listo para validar.</p>
+
+<nav class="tabs" id="tabs">
+  <button class="tab-btn active" data-tab="capturas">Capturas</button>
+  <button class="tab-btn" data-tab="filtros">Filtros</button>
+  <button class="tab-btn" data-tab="agrupamiento">Agrupamiento</button>
+  <button class="tab-btn" data-tab="enfase">Enfase</button>
+  <button class="tab-btn" data-tab="promedios">Promedios / arrivals</button>
+  <button class="tab-btn" data-tab="waterfall">Waterfall</button>
+  <button class="tab-btn" data-tab="masw">MASW</button>
+  <button class="tab-btn" data-tab="borrado">Borrado</button>
+</nav>
+
+<main id="tab-panels">
+  <section id="panel-capturas" class="tab-panel active"></section>
+  <section id="panel-filtros" class="tab-panel" hidden>
+    <p class="empty">Filtros: pendiente de porteo.</p>
+  </section>
+  <section id="panel-agrupamiento" class="tab-panel" hidden>
+    <p class="empty">Agrupamiento: pendiente de porteo.</p>
+  </section>
+  <section id="panel-enfase" class="tab-panel" hidden>
+    <p class="empty">Enfase: pendiente de porteo.</p>
+  </section>
+  <section id="panel-promedios" class="tab-panel" hidden>
+    <p class="empty">Promedios / arrivals: pendiente de porteo.</p>
+  </section>
+  <section id="panel-waterfall" class="tab-panel" hidden>
+    <p class="empty">Waterfall: pendiente de porteo.</p>
+  </section>
+  <section id="panel-masw" class="tab-panel" hidden>
+    <p class="empty">MASW: pendiente de porteo.</p>
+  </section>
+  <section id="panel-borrado" class="tab-panel" hidden></section>
+</main>
+
+<script type="module" src="/static/js/main.js"></script>
+</body>
+</html>
