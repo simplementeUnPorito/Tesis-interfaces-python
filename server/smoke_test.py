@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shutil
 import socket
@@ -461,6 +462,351 @@ def _tabs_tema_sin_flash(ctx: Ctx) -> None:
     key_boot = m.group(1)
     assert key_boot in theme_js, (
         f"la clave {key_boot!r} de theme-boot.js no aparece igual en theme.js")
+
+
+# ── Checks capturas/señal (§3.1: GET /api/signal + dibujo) ────────────────────
+def _first_shot(ctx: Ctx) -> tuple[str, dict]:
+    """Primer (shot_id, captura) del dataset real que se pueda dibujar.
+
+    Filtra por pick.shot_id y NO por pickable: son distintos (spec §5.1 —
+    catalog.py deduce el rol sólo de node["role"], frd._node_role mira además
+    type/hw_type/name/data_dir/raw_file, y 194 shots != 186 pickable).
+    """
+    data = ctx.json_get("/api/dataset")
+    for folder in data.get("folders", []):
+        for cap in folder.get("captures", []):
+            pick = cap.get("pick") or {}
+            if pick.get("shot_id"):
+                return pick["shot_id"], cap
+    raise AssertionError("ninguna captura de /api/dataset trae pick.shot_id: "
+                         "sin eso la web no puede dibujar nada")
+
+
+def _write_fixture(ctx: Ctx, folder: str, *, spike: float, with_nan: bool) -> str:
+    """Escribe una captura sintética en el raw_root del SANDBOX y devuelve su shot_id.
+
+    Cinturón de seguridad: nunca contra el dataset real (regla 2 del prompt).
+    Se escribe directo a disco (no por /ingest) para no correr auto_pick_shot +
+    save_annotations sobre el archivo de picks real (§8.1 del spec: el sandbox
+    y el dataset real comparten el mismo default_annotations_path por nombre
+    de carpeta). El shot_id se obtiene por HTTP (/api/dataset), no reimportando
+    field_review_data acá: el gate sigue hablando sólo HTTP.
+    """
+    assert ctx.sandbox and "smoke_sandbox" in str(ctx.raw_root), \
+        f"_write_fixture sólo va en sandbox; raw_root={ctx.raw_root}"
+    import numpy as np
+
+    cap_dir = ctx.raw_root / folder / "captures" / "001_smoke"
+    hammer_dir = cap_dir / "hammer_s1"
+    geo_dir = cap_dir / "geo1_s2"
+    hammer_dir.mkdir(parents=True, exist_ok=True)
+    geo_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = {
+        "order": 1, "fs": 1000,
+        "nodes": [
+            {"index": 1, "pcb_id": "S1", "role": "hammer", "type": "Hammer", "fs": 1000,
+             "data_dir": "captures/001_smoke/hammer_s1",
+             "raw_file": "captures/001_smoke/hammer_s1/raw_f32le.bin"},
+            {"index": 2, "pcb_id": "S2", "role": "geo", "type": "Geo", "fs": 1000,
+             "position_m": 4.0, "data_dir": "captures/001_smoke/geo1_s2",
+             "raw_file": "captures/001_smoke/geo1_s2/raw_f32le.bin"},
+        ],
+    }
+    (cap_dir / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    # Pico +spike en la muestra 1000 (5 muestras, salto abrupto sobre línea de
+    # base plana) para que detect_hammer_trigger lo tome. Cada fixture con
+    # contenido distinto (spike distinto): dos carpetas byte-idénticas quedan
+    # marcadas duplicadas por discover_dataset y la segunda pierde su shot.
+    n = 4000
+    hammer = np.zeros(n, dtype=np.float32)
+    hammer[998:1003] = np.float32(spike)
+    geo = np.zeros(n, dtype=np.float32)
+    geo[998:1003] = np.float32(spike)
+    if with_nan:
+        geo[3000:3003] = np.nan
+    hammer.tofile(hammer_dir / "raw_f32le.bin")
+    geo.tofile(geo_dir / "raw_f32le.bin")
+
+    data = ctx.json_get("/api/dataset")
+    for f in data.get("folders", []):
+        if f["folder"] != folder:
+            continue
+        for cap in f.get("captures", []):
+            if cap["capture"] == "001_smoke":
+                shot_id = (cap.get("pick") or {}).get("shot_id")
+                assert shot_id, f"fixture {folder}/001_smoke sin shot_id en /api/dataset: {cap}"
+                return shot_id
+    raise AssertionError(f"fixture {folder}/001_smoke no aparece en /api/dataset tras escribirla")
+
+
+@check("capturas.signal.contrato", "GET /api/signal trae todas las claves del contrato (spec §4.2)")
+def _signal_contrato(ctx: Ctx) -> None:
+    shot_id, _cap = _first_shot(ctx)
+    data = ctx.json_get(f"/api/signal?shot_id={shot_id}&max_points=500")
+    for key in ("shot_id", "folder", "capture", "fs", "kind", "max_points",
+                "trigger_s", "trigger_source", "geo_flip", "channels"):
+        assert key in data, f"falta la clave {key!r} en /api/signal: {sorted(data)}"
+    channels = data["channels"]
+    assert "hammer" in channels and "geo" in channels, f"channels={sorted(channels)}"
+    assert data["fs"] > 0, f"fs={data['fs']}"
+    for role, ch in channels.items():
+        for key in ("role", "pcb_id", "file", "used_filtered", "invert_applied",
+                    "flip_applied", "samples", "duration_s", "stride", "buckets",
+                    "bucket_dt", "decimated", "y_min", "y_max", "min", "max"):
+            assert key in ch, f"falta la clave {key!r} en channels.{role}: {sorted(ch)}"
+        assert "t" not in ch, f"channels.{role} manda 't': el eje se deriva, no se manda (§4.2.3)"
+        assert ch["samples"] > 0, f"channels.{role}.samples={ch['samples']}"
+        assert len(ch["min"]) == len(ch["max"]) == ch["buckets"], (
+            f"channels.{role}: len(min)={len(ch['min'])} len(max)={len(ch['max'])} "
+            f"buckets={ch['buckets']}")
+        assert ch["buckets"] <= 500, f"channels.{role}.buckets={ch['buckets']} > max_points=500"
+        assert ch["decimated"] is True, (
+            f"channels.{role}.decimated={ch['decimated']}, con max_points=500 y "
+            f"samples={ch['samples']} tiene que decimar")
+        assert ch["bucket_dt"] > 0, f"channels.{role}.bucket_dt={ch['bucket_dt']}"
+        assert ":" not in ch["file"] and "\\" not in ch["file"], (
+            f"channels.{role}.file no es relativo con '/': {ch['file']!r}")
+
+
+@check("capturas.signal.decimado_conserva_picos", "min/max conserva los extremos exactos de la señal cruda")
+def _signal_decimado(ctx: Ctx) -> None:
+    shot_id, _cap = _first_shot(ctx)
+    dec = ctx.json_get(f"/api/signal?shot_id={shot_id}&max_points=500")
+    raw = ctx.json_get(f"/api/signal?shot_id={shot_id}&max_points=100000")
+    for role in ("hammer", "geo"):
+        chd = dec["channels"][role]
+        chr_ = raw["channels"][role]
+        assert chr_["stride"] == 1, (
+            f"{role}: stride={chr_['stride']} con max_points=100000, se esperaba 1 (crudo)")
+        assert chr_["decimated"] is False, f"{role}: decimated={chr_['decimated']} con stride==1"
+        assert chr_["min"] == chr_["max"], f"{role}: con stride==1 min y max tienen que ser iguales"
+        assert chd["buckets"] <= 500 < chr_["samples"], (
+            f"{role}: buckets={chd['buckets']} samples={chr_['samples']}")
+
+        raw_maxs = [v for v in chr_["max"] if v is not None]
+        raw_mins = [v for v in chr_["min"] if v is not None]
+        dec_maxs = [v for v in chd["max"] if v is not None]
+        dec_mins = [v for v in chd["min"] if v is not None]
+        assert raw_maxs and raw_mins and dec_maxs and dec_mins, f"{role}: buckets vacíos"
+
+        max_dec, max_raw = max(dec_maxs), max(raw_maxs)
+        min_dec, min_raw = min(dec_mins), min(raw_mins)
+        assert math.isclose(max_dec, max_raw, rel_tol=1e-5), (
+            f"{role}: max(max_decimado)={max_dec} != max(max_crudo)={max_raw} "
+            f"(un decimado que promedia o saltea se come el pico)")
+        assert math.isclose(min_dec, min_raw, rel_tol=1e-5), (
+            f"{role}: min(min_decimado)={min_dec} != min(min_crudo)={min_raw}")
+
+    body_size = len(json.dumps(dec).encode("utf-8"))
+    assert body_size < 60_000, f"cuerpo del decimado (max_points=500) pesa {body_size} B >= 60 kB"
+
+
+@check("capturas.signal.max_points_clamp", "max_points se clampea a [100,20000], no se rechaza ni explota")
+def _signal_clamp(ctx: Ctx) -> None:
+    shot_id, _cap = _first_shot(ctx)
+
+    data = ctx.json_get(f"/api/signal?shot_id={shot_id}&max_points=1")
+    buckets = data["channels"]["hammer"]["buckets"]
+    assert buckets >= 100, f"max_points=1: buckets={buckets} < 100 (mínimo del clamp)"
+
+    data = ctx.json_get(f"/api/signal?shot_id={shot_id}&max_points=1000000000")
+    buckets = data["channels"]["hammer"]["buckets"]
+    assert buckets <= 20000, f"max_points=1e9: buckets={buckets} > 20000 (máximo del clamp)"
+
+    code, body, _ = ctx.get(f"/api/signal?shot_id={shot_id}&max_points=abc")
+    assert code == 422, f"max_points=abc -> {code} (se esperaba 422, no 400 ni 500): {body[:200]!r}"
+
+
+@check("capturas.signal.sin_nan_en_json", "el JSON no lleva literales NaN/Infinity (no son JSON válido)")
+def _signal_sin_nan(ctx: Ctx) -> None:
+    shot_id, _cap = _first_shot(ctx)
+    code, body, _ = ctx.get(f"/api/signal?shot_id={shot_id}&max_points=2000")
+    assert code == 200, f"/api/signal -> {code}: {body[:200]!r}"
+    assert b"NaN" not in body, "el cuerpo crudo contiene el literal NaN (JSON.parse falla en el navegador)"
+    assert b"Infinity" not in body, "el cuerpo crudo contiene el literal Infinity"
+
+    def _no_constants(name):
+        raise AssertionError(f"json.loads encontró la constante no-JSON {name!r} en el cuerpo")
+
+    json.loads(body.decode("utf-8", "replace"), parse_constant=_no_constants)
+
+
+@check("capturas.signal.kind_filt", "kind distingue raw_f32le.bin de filt_f32le.bin; kind inválido -> 400")
+def _signal_kind(ctx: Ctx) -> None:
+    shot_id, _cap = _first_shot(ctx)
+
+    data = ctx.json_get(f"/api/signal?shot_id={shot_id}&kind=filt&max_points=500")
+    for role, ch in data["channels"].items():
+        assert ch["used_filtered"] is True, f"{role}: used_filtered={ch['used_filtered']} con kind=filt"
+        assert ch["file"].endswith("filt_f32le.bin"), (
+            f"{role}: file={ch['file']!r} no termina en filt_f32le.bin")
+
+    data = ctx.json_get(f"/api/signal?shot_id={shot_id}&kind=raw&max_points=500")
+    for role, ch in data["channels"].items():
+        assert ch["used_filtered"] is False, f"{role}: used_filtered={ch['used_filtered']} con kind=raw"
+        assert ch["file"].endswith("raw_f32le.bin"), (
+            f"{role}: file={ch['file']!r} no termina en raw_f32le.bin")
+
+    code, body, _ = ctx.get(f"/api/signal?shot_id={shot_id}&kind=xxx&max_points=500")
+    assert code == 400, f"kind=xxx -> {code} (se esperaba 400): {body[:200]!r}"
+
+
+@check("capturas.signal.shot_desconocido", "shot_id inexistente -> 404; shot_id vacío -> 400/422, nunca 200/500")
+def _signal_desconocido(ctx: Ctx) -> None:
+    code, body, _ = ctx.get("/api/signal?shot_id=0000000000000000&max_points=500")
+    assert code == 404, f"shot_id inexistente -> {code} (se esperaba 404): {body[:200]!r}"
+
+    code, body, _ = ctx.get("/api/signal?shot_id=&max_points=500")
+    assert code in (400, 422), f"shot_id vacío -> {code} (se esperaba 400 o 422): {body[:200]!r}"
+
+
+@check("capturas.signal.trigger_marcado", "trigger_s sale de la anotación o de auto_pick_shot, nunca inventado")
+def _signal_trigger(ctx: Ctx) -> None:
+    shot_id, cap = _first_shot(ctx)
+    data = ctx.json_get(f"/api/signal?shot_id={shot_id}&max_points=500")
+    trigger_s = data["trigger_s"]
+    duration_s = data["channels"]["hammer"]["duration_s"]
+    assert trigger_s is not None and math.isfinite(trigger_s), f"trigger_s={trigger_s} no finito"
+    assert 0 <= trigger_s <= duration_s, f"trigger_s={trigger_s} fuera de [0, {duration_s}]"
+    assert data["trigger_source"] in ("annotation", "auto"), f"trigger_source={data['trigger_source']!r}"
+
+    pick_trigger = (cap.get("pick") or {}).get("trigger_s")
+    if pick_trigger is not None:
+        assert data["trigger_source"] == "annotation", (
+            f"/api/dataset trae pick.trigger_s={pick_trigger} pero /api/signal dice "
+            f"trigger_source={data['trigger_source']!r}")
+        assert abs(data["trigger_s"] - pick_trigger) < 1e-9, (
+            f"trigger_s difiere: /api/signal={data['trigger_s']} /api/dataset={pick_trigger}")
+    else:
+        assert data["trigger_source"] == "auto", (
+            f"/api/dataset no trae pick.trigger_s pero /api/signal dice "
+            f"trigger_source={data['trigger_source']!r}")
+
+
+@check("capturas.signal.no_bloquea", "GET /api/signal no bloquea el event loop (handler síncrono, spec §4.6)")
+def _signal_no_bloquea(ctx: Ctx) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    shot_id, _cap = _first_shot(ctx)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futs = [pool.submit(ctx.get, f"/api/signal?shot_id={shot_id}&max_points=2000&_r={i}")
+               for i in range(3)]
+
+        started = time.monotonic()
+        code, _, _ = ctx.get("/health")
+        elapsed_health = time.monotonic() - started
+        assert code == 200, f"/health -> {code}"
+        assert elapsed_health < 2.0, (
+            f"/health tardó {elapsed_health:.1f}s mientras /api/signal corría en paralelo: "
+            f"¿el handler quedó async def con trabajo bloqueante adentro? (spec §4.6)")
+
+        started = time.monotonic()
+        ctx.json_get("/api/jobs")
+        elapsed_jobs = time.monotonic() - started
+        assert elapsed_jobs < 2.0, f"/api/jobs tardó {elapsed_jobs:.1f}s"
+
+        for i, fut in enumerate(futs):
+            code, body, _ = fut.result(timeout=30)
+            assert code == 200, f"/api/signal #{i} -> {code}: {body[:200]!r}"
+
+
+@check("capturas.signal.ui_usa_endpoint", "el JS del visor usa /api/signal y está enganchado a la tabla")
+def _signal_ui(ctx: Ctx) -> None:
+    code, body, _ = ctx.get("/static/js/tabs/capturas_signal.js")
+    assert code == 200, f"/static/js/tabs/capturas_signal.js -> {code}"
+    js = body.decode("utf-8", "replace")
+    for token in ("/api/signal", "max_points", "geo_flip"):
+        assert token in js, f"capturas_signal.js no contiene {token!r}"
+
+    code, body, _ = ctx.get("/static/js/plot.js")
+    assert code == 200, f"/static/js/plot.js -> {code}"
+    assert "export function drawMinMax" in body.decode("utf-8", "replace"), (
+        "plot.js no exporta drawMinMax")
+
+    code, body, _ = ctx.get("/static/js/tabs/capturas.js")
+    assert code == 200, f"/static/js/tabs/capturas.js -> {code}"
+    caps_js = body.decode("utf-8", "replace")
+    assert "capturas_signal.js" in caps_js, "capturas.js no importa capturas_signal.js"
+    assert "shot_id" in caps_js, "capturas.js no usa shot_id para habilitar el botón ver"
+
+
+@check("capturas.signal.polaridad_fija", "convención fija: hammer sale invertido, geo no (fixture sintética)",
+      mode="sandbox")
+def _signal_polaridad(ctx: Ctx) -> None:
+    shot_id = _write_fixture(ctx, "smoke_polaridad", spike=1.0, with_nan=False)
+    data = ctx.json_get(f"/api/signal?shot_id={shot_id}&max_points=100000")
+    hammer = data["channels"]["hammer"]
+    geo = data["channels"]["geo"]
+
+    h_min = min(v for v in hammer["min"] if v is not None)
+    h_max = max(v for v in hammer["max"] if v is not None)
+    g_min = min(v for v in geo["min"] if v is not None)
+    g_max = max(v for v in geo["max"] if v is not None)
+    assert h_min <= -0.9, f"hammer: min={h_min}, se esperaba <= -0.9 (invertido)"
+    assert h_max <= 0.1, f"hammer: max={h_max}, se esperaba <= 0.1 (invertido, no queda el +spike)"
+    assert g_max >= 0.9, f"geo: max={g_max}, se esperaba >= 0.9 (no invertido)"
+    assert g_min >= -0.1, f"geo: min={g_min}, se esperaba >= -0.1 (no invertido)"
+
+    assert hammer["invert_applied"] is True, f"hammer.invert_applied={hammer['invert_applied']}"
+    assert geo["invert_applied"] is False, f"geo.invert_applied={geo['invert_applied']}"
+    assert hammer["flip_applied"] is False, f"hammer.flip_applied={hammer['flip_applied']}"
+    assert geo["flip_applied"] is False, f"geo.flip_applied={geo['flip_applied']}"
+
+    # La fixture tiene el golpe en la muestra 998-1002 de 4000 a fs=1000, así
+    # que auto_pick_shot (onset: una muestra antes del flanco) tiene que dar
+    # trigger_s ~= 0.997. Un trigger fuera de [0.9, 1.1] está inventado (p.ej.
+    # trigger_s=0.0 fijo), no sale de auto_pick_shot: revisión del intento 1.
+    assert 0.9 <= data["trigger_s"] <= 1.1, (
+        f"trigger_s={data['trigger_s']}: la fixture tiene el golpe en la muestra "
+        f"1000 de 4000 a fs=1000, o sea ~0.997 s. Un trigger fuera de [0.9, 1.1] "
+        f"está inventado, no sale de auto_pick_shot")
+    assert data["trigger_source"] == "auto", (
+        f"trigger_source={data['trigger_source']!r}, se esperaba 'auto' (la fixture "
+        f"no tiene anotación). NOTA: la rama trigger_source=='annotation' no tiene "
+        f"cobertura en este ítem porque hoy reviewed_count==0 y este ítem no puede "
+        f"escribir anotaciones (spec §8.1) — queda declarado, no tapado.")
+
+
+@check("capturas.signal.nan_a_null", "NaN de la señal se convierte a null, nunca a 0.0 ni pasa crudo",
+      mode="sandbox")
+def _signal_nan(ctx: Ctx) -> None:
+    shot_id = _write_fixture(ctx, "smoke_nan", spike=0.8, with_nan=True)
+    code, body, _ = ctx.get(f"/api/signal?shot_id={shot_id}&max_points=100000")
+    assert code == 200, f"/api/signal -> {code}: {body[:200]!r}"
+    assert b"NaN" not in body, "el cuerpo crudo contiene el literal NaN"
+
+    data = json.loads(body.decode("utf-8", "replace"))
+    geo = data["channels"]["geo"]
+    assert geo["stride"] == 1, f"geo.stride={geo['stride']}, se esperaba 1 (max_points alto)"
+    assert None in geo["min"], "geo.min no tiene ningún null: el NaN de la fixture no se convirtió"
+    assert None in geo["max"], "geo.max no tiene ningún null: el NaN de la fixture no se convirtió"
+    numeric = [v for v in geo["min"] if v is not None]
+    assert numeric, "geo.min no tiene ningún bucket con dato real (además de los null)"
+
+
+@check("capturas.signal.geo_flip_override", "geo_flip=1 invierte sólo el geo, en preview, sin tocar el hammer",
+      mode="sandbox")
+def _signal_geo_flip(ctx: Ctx) -> None:
+    shot_id = _write_fixture(ctx, "smoke_polaridad", spike=1.0, with_nan=False)
+
+    base = ctx.json_get(f"/api/signal?shot_id={shot_id}&max_points=100000")
+    flipped = ctx.json_get(f"/api/signal?shot_id={shot_id}&max_points=100000&geo_flip=1")
+
+    g0, g1 = base["channels"]["geo"], flipped["channels"]["geo"]
+    g0_max = max(v for v in g0["max"] if v is not None)
+    g1_min = min(v for v in g1["min"] if v is not None)
+    g1_max = max(v for v in g1["max"] if v is not None)
+    assert g0_max >= 0.9, f"sin geo_flip: geo.max={g0_max}, se esperaba >= 0.9"
+    assert g0["flip_applied"] is False, f"sin geo_flip: geo.flip_applied={g0['flip_applied']}"
+    assert g1_min <= -0.9, f"con geo_flip=1: geo.min={g1_min}, se esperaba <= -0.9"
+    assert g1_max <= 0.1, f"con geo_flip=1: geo.max={g1_max}, se esperaba <= 0.1"
+    assert g1["flip_applied"] is True, f"con geo_flip=1: geo.flip_applied={g1['flip_applied']}"
+
+    h0, h1 = base["channels"]["hammer"], flipped["channels"]["hammer"]
+    assert h0["min"] == h1["min"] and h0["max"] == h1["max"], (
+        "el hammer cambió entre las dos respuestas: geo_flip no tiene que tocarlo")
 
 
 # ── Arranque del servidor bajo prueba ─────────────────────────────────────────

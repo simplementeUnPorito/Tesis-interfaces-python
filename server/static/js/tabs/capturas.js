@@ -1,9 +1,14 @@
 // Tab Capturas: mudanza literal de renderJobs/renderDataset (app.py:151-214).
+// El visor de señal (§3.1) se monta aparte, en capturas_signal.js, para no
+// volver a tocar renderJobs/renderDataset, que ya andan.
+import { mountViewer } from './capturas_signal.js';
 
 const fmt = (n, d = 1) => (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
 
 export function mount(root) {
   root.innerHTML = `
+    <section class="viewer" id="viewer-host"></section>
+
     <section>
       <h2>Subidas</h2>
       <div class="wrap"><table id="jobs"><thead><tr>
@@ -25,6 +30,19 @@ export function mount(root) {
       <div id="dataset"></div>
     </section>
   `;
+
+  const viewer = mountViewer(root.querySelector('#viewer-host'));
+
+  // Delegado en el contenedor: renderDataset reescribe el innerHTML en cada
+  // tick de 3 s y un listener puesto por fila se perdería (spec §5.1).
+  root.querySelector('#dataset').addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-shot]');
+    if (!btn) return;
+    viewer.show(btn.dataset.shot, {
+      folder: btn.dataset.folder || '',
+      capture: btn.dataset.capture || '',
+    });
+  });
 
   async function tick() {
     try {
@@ -60,7 +78,10 @@ export function mount(root) {
 
   tick();
   const timer = setInterval(tick, 3000);
-  return () => clearInterval(timer);
+  return () => {
+    clearInterval(timer);
+    viewer.destroy();
+  };
 }
 
 function renderJobs(root, rows) {
@@ -103,7 +124,7 @@ function renderDataset(root, ds) {
     </h3>
     <div class="wrap"><table><thead><tr>
       <th>Captura</th><th>Nodos</th><th class="num">fs</th><th class="num">seg</th>
-      <th>Estado</th><th class="num">trigger (s)</th><th>validado</th>
+      <th>Estado</th><th class="num">trigger (s)</th><th>validado</th><th>señal</th>
     </tr></thead><tbody>
     ${f.captures.map((c) => {
       const nodos = c.nodes.map((n) =>
@@ -115,6 +136,15 @@ function renderDataset(root, ds) {
         ? '<span class="tag listo">completa</span>'
         : `<span class="tag pendiente">sin ${c.has_hammer ? 'geófono' : 'martillo'}</span>`;
       const p = c.pick;
+      // "esto se puede dibujar" == pick.shot_id presente. NO c.pickable: el
+      // catálogo y discover_dataset deducen el rol distinto (spec §5.1) y
+      // difieren en 194 vs 186/9 capturas — ver DUDAS_LUNES.md.
+      const verCell = (p && p.shot_id)
+        ? `<button type="button" data-shot="${p.shot_id}" ` +
+          `data-folder="${f.folder.replace(/"/g, '&quot;')}" ` +
+          `data-capture="${c.capture.replace(/"/g, '&quot;')}">ver</button>`
+        : `<span class="sub" title="no hay disparo hammer+geo asociado ` +
+          `(sin martillo, o captura duplicada — PORT_PLAN §5.5)">—</span>`;
       return `<tr>
         <td>${c.capture}</td>
         <td>${nodos}</td>
@@ -123,6 +153,7 @@ function renderDataset(root, ds) {
         <td>${estado}</td>
         <td class="num">${p && p.trigger_s !== null ? fmt(p.trigger_s, 4) : '—'}</td>
         <td>${p && p.reviewed ? 'sí' : '—'}</td>
+        <td>${verCell}</td>
       </tr>`;
     }).join('')}
     </tbody></table></div>`).join('');
