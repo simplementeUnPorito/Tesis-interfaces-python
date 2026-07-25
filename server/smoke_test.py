@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -331,6 +332,135 @@ def _worker_no_bloquea(ctx: Ctx) -> None:
     elapsed_jobs = time.monotonic() - started
     assert elapsed_jobs < 2.0, f"/api/jobs tardó {elapsed_jobs:.1f}s"
     assert len(jobs.get("jobs", [])) >= 3, f"/api/jobs listó {len(jobs.get('jobs', []))} < 3"
+
+
+# ── Checks tabs (§2: tabs de navegación + toggle de tema) ─────────────────────
+def _index_text(ctx: Ctx) -> str:
+    code, body, _ = ctx.get("/")
+    assert code == 200, f"/ -> {code}"
+    return body.decode("utf-8", "replace")
+
+
+TAB_NAMES = ("Capturas", "Filtros", "Agrupamiento", "Enfase",
+             "Promedios / arrivals", "Waterfall", "MASW", "Borrado")
+
+MASW_SUBTABS = (
+    ("1. Dispersion", "dispersion"),
+    ("2. Inversion", "inversion"),
+    ("3. Perfil Vs", "perfil"),
+)
+
+PANELES_PENDIENTES = (
+    "filtros", "agrupamiento", "enfase", "promedios", "waterfall",
+    "subpanel-dispersion", "subpanel-inversion", "subpanel-perfil",
+)
+
+
+@check("tabs.nombres_y_orden", "los 8 tabs de la app aparecen en / en el orden exacto")
+def _tabs_nombres_y_orden(ctx: Ctx) -> None:
+    text = _index_text(ctx)
+    positions = []
+    for nombre in TAB_NAMES:
+        # Bordes de letra: si no, "Waterfall" matchea dentro de "Waterfalll".
+        m = re.search(r'(?<![A-Za-z])' + re.escape(nombre) + r'(?![A-Za-z])', text)
+        assert m, f"falta el tab {nombre!r} en /"
+        positions.append(m.start())
+    for a, b, nombre_a, nombre_b in zip(positions, positions[1:], TAB_NAMES, TAB_NAMES[1:]):
+        assert a < b, f"orden de tabs roto: {nombre_a!r} debería ir antes que {nombre_b!r}"
+    count = text.count('data-tab="')
+    assert count == 8, f'se esperaban 8 data-tab="..." y hay {count}'
+
+
+@check("tabs.masw_subtabs", "las 3 subtabs de MASW están en / con sus data-subtab e id")
+def _tabs_masw_subtabs(ctx: Ctx) -> None:
+    text = _index_text(ctx)
+    for nombre, subtab in MASW_SUBTABS:
+        assert nombre in text, f"falta la subtab {nombre!r} en /"
+        assert f'data-subtab="{subtab}"' in text, f'falta data-subtab="{subtab}" en /'
+        assert f'id="subpanel-{subtab}"' in text, f'falta id="subpanel-{subtab}" en /'
+
+
+@check("tabs.panel_por_tab", "cada data-tab tiene su panel-<X> y no hay paneles huérfanos")
+def _tabs_panel_por_tab(ctx: Ctx) -> None:
+    text = _index_text(ctx)
+    tabs = re.findall(r'data-tab="([a-z]+)"', text)
+    assert tabs, "no se encontró ningún data-tab en /"
+    for name in tabs:
+        assert f'id="panel-{name}"' in text, (
+            f'el botón data-tab="{name}" no tiene su id="panel-{name}"')
+    panels = re.findall(r'id="panel-([a-z]+)"', text)
+    for name in panels:
+        assert f'data-tab="{name}"' in text, (
+            f'panel-{name} no tiene ningún botón data-tab="{name}" (panel huérfano)')
+
+
+@check("tabs.placeholders_honestos", "los paneles pendientes dicen qué falta y dónde está escrito")
+def _tabs_placeholders_honestos(ctx: Ctx) -> None:
+    text = _index_text(ctx)
+    # Límites de bloque: el próximo id="panel-..." o id="subpanel-..." (o fin de
+    # documento). Nunca se confunden entre sí: "subpanel-" no contiene la
+    # subcadena literal 'id="panel-'.
+    markers = [(m.start(), m.group(1))
+               for m in re.finditer(r'id="((?:sub)?panel-[a-z]+)"', text)]
+    for target in PANELES_PENDIENTES:
+        marker_id = target if target.startswith("subpanel-") else f"panel-{target}"
+        starts = [pos for pos, name in markers if name == marker_id]
+        assert starts, f'no se encontró id="{marker_id}" en /'
+        start = starts[0]
+        later = [pos for pos, _ in markers if pos > start]
+        end = min(later) if later else len(text)
+        block = text[start:end]
+        assert "Falta:" in block, f'{marker_id}: falta el literal "Falta:" en su placeholder'
+        assert "§" in block, f'{marker_id}: falta la referencia "§" al PORT_PLAN'
+        assert len(block) >= 120, f'{marker_id}: placeholder de {len(block)} caracteres (< 120)'
+
+
+@check("tabs.tema_toggle", "el botón de tema y las reglas [data-theme] de los dos temas existen")
+def _tabs_tema_toggle(ctx: Ctx) -> None:
+    text = _index_text(ctx)
+    assert 'id="btn-theme"' in text, 'falta id="btn-theme" en /'
+
+    code, body, _ = ctx.get("/static/js/theme.js")
+    assert code == 200, f"/static/js/theme.js -> {code}"
+    theme_js = body.decode("utf-8", "replace")
+    for token in ("localStorage", "data-theme", "prefers-color-scheme"):
+        assert token in theme_js, f"theme.js no contiene {token!r}"
+
+    code, body, _ = ctx.get("/static/css/app.css")
+    assert code == 200, f"/static/css/app.css -> {code}"
+    css = body.decode("utf-8", "replace")
+    assert '[data-theme="dark"]' in css, 'app.css no define [data-theme="dark"]'
+    assert '[data-theme="light"]' in css, 'app.css no define [data-theme="light"]'
+
+
+@check("tabs.tema_sin_flash", "theme-boot.js corre en <head> como script clásico, misma clave que theme.js")
+def _tabs_tema_sin_flash(ctx: Ctx) -> None:
+    text = _index_text(ctx)
+    head_end = text.find("</head>")
+    assert head_end >= 0, "/ no tiene </head>"
+    boot_pos = text.find("/static/js/theme-boot.js")
+    assert boot_pos >= 0, "/ no referencia /static/js/theme-boot.js"
+    assert boot_pos < head_end, "theme-boot.js debe estar antes de </head>"
+
+    tag_start = text.rfind("<script", 0, boot_pos)
+    tag_end = text.find(">", boot_pos)
+    tag = text[tag_start:tag_end + 1]
+    assert 'type="module"' not in tag, "theme-boot.js no puede ser type=module (corre diferido)"
+    assert "defer" not in tag, "theme-boot.js no puede ser defer (corre diferido)"
+
+    code, body, _ = ctx.get("/static/js/theme-boot.js")
+    assert code == 200, f"/static/js/theme-boot.js -> {code}"
+    boot_js = body.decode("utf-8", "replace")
+
+    code, body, _ = ctx.get("/static/js/theme.js")
+    assert code == 200, f"/static/js/theme.js -> {code}"
+    theme_js = body.decode("utf-8", "replace")
+
+    m = re.search(r"localStorage\.getItem\('([^']+)'\)", boot_js)
+    assert m, "theme-boot.js no lee localStorage.getItem('...')"
+    key_boot = m.group(1)
+    assert key_boot in theme_js, (
+        f"la clave {key_boot!r} de theme-boot.js no aparece igual en theme.js")
 
 
 # ── Arranque del servidor bajo prueba ─────────────────────────────────────────

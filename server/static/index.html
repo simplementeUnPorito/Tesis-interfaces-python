@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Servidor de datos - Geophone</title>
 <link rel="stylesheet" href="/static/css/app.css">
+<script src="/static/js/theme-boot.js"></script>
 </head>
 <body>
 <header class="topbar">
@@ -28,22 +29,56 @@ preprocesan solas. Acá se ve qué está listo para validar.</p>
 <main id="tab-panels">
   <section id="panel-capturas" class="tab-panel active"></section>
   <section id="panel-filtros" class="tab-panel" hidden>
-    <p class="empty">Filtros: pendiente de porteo.</p>
+    <h2>Filtros</h2>
+    <p class="placeholder">Falta: el pasa-banda Butterworth de fase cero (los
+    mismos parámetros que la app, persistidos en el mismo archivo) sobre
+    frd.load_filter_settings / save_filter_settings + frd.apply_bandpass_filter.
+    PORT_PLAN §3.2.</p>
   </section>
   <section id="panel-agrupamiento" class="tab-panel" hidden>
-    <p class="empty">Agrupamiento: pendiente de porteo.</p>
+    <h2>Agrupamiento</h2>
+    <p class="placeholder">Falta: agrupar capturas por distancia y armar el
+    promedio por carpeta. PORT_PLAN §3.3.</p>
   </section>
   <section id="panel-enfase" class="tab-panel" hidden>
-    <p class="empty">Enfase: pendiente de porteo.</p>
+    <h2>Enfase</h2>
+    <p class="placeholder">Falta: el enfase por carpeta (no por captura) con
+    frd.load_alignment_offsets / save_alignment_offsets. PORT_PLAN §3.2.</p>
   </section>
   <section id="panel-promedios" class="tab-panel" hidden>
-    <p class="empty">Promedios / arrivals: pendiente de porteo.</p>
+    <h2>Promedios / arrivals</h2>
+    <p class="placeholder">Falta: promedios por carpeta con
+    frd.load_average_arrivals / save_average_arrivals y el botón "Rechazar esta
+    carpeta", que excluye del promedio sin invalidar las capturas. PORT_PLAN §3.3.</p>
   </section>
   <section id="panel-waterfall" class="tab-panel" hidden>
-    <p class="empty">Waterfall: pendiente de porteo.</p>
+    <h2>Waterfall</h2>
+    <p class="placeholder">Falta: la imagen de waterfall, la polaridad por punto
+    (geo_flip), "Invertir traza" / "Auto polaridad" y la persistencia json+npz de
+    la app. PORT_PLAN §3.4.</p>
   </section>
   <section id="panel-masw" class="tab-panel" hidden>
-    <p class="empty">MASW: pendiente de porteo.</p>
+    <nav class="subtabs" id="masw-subtabs">
+      <button class="subtab-btn active" data-subtab="dispersion">1. Dispersion</button>
+      <button class="subtab-btn" data-subtab="inversion">2. Inversion</button>
+      <button class="subtab-btn" data-subtab="perfil">3. Perfil Vs</button>
+    </nav>
+    <section id="subpanel-dispersion" class="subtab-panel">
+      <h2>1. Dispersion</h2>
+      <p class="placeholder">Falta: la imagen f-v (masw_dispersion.py) y las
+      regiones-polígono editables que dan N curvas por modo. PORT_PLAN §3.5.</p>
+    </section>
+    <section id="subpanel-inversion" class="subtab-panel" hidden>
+      <h2>2. Inversion</h2>
+      <p class="placeholder">Falta: correr los backends de masw_backends.py
+      como trabajos del Pipeline (tardan minutos: no van en el request) y mostrar
+      progreso. PORT_PLAN §3.5.</p>
+    </section>
+    <section id="subpanel-perfil" class="subtab-panel" hidden>
+      <h2>3. Perfil Vs</h2>
+      <p class="placeholder">Falta: el perfil Vs resultante de la inversión, con
+      curva editable. PORT_PLAN §3.5.</p>
+    </section>
   </section>
   <section id="panel-borrado" class="tab-panel" hidden></section>
 </main>

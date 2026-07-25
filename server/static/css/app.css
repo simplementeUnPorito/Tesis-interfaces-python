@@ -82,6 +82,34 @@ p.sub { margin: 0 0 24px; color: var(--th-fg); font-size: .9rem }
 .tab-panel { display: block }
 .tab-panel[hidden] { display: none }
 
+.subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--panel-border);
+  padding-bottom: 6px;
+}
+.subtab-btn {
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
+  color: var(--fg);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: .78rem;
+  cursor: pointer;
+}
+.subtab-btn.active {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+}
+
+.subtab-panel { display: block }
+.subtab-panel[hidden] { display: none }
+
+.placeholder { color: var(--th-fg); font-size: .9rem; padding: 8px 0 }
+
 section {
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);

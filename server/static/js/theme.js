@@ -1,7 +1,9 @@
 // Toggle claro/oscuro. Estructura calcada de initTheme/applyTheme en
 // master/data/js/app.js, pero usando data-theme en :root en vez de una clase
 // en <body> (así lo pide PORT_PLAN §2).
-const STORAGE_KEY = 'geo-theme';
+// STORAGE_KEY se duplica a propósito en theme-boot.js (script clásico, no
+// puede importar este módulo): si cambia acá, cambiarla también ahí.
+export const STORAGE_KEY = 'geo-theme';
 
 function systemPrefersDark() {
   return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -25,6 +27,12 @@ function saveTheme(theme) {
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
+  const btn = document.getElementById('btn-theme');
+  if (btn) {
+    const isDark = theme === 'dark';
+    btn.setAttribute('aria-pressed', String(isDark));
+    btn.title = isDark ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro';
+  }
 }
 
 export function initTheme() {

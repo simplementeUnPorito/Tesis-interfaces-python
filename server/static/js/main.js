@@ -1,10 +1,12 @@
 import { initTheme } from './theme.js';
 import * as capturas from './tabs/capturas.js';
 import * as borrado from './tabs/borrado.js';
+import * as masw from './tabs/masw.js';
 
 const TABS = {
   capturas: capturas,
   borrado: borrado,
+  masw: masw,
 };
 
 let unmountCurrent = null;
