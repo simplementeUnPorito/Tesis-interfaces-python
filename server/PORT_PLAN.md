@@ -134,9 +134,23 @@ Reusar: `frd.load_signal`, `frd.auto_pick_shot`, `frd.detect_hammer_trigger`,
 
 - Parámetros de filtro persistidos con `frd.load_filter_settings` /
   `save_filter_settings` (ya existen, mismo archivo que la app).
-- Filtrado con `signal_proc.py`: `dcRemove`, `filtFilt`, `harmonicNotch`,
-  `hilbertEnvelope`. Son las mismas funciones que usa la app; llamarlas, no
-  reescribirlas.
+- Filtrado: los cuatro nombres de abajo están escritos en camelCase porque vienen
+  del SPA del maestro, que ya los tiene implementados en JavaScript. **Están
+  implementados, no hay que inventar ninguno**; hay versiones en más de un lugar
+  (JS del maestro, Python, MATLAB). Buscá la que te convenga para el caso y
+  **llamala, no la reescribas** — si te da ganas de copiar una fórmula, es señal
+  de que hay que exponer la función que ya existe (§0.4). Qué hace cada una:
+
+  | Nombre | Qué hace | Dónde hay una |
+  |---|---|---|
+  | `dcRemove` | quita la componente de continua de la señal | `master/data/js/signal_proc.js:224`; en Python `geophone_scope/signal_proc.py:367` `dc_remove` |
+  | `filtFilt` | pasabanda **Butterworth de fase cero** (filtra ida y vuelta, no corre los tiempos de arribo — crítico para el picking) | `signal_proc.js:195`; en Python `frd.apply_bandpass_filter` / `design_bandpass_filter` (SOS + `sosfiltfilt`), que es lo que usa el tab Filtros de la app |
+  | `harmonicNotch` | cancela el ruido de línea: estima **por RMS** las senoidales en los armónicos de la frecuencia de línea y las resta de la señal | `signal_proc.js`; el maestro es donde está mejor explicado — ver `master/data/js/app.js:1298` (LS de armónicos sobre la ventana completa, `y(n)−f(n)`) y `LINE_NOTCH_F0` / `LINE_NOTCH_SEARCH_HZ` en `config.js`; en Python `signal_proc.py:235` `harmonic_notch` |
+  | `hilbertEnvelope` | envolvente por transformada de Hilbert | `signal_proc.js:284` |
+
+  **Orden de la cadena**: FIR → DC → notch. El notch va último y sobre la ventana
+  completa (está así en `app.js:1298`); aplicarlo antes, o por trozos, deja
+  residuo de línea.
 - Enfase por **carpeta** (no por captura): así lo hace la app y así limpia
   offsets por señal. Offsets con `frd.load_alignment_offsets` /
   `save_alignment_offsets`.
