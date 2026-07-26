@@ -3,13 +3,13 @@
 
 export function mount(root) {
   root.innerHTML = `
-    <section>
+    <section class="card">
       <h2>Borrado</h2>
-      <p class="sub">Nada se borra solo. El ZIP original se conserva salvo que lo pidas.</p>
-      <div class="row" style="margin-bottom:12px">
-        <button id="btn-del-sin-hammer-2">Borrar las capturas sin martillo</button>
+      <p class="note">Nada se borra solo. El ZIP original se conserva salvo que lo pidas.</p>
+      <div class="toolbar">
+        <button id="btn-del-sin-hammer-2" type="button">Borrar las capturas sin martillo</button>
       </div>
-      <p class="sub">Para borrar una carpeta puntual, usá el botón "borrar" en la tabla
+      <p class="note">Para borrar una carpeta puntual, usá el botón «borrar» en la tabla
       de la tab Capturas.</p>
     </section>
   `;

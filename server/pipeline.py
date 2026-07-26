@@ -15,8 +15,8 @@ trabajar sobre el mismo volumen sin traducciones de por medio.
 from __future__ import annotations
 
 import json
+import os
 import queue
-import sys
 import threading
 import time
 import traceback
@@ -25,15 +25,20 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-# geophone_scope es hermano de este paquete: se agrega al path en vez de
-# duplicar la capa de datos. Si esto se muda, mudar la ruta.
-_GS = Path(__file__).resolve().parent.parent / "geophone_scope"
-if str(_GS) not in sys.path:
-    sys.path.insert(0, str(_GS))
-
-import field_review_data as frd   # noqa: E402  (después del sys.path)
+# La capa de datos compartida con la app PyQt se resuelve en _gs (que hace el
+# sys.path). Se re-exporta acá porque el resto del paquete ya importa
+# `from .pipeline import frd`.
+from ._gs import frd   # noqa: E402
 
 from .catalog import scan_catalog   # noqa: E402
+
+
+def _invalidate_caches(raw_root) -> None:
+    """Tira los caches de escaneo. Import diferido: ``captures``/``datacache``
+    no pueden importarse arriba sin volver circular a ``catalog``."""
+    from . import captures, datacache
+    datacache.invalidate(raw_root)
+    captures.invalidate_scan(raw_root)
 
 
 def _now() -> str:
@@ -99,6 +104,11 @@ class Pipeline:
         self._q: queue.Queue[str] = queue.Queue()
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
+        # Lock aparte para escribir el archivo de estado. No se puede usar
+        # `_lock` (lo toman los handlers y bloquearía lecturas por un fsync),
+        # pero sin él dos ingestas simultáneas escriben el MISMO .tmp y en
+        # Windows la segunda muere con PermissionError, perdiendo la cola.
+        self._state_io_lock = threading.Lock()
         self._load_state()
         self._worker = threading.Thread(target=self._run, name="pipeline", daemon=True)
         self._worker.start()
@@ -138,9 +148,16 @@ class Pipeline:
         with self._lock:
             data = {"updated_at": _now(),
                     "jobs": [j.to_dict() for j in self._jobs.values()]}
-        tmp = self.state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self.state_path)
+        blob = json.dumps(data, indent=2, ensure_ascii=False)
+        with self._state_io_lock:
+            # Nombre único por escritura: si el replace de otro hilo llegara a
+            # solaparse igual, no comparten el archivo temporal.
+            tmp = self.state_path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                tmp.write_text(blob, encoding="utf-8")
+                tmp.replace(self.state_path)
+            finally:
+                tmp.unlink(missing_ok=True)
 
     def jobs(self) -> list[dict]:
         with self._lock:
@@ -225,6 +242,7 @@ class Pipeline:
                     job.log.append(f"{_now()} borrado por el usuario"
                                    + (" (con ZIP)" if with_zip else " (ZIP conservado)"))
         self._save_state()
+        _invalidate_caches(self.raw_root)
         return {"ok": True, "folder": safe, "zips_deleted": zips}
 
     # ── worker ──────────────────────────────────────────────────────────────
@@ -250,6 +268,10 @@ class Pipeline:
                           error=traceback.format_exc(limit=3),
                           log_line="falló el procesado")
             finally:
+                # Entró (o se intentó meter) una captura nueva: el escaneo
+                # cacheado quedó viejo. Se tira acá y no en cada rama para que
+                # ninguna salida se olvide de hacerlo.
+                _invalidate_caches(self.raw_root)
                 self._q.task_done()
 
     def _process(self, job_id: str) -> None:

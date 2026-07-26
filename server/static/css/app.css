@@ -1,151 +1,624 @@
+/* Consola de revisión de datos de campo.
+ *
+ * Criterio: el color saturado es dato (hammer, geo, trigger, estados); la
+ * interfaz alrededor es neutra. Los valores de --sig-* y --plot-* replican
+ * _plot_colors() y _style_plots() de field_review_app.py, y el JS del visor los
+ * lee de acá para que traza, punto de la tabla y leyenda no se desincronicen.
+ */
+
+/* ── Tokens ──────────────────────────────────────────────────────────────── */
 :root {
   color-scheme: light dark;
-  --bg: #f6f7f9;
+
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --surface-2: #eef1f4;
+  --line: #d8dee5;
+  --line-soft: #e8ecf0;
   --fg: #16181d;
-  --panel-bg: #fff;
-  --panel-border: #e3e6ea;
-  --th-fg: #6b7280;
-  --td-border: #eceef1;
-  --code-bg: #f1f3f5;
+  --fg-muted: #5b6673;
+  --fg-faint: #8b95a3;
+  --accent: #1f5f9e;
+  --accent-soft: #d5e7f8;
+  --focus: #2f7fc4;
+
+  /* Señal (field_review_app.py:1510, tema claro) */
+  --sig-hammer: #cc5a00;
+  --sig-geo: #0066cc;
+  --sig-trigger: #e67e22;
+  --sig-overlay: rgba(120, 120, 120, .45);   /* _plot_colors, overlay claro */
+  --sig-ok-avg: #d62728;                     /* _OK_AVERAGE_COLOR */
+  --sig-folder-avg: #2ca02c;                 /* _FOLDER_AVERAGE_COLOR */
+  --sig-zone: #1f77b4;                       /* líneas de la zona auto */
+
+  --plot-bg: #ffffff;
+  --plot-grid: rgba(31, 41, 55, 0.16);
+  --plot-axis: #475569;
+
+  --ok-bg: #dcfce7;   --ok-fg: #166534;
+  --warn-bg: #fef3c7; --warn-fg: #92400e;
+  --bad-bg: #fee2e2;  --bad-fg: #991b1b;
+
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 8px;
+  --radius-sm: 5px;
+  /* Alto de la barra + tabs + padding: lo que le queda al área de trabajo. */
+  --chrome-h: 120px;
 }
+
+:root[data-theme="light"] { color-scheme: light }
+
 :root[data-theme="dark"] {
-  --bg: #12141a;
-  --fg: #e8eaee;
-  --panel-bg: #1a1d24;
-  --panel-border: #2a2f38;
-  --th-fg: #9ca3af;
-  --td-border: #262b34;
-  --code-bg: #22262e;
+  color-scheme: dark;
+  --bg: #0e1116;
+  --surface: #151a21;
+  --surface-2: #1b212a;
+  --line: #29313d;
+  --line-soft: #1f2630;
+  --fg: #e6eaf0;
+  --fg-muted: #9aa5b4;
+  --fg-faint: #6b7686;
+  --accent: #7cc0f5;
+  --accent-soft: #1d3348;
+  --focus: #7cc0f5;
+
+  /* Señal (field_review_app.py:1510, tema oscuro) */
+  --sig-hammer: #ffb86b;
+  --sig-geo: #69b7ff;
+  --sig-trigger: #ff9f43;
+  --sig-overlay: rgba(210, 210, 210, .33);
+  --sig-ok-avg: #ff6b6b;
+  --sig-folder-avg: #3ddc84;
+  --sig-zone: #3da5ff;
+
+  --plot-bg: #0b0e13;
+  --plot-grid: rgba(255, 255, 255, 0.14);
+  --plot-axis: #93a1b3;
+
+  --ok-bg: #14331f;   --ok-fg: #7ee2a0;
+  --warn-bg: #3a2c10; --warn-fg: #f0c26b;
+  --bad-bg: #3a1a1a;  --bad-fg: #ff9a92;
 }
+
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #12141a;
-    --fg: #e8eaee;
-    --panel-bg: #1a1d24;
-    --panel-border: #2a2f38;
-    --th-fg: #9ca3af;
-    --td-border: #262b34;
-    --code-bg: #22262e;
+    color-scheme: dark;
+    --bg: #0e1116;
+    --surface: #151a21;
+    --surface-2: #1b212a;
+    --line: #29313d;
+    --line-soft: #1f2630;
+    --fg: #e6eaf0;
+    --fg-muted: #9aa5b4;
+    --fg-faint: #6b7686;
+    --accent: #7cc0f5;
+    --accent-soft: #1d3348;
+    --focus: #7cc0f5;
+    --sig-hammer: #ffb86b;
+    --sig-geo: #69b7ff;
+    --sig-trigger: #ff9f43;
+    --sig-overlay: rgba(210, 210, 210, .33);
+    --sig-ok-avg: #ff6b6b;
+    --sig-folder-avg: #3ddc84;
+    --sig-zone: #3da5ff;
+    --plot-bg: #0b0e13;
+    --plot-grid: rgba(255, 255, 255, 0.14);
+    --plot-axis: #93a1b3;
+    --ok-bg: #14331f;   --ok-fg: #7ee2a0;
+    --warn-bg: #3a2c10; --warn-fg: #f0c26b;
+    --bad-bg: #3a1a1a;  --bad-fg: #ff9a92;
   }
 }
 
+/* ── Base ────────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box }
+
 body {
-  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
   margin: 0;
-  padding: 24px;
+  padding: 0 16px 24px;
   background: var(--bg);
   color: var(--fg);
 }
 
+h1 { font-size: 1.05rem; font-weight: 650; margin: 0; letter-spacing: -.01em }
+h2 { font-size: .9rem; font-weight: 650; margin: 0 0 8px }
+h3 { font-size: .85rem; font-weight: 600; margin: 0 }
+
+code {
+  font-family: var(--mono);
+  font-size: .86em;
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.mono, .num { font-family: var(--mono); font-variant-numeric: tabular-nums }
+.dash { color: var(--fg-faint) }
+.note { color: var(--fg-muted); font-size: .8rem; margin: 0 0 10px }
+.empty { color: var(--fg-muted); font-size: .85rem; padding: 8px 0 }
+
+:where(button, input, select):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* ── Barra superior y navegación ─────────────────────────────────────────── */
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin: 0 -16px;
+  padding: 10px 16px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.topbar .sub {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: .78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .theme-toggle {
-  border: 1px solid var(--panel-border);
-  background: var(--panel-bg);
+  align-self: center;
+  border: 1px solid var(--line);
+  background: var(--surface);
   color: var(--fg);
-  border-radius: 8px;
-  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  padding: 4px 9px;
   cursor: pointer;
-  font-size: 1rem;
+  font-size: .95rem;
+  line-height: 1;
 }
-
-h1 { font-size: 1.3rem; margin: 0 0 4px }
-p.sub { margin: 0 0 24px; color: var(--th-fg); font-size: .9rem }
+.theme-toggle:hover { border-color: var(--fg-faint) }
 
 .tabs {
+  position: sticky;
+  top: 41px;
+  z-index: 19;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 20px;
-  border-bottom: 1px solid var(--panel-border);
-  padding-bottom: 8px;
+  gap: 2px;
+  margin: 0 -16px 16px;
+  padding: 0 16px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
 }
 .tab-btn {
-  border: 1px solid var(--panel-border);
-  background: var(--panel-bg);
-  color: var(--fg);
-  border-radius: 999px;
-  padding: 6px 14px;
-  font-size: .85rem;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--fg-muted);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: .82rem;
   cursor: pointer;
+  white-space: nowrap;
 }
+.tab-btn:hover { color: var(--fg) }
 .tab-btn.active {
-  background: #2563eb;
-  border-color: #2563eb;
-  color: #fff;
+  color: var(--fg);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
 }
 
 .tab-panel { display: block }
-.tab-panel[hidden] { display: none }
+.tab-panel[hidden], [hidden] { display: none }
 
 .subtabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 16px;
-  border-bottom: 1px solid var(--panel-border);
-  padding-bottom: 6px;
+  gap: 2px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
 }
 .subtab-btn {
-  border: 1px solid var(--panel-border);
-  background: var(--panel-bg);
-  color: var(--fg);
-  border-radius: 999px;
-  padding: 4px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--fg-muted);
+  padding: 6px 9px;
+  font: inherit;
   font-size: .78rem;
   cursor: pointer;
 }
-.subtab-btn.active {
-  background: #2563eb;
-  border-color: #2563eb;
-  color: #fff;
-}
-
+.subtab-btn.active { color: var(--fg); font-weight: 600; border-bottom-color: var(--accent) }
 .subtab-panel { display: block }
-.subtab-panel[hidden] { display: none }
 
-.placeholder { color: var(--th-fg); font-size: .9rem; padding: 8px 0 }
+/* ── Split: datos y controles a la izquierda, gráficos a la derecha ──────── */
+/* QSplitter(Horizontal) de field_review_app.py:484, setSizes([480, 900]).    */
+/* Ocupa exactamente el alto libre: nada de la ventana Capturas queda abajo
+   del pliegue. Lo único que scrollea es la tabla; los controles y los dos
+   gráficos están siempre a la vista, como los paneles fijos de la app. */
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 480fr) minmax(0, 900fr);
+  gap: 12px;
+  align-items: stretch;
+  height: calc(100dvh - var(--chrome-h, 96px));
+  min-height: 420px;
+}
+.ws-left, .ws-right {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+/* La tarjeta de la tabla se come el sobrante; el resto ocupa lo suyo. */
+.ws-left > .pane-list { flex: 1 1 auto; min-height: 0 }
+.ws-left > :not(.pane-list) { flex: 0 0 auto }
+.ws-right > .viewer { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column }
 
-section {
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-border);
-  border-radius: 10px;
-  padding: 16px;
-  margin-bottom: 20px;
+@media (max-width: 1200px) {
+  .workspace { grid-template-columns: minmax(0, 1fr); height: auto }
+  .ws-right { order: -1 }
+  .ws-right > .viewer { min-height: 60vh }
 }
-h2 { font-size: 1rem; margin: 0 0 12px }
-table { width: 100%; border-collapse: collapse; font-size: .85rem }
-th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--td-border) }
-th {
-  font-weight: 600;
-  color: var(--th-fg);
-  font-size: .75rem;
-  text-transform: uppercase;
-  letter-spacing: .04em;
+
+/* ── Tarjetas ────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
 }
-td.num { text-align: right; font-variant-numeric: tabular-nums }
-.tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: .72rem; font-weight: 600 }
-.listo { background: #dcfce7; color: #166534 }
-.procesando, .descomprimiendo, .pendiente { background: #fef3c7; color: #92400e }
-.error { background: #fee2e2; color: #991b1b }
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.count { color: var(--fg-muted); font-family: var(--mono); font-size: .74rem }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px }
+
+/* ── Controles ───────────────────────────────────────────────────────────── */
+button {
+  font: inherit;
+  font-size: .8rem;
+  padding: 5px 10px;
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+button:hover { border-color: var(--fg-faint) }
+.btn-quiet { background: var(--surface) }
+.btn-sm { padding: 2px 8px; font-size: .74rem }
+.btn-ver { padding: 2px 10px; font-size: .74rem }
+
+.control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.control-group label, .control-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: .8rem;
+  cursor: pointer;
+}
+.control-check { color: var(--fg-muted) }
+
+/* ── Tablas ──────────────────────────────────────────────────────────────── */
 .wrap { overflow-x: auto }
-.empty { color: var(--th-fg); font-size: .9rem; padding: 8px 0 }
-code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: .85em }
+table { width: 100%; border-collapse: collapse; font-size: .8rem }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line-soft) }
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--fg-faint);
+  font-size: .66rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  border-bottom-color: var(--line);
+}
+td.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums }
+td.detail { color: var(--fg-muted); font-size: .74rem }
+tbody tr:hover { background: var(--surface-2) }
+tbody tr.is-selected { background: var(--accent-soft) }
+tbody tr.is-selected td:first-child { box-shadow: inset 2px 0 0 var(--accent) }
 
-/* Visor de señal (§3.1): dos canvases, hammer arriba / geo abajo. */
-.viewer { background: var(--panel-bg); border: 1px solid var(--panel-border) }
-.viewer-meta { color: var(--th-fg); font-size: .85rem; padding: 4px 0 }
-.plot-label { font-size: .75rem; color: var(--th-fg); text-transform: uppercase;
-  letter-spacing: .04em; margin: 10px 0 4px }
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 4px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--line);
+}
+.group-head h3 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis }
+
+/* ── Etiquetas de estado ─────────────────────────────────────────────────── */
+.tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: .68rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.listo { background: var(--ok-bg); color: var(--ok-fg) }
+.procesando, .descomprimiendo, .pendiente { background: var(--warn-bg); color: var(--warn-fg) }
+.error { background: var(--bad-bg); color: var(--bad-fg) }
+
+/* Identidad de canal: el mismo color que su traza en el gráfico. */
+.ch-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--fg-faint);
+}
+.ch-hammer { background: var(--sig-hammer) }
+.ch-geo { background: var(--sig-geo) }
+td.nodes { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center }
+.node {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: .74rem;
+}
+
+/* ── Visor ───────────────────────────────────────────────────────────────── */
+.viewer-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap }
+.viewer-meta {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: .76rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+}
+.viewer-meta strong { color: var(--fg); font-weight: 600 }
+.meta-num { font-family: var(--mono); font-variant-numeric: tabular-nums }
+
+.viewer-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 12px;
+}
+
+/* Los dos gráficos se reparten todo el alto sobrante del panel derecho. */
+.plot-stack { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px }
+.plot-box { margin: 0; flex: 1 1 0; min-height: 0; display: flex; flex-direction: column }
+.plot-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: .68rem;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-bottom: 4px;
+}
 canvas.plot {
   display: block;
   width: 100%;
-  height: 160px;
-  border: 1px solid var(--panel-border);
-  border-radius: 6px;
-  background: var(--code-bg);
+  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--plot-bg);
+}
+
+/* ── Panel izquierdo de Capturas ─────────────────────────────────────────── */
+.pane-list { display: flex; flex-direction: column; gap: 10px; min-height: 0 }
+.summary {
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--fg-muted);
+}
+.summary .loading { color: var(--accent) }
+
+/* Lo único que scrollea de la ventana. */
+.table-scroll { flex: 1 1 auto; min-height: 80px; overflow-y: auto; overscroll-behavior: contain }
+.rows-table td { padding: 3px 8px; white-space: nowrap }
+.rows-table tbody tr { cursor: pointer }
+.rows-table .ell { max-width: 12ch; overflow: hidden; text-overflow: ellipsis }
+.rows-table .hash { color: var(--fg-faint); font-size: .72rem }
+.rows-table tr.is-mute td { opacity: .55 }
+
+/* Colores de estado de _estado_display (:931). */
+.estado { font-size: .72rem; font-weight: 600; white-space: nowrap }
+.estado-ok { color: var(--ok-fg) }
+.estado-sinvalidar { color: var(--warn-fg) }
+.estado-rechazada { color: var(--fg-faint) }
+.estado-otro { color: var(--fg-muted); font-weight: 500 }
+
+.field-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: .78rem;
+}
+.field-row > label:first-child { color: var(--fg-muted); min-width: 3.4rem }
+
+select, input[type="number"], input[type="text"] {
+  font: inherit;
+  font-size: .78rem;
+  padding: 4px 7px;
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+select { flex: 1 }
+.num-input { width: 6.5rem; font-family: var(--mono); text-align: right }
+.num-input-sm { width: 4rem }
+input:disabled, button:disabled { opacity: .5; cursor: not-allowed }
+
+/* Dos pares etiqueta/valor por fila: entra todo sin scrollear. */
+.pane-mark { display: flex; flex-direction: column; gap: 8px }
+.mark-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 5px 8px;
+  align-items: center;
+  font-size: .78rem;
+}
+.mark-grid > label { color: var(--fg-muted) }
+.mark-grid .span-2 { grid-column: span 2 }
+.mark-grid .span-3 { grid-column: span 3 }
+.mark-grid .num-input { width: 100% }
+
+.nav-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+.nav-grid button { padding: 5px 4px; font-size: .74rem }
+.nav-grid .span-2 { grid-column: span 2 }
+
+/* ── Campañas ────────────────────────────────────────────────────────────── */
+.camp-panel > summary {
+  cursor: pointer;
+  font-size: .8rem;
+  font-weight: 600;
+  list-style-position: outside;
+}
+.camp-panel[open] > summary { margin-bottom: 8px }
+.camp-table { font-size: .76rem }
+.camp-table td { padding: 3px 6px }
+.camp-name {
+  width: 100%;
+  min-width: 8rem;
+  background: transparent;
+  border-color: transparent;
+}
+.camp-name:hover, .camp-name:focus { background: var(--surface-2); border-color: var(--line) }
+.camp-path { color: var(--fg-faint); font-size: .72rem }
+
+/* ── Editor de teclas ────────────────────────────────────────────────────── */
+.keymap { font-size: .76rem }
+.keymap td { padding: 2px 6px; border-bottom: 1px solid var(--line-soft) }
+.key-btn {
+  min-width: 6.5rem;
+  font-family: var(--mono);
+  font-size: .72rem;
+  padding: 2px 8px;
+}
+.key-btn.is-capturing {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-style: italic;
+}
+
+.foot-details > summary {
+  cursor: pointer;
+  font-size: .74rem;
+  color: var(--fg-muted);
+  padding: 2px 0;
+}
+.foot-details > summary:hover { color: var(--fg) }
+.foot-details[open] { margin-bottom: 4px }
+
+.warn-note {
+  margin: 0 0 12px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--warn-fg);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: .74rem;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.warn-note code { background: transparent; padding: 0; color: inherit }
+
+.keys { margin-top: 10px; font-size: .72rem; line-height: 1.6 }
+kbd {
+  font-family: var(--mono);
+  font-size: .9em;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: var(--surface-2);
+}
+
+details.card > summary { cursor: pointer; list-style-position: outside }
+details.card > summary h2 { display: inline; margin: 0 }
+
+/* ── Visor: estado y leyenda ─────────────────────────────────────────────── */
+.viewer-status {
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--warn-fg);
+  margin-left: auto;
+}
+.legend { display: inline-flex; gap: 12px; margin-left: 10px; text-transform: none; letter-spacing: 0 }
+.lg { display: inline-block; width: 12px; height: 2px; margin-right: 4px; vertical-align: middle }
+.lg-overlay { background: var(--sig-overlay) }
+.lg-folder { background: var(--sig-folder-avg) }
+.lg-ok { background: var(--sig-ok-avg) }
+.lg-orig { background: var(--sig-overlay) }
+.lg-filt { background: var(--sig-geo) }
+
+/* Resalta el botón que falta apretar para que un cambio tenga efecto. */
+button.is-primary {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.mark-grid .span-4 { grid-column: 1 / -1 }
+
+canvas.plot.is-grabbable { cursor: ew-resize }
+canvas.plot.is-dragging { cursor: grabbing }
+
+/* ── Paneles todavía no portados ─────────────────────────────────────────── */
+.pending {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  background: var(--surface);
+}
+.pending .eyebrow {
+  display: block;
+  font-family: var(--mono);
+  font-size: .66rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--fg-faint);
+  margin-bottom: 6px;
+}
+.pending p { margin: 0; color: var(--fg-muted); font-size: .84rem; max-width: 62ch }
+
+@media (max-width: 640px) {
+  body { padding: 0 10px 20px }
+  .topbar, .tabs { margin-inline: -10px; padding-inline: 10px }
+  .tabs { top: 39px }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important }
 }

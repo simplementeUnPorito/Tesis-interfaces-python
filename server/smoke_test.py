@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import shutil
 import socket
@@ -351,8 +352,10 @@ MASW_SUBTABS = (
     ("3. Perfil Vs", "perfil"),
 )
 
+# `filtros` salió de esta lista el 2026-07-26: ya está portado (§3.2), así que
+# su panel lo llena el JS y no tiene —ni debe tener— un placeholder.
 PANELES_PENDIENTES = (
-    "filtros", "agrupamiento", "enfase", "promedios", "waterfall",
+    "waterfall",
     "subpanel-dispersion", "subpanel-inversion", "subpanel-perfil",
 )
 
@@ -414,6 +417,78 @@ def _tabs_placeholders_honestos(ctx: Ctx) -> None:
         assert "Falta:" in block, f'{marker_id}: falta el literal "Falta:" en su placeholder'
         assert "§" in block, f'{marker_id}: falta la referencia "§" al PORT_PLAN'
         assert len(block) >= 120, f'{marker_id}: placeholder de {len(block)} caracteres (< 120)'
+
+
+@check("filtros.ajustes_persisten", "GET/POST /api/filter guarda en el archivo de la app",
+      mode="sandbox")
+def _filtros_ajustes(ctx: Ctx) -> None:
+    antes = ctx.json_get("/api/filter")
+    for clave in ("enabled", "low_hz", "high_hz", "order", "target_fs", "path"):
+        assert clave in antes, f"/api/filter sin {clave!r}: {antes}"
+    # El archivo tiene que ser el MISMO que lee la app PyQt, no uno paralelo.
+    assert antes["path"].replace("\\", "/").endswith("filter_settings.json"), antes["path"]
+
+    body = json.dumps({"low_hz": 7.5, "high_hz": 120.0, "order": 3, "enabled": True})
+    code, raw, _ = ctx.post("/api/filter", body.encode("utf-8"),
+                            {"Content-Type": "application/json"})
+    assert code == 200, f"POST /api/filter -> {code}: {raw[:200]!r}"
+
+    despues = ctx.json_get("/api/filter")
+    assert despues["low_hz"] == 7.5 and despues["high_hz"] == 120.0, despues
+    assert despues["order"] == 3 and despues["enabled"] is True, despues
+
+    # Un POST parcial no pisa lo que no vino.
+    ctx.post("/api/filter", json.dumps({"order": 5}).encode("utf-8"),
+             {"Content-Type": "application/json"})
+    final = ctx.json_get("/api/filter")
+    assert final["order"] == 5, final
+    assert final["low_hz"] == 7.5, f"un POST parcial pisó low_hz: {final}"
+
+
+@check("filtros.preview_fase_cero", "la vista previa filtra sin correr el primer arribo",
+      mode="sandbox")
+def _filtros_preview(ctx: Ctx) -> None:
+    # spike propio: dos fixtures byte-idénticas quedan marcadas duplicadas por
+    # discover_dataset y la segunda se queda sin shot (ver _write_fixture).
+    shot_id = _write_fixture(ctx, "smoke_filtro", spike=0.77, with_nan=False)
+    crudo = ctx.json_get(f"/api/filter/preview?shot_id={shot_id}&max_points=4000"
+                         "&low_hz=0&high_hz=0&order=4")
+    for clave in ("time", "spectrum", "applied", "work_fs"):
+        assert clave in crudo, f"falta {clave!r} en la vista previa"
+    assert crudo["time"]["original"] and crudo["time"]["filtered"], crudo["time"]
+
+    filt = ctx.json_get(f"/api/filter/preview?shot_id={shot_id}&max_points=4000"
+                        "&low_hz=5&high_hz=200&order=4")
+    orig = filt["time"]["original"]
+    fil = filt["time"]["filtered"]
+
+    def centroide(traza):
+        """Centro de energía, en buckets.
+
+        No se usa el argmax: el spike de la fixture es plano (5 muestras
+        iguales) y cuál de ellas "gana" depende del desempate, no del filtro.
+        El centroide es justo lo que un filtro de fase cero conserva.
+        """
+        peso = suma = 0.0
+        for i, (lo, hi) in enumerate(zip(traza["min"], traza["max"])):
+            if lo is None or hi is None:
+                continue
+            a = max(abs(lo), abs(hi))
+            suma += a
+            peso += a * i
+        return (peso / suma) if suma > 0 else -1.0
+
+    c_orig, c_filt = centroide(orig), centroide(fil)
+    assert c_orig >= 0 and c_filt >= 0, "no se pudo medir el centro de energía"
+    # Fase cero: el centro de energía no se corre. Un Butterworth causal del
+    # mismo orden lo desplazaría decenas de muestras; 3 es margen de sobra para
+    # el transitorio y el redondeo, y sigue detectando el caso malo.
+    assert abs(c_orig - c_filt) <= 3.0, (
+        f"el filtro corrió el centro de energía: {c_orig:.1f} -> {c_filt:.1f} buckets. "
+        "Eso rompe el picking (tiene que ser fase cero, sosfiltfilt)")
+
+    code, body, _ = ctx.get("/api/filter/preview?shot_id=0000000000000000")
+    assert code == 404, f"shot_id inexistente -> {code}, se esperaba 404"
 
 
 @check("tabs.tema_toggle", "el botón de tema y las reglas [data-theme] de los dos temas existen")
@@ -859,8 +934,26 @@ def start_server(raw_root: Path, data_root: Path, tmp: Path | None,
            "--raw-root", str(raw_root), "--data-root", str(data_root)]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handle = log_path.open("w", encoding="utf-8", errors="replace")
+
+    env = dict(os.environ)
+    if tmp is not None:
+        # SANDBOX: encerrar también lo que se ESCRIBE.
+        #
+        # `frd._procesados_dir_for` resuelve la carpeta de salida por
+        # `raw_root.name`, no por la ruta completa. El raw del sandbox se llama
+        # "raw", igual que `data/raw`, así que sin esto
+        # `default_annotations_path(<tmp>/raw)` apunta al MISMO archivo que
+        # `default_annotations_path(data/raw)`: una corrida del gate que
+        # ingestara una captura completa borraría los picks validados a mano.
+        # Lo mismo vale para filter_settings, alignment_offsets y average_arrivals.
+        #
+        # `frd._discover_data_root` respeta TESIS_DATA_ROOT, así que apuntándola
+        # al temporal todo lo que escriba el sandbox cae adentro. El modo `read`
+        # (tmp=None) no la define y sigue viendo los datos reales.
+        env["TESIS_DATA_ROOT"] = str(tmp)
+
     proc = subprocess.Popen(cmd, cwd=str(PYTHON_ROOT), stdout=handle,
-                            stderr=subprocess.STDOUT, text=True)
+                            stderr=subprocess.STDOUT, text=True, env=env)
     srv = Server(proc, port, tmp, log_path)
     rec(f"servidor pid={proc.pid} puerto={port} raw={raw_root}", echo=True)
     rec(f"  intérprete={sys.executable}")

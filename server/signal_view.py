@@ -7,6 +7,7 @@ correr en el event loop).
 
 from __future__ import annotations
 
+import hashlib
 import math
 import warnings
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from .pipeline import frd
+from .datacache import get_dataset
 
 
 class UnknownShot(Exception):
@@ -59,11 +61,93 @@ def _round6(v: float) -> float | None:
 
 
 def _find_shot(raw_root: Path, shot_id: str):
-    dataset = frd.discover_dataset(raw_root)
+    dataset = get_dataset(raw_root)
     for shot in dataset.shots:
         if shot.shot_id == shot_id:
             return shot
     raise UnknownShot(shot_id)
+
+
+def capture_annotation(raw_root: Path, anns: dict, shot):
+    """Anotación que manda para el **trigger** de este disparo.
+
+    Los N geófonos de un tendido comparten el golpe: hay un solo martillo, un
+    solo trigger y un solo tiempo cero. Lo que cambia entre ellos es la
+    posición. Así que si este receptor todavía no tiene marca propia pero otro
+    de la MISMA captura sí, se usa esa: mover el trigger es una decisión de la
+    captura, no de cada geófono.
+
+    Devuelve ``(anotación propia | None, anotación de la captura | None)``.
+    """
+    propia = anns.get(shot.shot_id)
+    if propia is not None:
+        return propia, propia
+    try:
+        dataset = get_dataset(raw_root)
+    except FileNotFoundError:
+        return None, None
+    hermanos = [s for s in dataset.shots
+                if s.folder_name == shot.folder_name
+                and s.capture_name == shot.capture_name
+                and s.shot_id != shot.shot_id]
+    # Se prefiere una validada a mano por sobre una automática.
+    candidatas = [anns[s.shot_id] for s in hermanos if s.shot_id in anns]
+    if not candidatas:
+        return None, None
+    validadas = [a for a in candidatas if a.reviewed]
+    return None, (validadas[0] if validadas else candidatas[0])
+
+
+def _capture_dir(raw_root: Path, folder: str, capture: str) -> Path:
+    """Directorio de una captura. ``(raíz)`` es el layout viejo: la carpeta ES
+    la captura (mismo criterio que ``catalog._capture_dirs``)."""
+    folder_path = raw_root / folder
+    if capture in ("", "(raíz)"):
+        return folder_path
+    nested = folder_path / "captures" / capture
+    return nested if nested.is_dir() else folder_path
+
+
+def _shot_for_capture(raw_root: Path, folder: str, capture: str):
+    """Disparo sintético de una captura que ``discover_dataset`` no devuelve.
+
+    Pasa con las duplicadas (las descarta el dedup por firma) y con las
+    incompletas (falta hammer o geo). Se arma igual, con los canales que haya,
+    para poder graficarlas: el estado no decide si se dibuja.
+
+    Devuelve ``(shot | None, hammer | None, geo | None)``. ``shot`` sólo existe
+    cuando están los dos canales, porque ``auto_pick_shot`` necesita el par.
+    """
+    folder_path = raw_root / folder
+    capture_dir = _capture_dir(raw_root, folder, capture)
+    if not capture_dir.is_dir():
+        raise UnknownShot(f"{folder}/{capture}")
+
+    channels = frd.discover_capture_channels(folder_path, capture_dir)
+    hammer = next((c for c in channels if c.role == "hammer"), None)
+    geo = next((c for c in channels if c.role == "geo"), None)
+    if hammer is None and geo is None:
+        raise UnknownShot(f"{folder}/{capture}")
+    if hammer is None or geo is None:
+        return None, hammer, geo
+
+    meta_path = capture_dir / "metadata.json"
+    meta = frd._read_json(meta_path) if meta_path.is_file() else {}
+    rel = str(capture_dir.relative_to(raw_root)).replace("\\", "/")
+    shot = frd.FieldShot(
+        shot_id=hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16],
+        folder=folder_path,
+        capture_dir=capture_dir,
+        folder_name=folder,
+        capture_name=capture_dir.name if capture_dir != folder_path else "(raíz)",
+        order=int(meta.get("capture_index", meta.get("order", 0)) or 0),
+        fs=float(meta.get("fs") or hammer.fs or geo.fs or 0.0),
+        distance_m=float(geo.position_m if geo.position_m is not None else 0.0),
+        hammer=hammer,
+        geo=geo,
+        folder_hash="",
+    )
+    return shot, hammer, geo
 
 
 def _channel_payload(
@@ -128,12 +212,20 @@ def _channel_payload(
 def build_signal_payload(
     raw_root: str | Path,
     *,
-    shot_id: str,
+    shot_id: str = "",
+    folder: str = "",
+    capture: str = "",
     kind: str,
     max_points: int,
     geo_flip_param: bool | None,
+    trigger_override: float | None = None,
 ) -> dict:
     """Arma el payload de ``GET /api/signal``. Ver PORT_PLAN §3.1 / spec §4.
+
+    Se puede pedir por ``shot_id`` (el disparo, como la app) o por
+    ``folder``+``capture`` (cualquier captura, sea disparo o no). La segunda
+    forma existe porque el estado de una captura no decide si se puede mirar:
+    una captura sin martillo, o duplicada, se grafica igual con lo que tenga.
 
     Orden de operaciones (no se cambia, cambia el resultado):
     1) ``load_signal(apply_invert=True)`` (convención fija: geo no invertido,
@@ -146,12 +238,28 @@ def build_signal_payload(
         raise InvalidKind(kind)
 
     raw_root = Path(raw_root).resolve()
-    shot = _find_shot(raw_root, shot_id)
     prefer_filtered = kind == "filt"
-    fs = float(shot.fs or shot.hammer.fs or shot.geo.fs)
+
+    if shot_id:
+        shot = _find_shot(raw_root, shot_id)
+        hammer_ch, geo_ch = shot.hammer, shot.geo
+    elif folder:
+        shot, hammer_ch, geo_ch = _shot_for_capture(raw_root, folder, capture)
+        shot_id = shot.shot_id if shot is not None else ""
+    else:
+        raise UnknownShot("hace falta shot_id, o folder + capture")
+
+    ref = hammer_ch or geo_ch
+    fs = float((shot.fs if shot is not None else 0.0) or ref.fs or 0.0)
 
     anns = frd.load_annotations(frd.default_annotations_path(raw_root))
-    ann = anns.get(shot_id)
+    ann = anns.get(shot_id) if shot_id else None
+    # Trigger heredado: los N geófonos de un tendido comparten el golpe. Si este
+    # receptor no tiene marca propia pero otro de la misma captura sí, se usa la
+    # de la captura (misma línea naranja, mismo tiempo cero).
+    ann_captura = None
+    if ann is None and shot is not None:
+        _propia, ann_captura = capture_annotation(raw_root, anns, shot)
 
     if ann is not None:
         trigger_s = float(ann.trigger_s)
@@ -159,13 +267,35 @@ def build_signal_payload(
         geo_flip_ann = bool(ann.geo_flip)
         reviewed = bool(ann.reviewed)
         accepted = bool(ann.accepted)
-    else:
+    elif ann_captura is not None:
+        # El trigger y el tiempo cero se heredan; geo_flip NO: la polaridad es
+        # de cada geófono (uno pudo quedar conectado al revés y el otro no).
+        trigger_s = float(ann_captura.trigger_s)
+        trigger_source = "capture"
+        geo_flip_ann = False
+        reviewed = False
+        accepted = True
+    elif shot is not None:
         pick = frd.auto_pick_shot(shot, prefer_filtered=prefer_filtered)
         trigger_s = float(pick.trigger_s)
         trigger_source = "auto"
         geo_flip_ann = False
         reviewed = False
         accepted = True
+    else:
+        # Sin el par hammer+geo no hay primer arribo que picar (PORT_PLAN §5.4):
+        # se dibuja igual, con el eje en 0 y diciendo que no hay trigger.
+        trigger_s = 0.0
+        trigger_source = "none"
+        geo_flip_ann = False
+        reviewed = False
+        accepted = True
+
+    # El trigger que se está arrastrando en la web: la señal se re-cerca con él
+    # (la línea de base depende del trigger), sin escribir nada.
+    if trigger_override is not None:
+        trigger_s = float(trigger_override)
+        trigger_source = "override"
 
     if geo_flip_param is None:
         geo_flip_effective = geo_flip_ann
@@ -174,20 +304,33 @@ def build_signal_payload(
         geo_flip_effective = bool(geo_flip_param)
         geo_flip_source = "override"
 
-    hammer_payload = _channel_payload(
-        shot.hammer, raw_root=raw_root, prefer_filtered=prefer_filtered,
-        invert_extra=False, trigger_s=trigger_s, fs=fs, max_points=max_points,
-    )
-    geo_payload = _channel_payload(
-        shot.geo, raw_root=raw_root, prefer_filtered=prefer_filtered,
-        invert_extra=geo_flip_effective, trigger_s=trigger_s, fs=fs, max_points=max_points,
-    )
+    channels: dict[str, dict] = {}
+    if hammer_ch is not None:
+        channels["hammer"] = _channel_payload(
+            hammer_ch, raw_root=raw_root, prefer_filtered=prefer_filtered,
+            invert_extra=False, trigger_s=trigger_s, fs=fs, max_points=max_points,
+        )
+    if geo_ch is not None:
+        channels["geo"] = _channel_payload(
+            geo_ch, raw_root=raw_root, prefer_filtered=prefer_filtered,
+            invert_extra=geo_flip_effective, trigger_s=trigger_s, fs=fs, max_points=max_points,
+        )
+
+    if shot is not None:
+        folder_name, capture_name = shot.folder_name, shot.capture_name
+        distance_m = _round6(float(shot.distance_m))
+    else:
+        capture_dir = _capture_dir(raw_root, folder, capture)
+        folder_name = folder
+        capture_name = capture_dir.name if capture_dir != raw_root / folder else "(raíz)"
+        pos = geo_ch.position_m if geo_ch is not None else None
+        distance_m = _round6(float(pos)) if pos is not None else None
 
     return {
-        "shot_id": shot.shot_id,
-        "folder": shot.folder_name,
-        "capture": shot.capture_name,
-        "distance_m": _round6(float(shot.distance_m)),
+        "shot_id": shot_id,
+        "folder": folder_name,
+        "capture": capture_name,
+        "distance_m": distance_m,
         "fs": fs,
         "kind": kind,
         "max_points": int(max_points),
@@ -197,5 +340,5 @@ def build_signal_payload(
         "accepted": accepted,
         "geo_flip": geo_flip_effective,
         "geo_flip_source": geo_flip_source,
-        "channels": {"hammer": hammer_payload, "geo": geo_payload},
+        "channels": channels,
     }

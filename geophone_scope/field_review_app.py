@@ -99,6 +99,7 @@ try:
         save_masw_arrays,
         save_masw_state,
         save_session,
+        zero_by_pretrigger,
     )
 except ImportError:  # pragma: no cover - script execution from this folder
     from field_review_data import (
@@ -158,6 +159,7 @@ except ImportError:  # pragma: no cover - script execution from this folder
         save_masw_arrays,
         save_masw_state,
         save_session,
+        zero_by_pretrigger,
     )
 
 try:
@@ -1787,13 +1789,9 @@ class FieldReviewWindow(QMainWindow):
 
     @staticmethod
     def _zero_by_pretrigger(signal: np.ndarray, trigger_idx: int, fs: float) -> np.ndarray:
-        if signal.size == 0:
-            return signal
-        start = max(0, trigger_idx - int(round(fs * 0.25)))
-        end = max(start + 1, trigger_idx - int(round(fs * 0.005)))
-        end = min(end, signal.size)
-        baseline = float(np.median(signal[start:end])) if end > start else float(np.median(signal))
-        return signal.astype(np.float32, copy=False) - np.float32(baseline)
+        # Una sola implementación, en field_review_data: la web grafica llamando
+        # a la misma, así los dos dibujos no se pueden desincronizar.
+        return zero_by_pretrigger(signal, trigger_idx, fs)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         try:

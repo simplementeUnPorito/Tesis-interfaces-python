@@ -26,7 +26,8 @@ def get_pipeline(request: Request) -> Pipeline:
 # Importados después de get_pipeline: los routers hacen `from ..api import
 # get_pipeline` y, al estar este módulo en medio de su propia importación,
 # necesitan encontrarlo ya definido.
-from .routers import admin, dataset, ingest, masw, picks  # noqa: E402
+from .routers import (admin, alignment, averages, dataset, filters,  # noqa: E402
+                      grouping, ingest, masw, picks)
 
 
 class _TitleCaseHeaders:
@@ -92,7 +93,28 @@ def create_app(pipeline: Pipeline) -> FastAPI:
     app.include_router(dataset.router)
     app.include_router(admin.router)
     app.include_router(picks.router)
+    app.include_router(filters.router)
+    app.include_router(grouping.router)
+    app.include_router(alignment.router)
+    app.include_router(averages.router)
     app.include_router(masw.router)
+
+    # Escanear el volumen tarda ~30 s en una campaña de ~950 capturas. Se hace
+    # en un hilo al arrancar para que el primer pedido de la web no lo pague:
+    # cuando el navegador llega, el cache ya está caliente. Es sólo lectura y
+    # si falla no importa (el primer request lo vuelve a intentar).
+    @app.on_event("startup")
+    def _warm_cache() -> None:
+        import threading
+
+        def run() -> None:
+            try:
+                from .captures import build_all_campaigns
+                build_all_campaigns(pipeline.raw_root, pipeline.data_root)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, name="warm-cache", daemon=True).start()
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

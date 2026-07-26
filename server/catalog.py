@@ -10,14 +10,19 @@ Este módulo lee la metadata cruda y lista TODO lo que hay — cualquier cantida
 nodos, con martillo o sin él. El picking queda como una capa opcional encima,
 disponible sólo cuando existe el par. Así el servidor nunca esconde un dato.
 
-No toca ``field_review_data``: ese contrato lo comparten el servidor y la app
-PyQt, y relajarlo cambiaría el significado de "disparo" para las dos.
+No relaja el contrato de ``field_review_data``: no cambia qué es un "disparo".
+Sí usa su ``node_role`` para deducir el rol de cada nodo, en vez de mirar sólo
+``node["role"]`` como hacía antes. Con dos deducciones distintas el catálogo
+marcaba "sin martillo" capturas que ``discover_dataset`` sí tomaba como disparo
+(186 vs 194): la columna Estado le mentía al usuario en 8 capturas.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from ._gs import frd
 
 # f32 little-endian: 4 bytes por muestra. Es el formato que escribe export.js.
 BYTES_PER_SAMPLE = 4
@@ -33,26 +38,38 @@ def _read_json(path: Path) -> dict:
 def _node_signal(folder: Path, capture_dir: Path, node: dict) -> tuple[Path | None, int]:
     """Ubica el .bin del nodo y estima cuántas muestras tiene.
 
-    Se prueban las rutas relativas declaradas en la metadata y, si no hay, el
-    nombre convencional dentro del directorio del nodo. Las rutas pueden ser
-    relativas a la carpeta o a la captura, igual que en _resolve_node_file.
+    La resolución la hace ``frd.resolve_node_file``, la misma que usa
+    ``discover_dataset``. Antes había una copia acá que no contemplaba rutas
+    absolutas, y por eso el catálogo marcaba capturas como "sin señal" cuando
+    el disparo sí las encontraba.
     """
-    candidates: list[Path] = []
-    for key in ("raw_file", "filt_file"):
-        rel = node.get(key)
-        if not rel:
-            continue
-        rel_path = Path(str(rel).replace("\\", "/"))
-        candidates += [folder / rel_path, capture_dir / rel_path]
-    data_dir = node.get("data_dir")
-    if data_dir:
-        d = Path(str(data_dir).replace("\\", "/"))
-        candidates += [folder / d / "raw_f32le.bin", capture_dir / d / "raw_f32le.bin"]
-
-    for cand in candidates:
-        if cand.is_file():
-            return cand, cand.stat().st_size // BYTES_PER_SAMPLE
+    for key, default in (("raw_file", "raw_f32le.bin"), ("filt_file", "filt_f32le.bin")):
+        path = frd.resolve_node_file(folder, capture_dir, node, key, default)
+        if path is not None and path.is_file():
+            return path, path.stat().st_size // BYTES_PER_SAMPLE
     return None, 0
+
+
+def _nodes_from_channels(folder: Path, capture_dir: Path, raw_root: Path) -> list[dict]:
+    """Nodos deducidos por directorio, con la misma función que usa el disparo."""
+    nodes = []
+    for ch in frd.discover_capture_channels(folder, capture_dir):
+        path = ch.signal_file(prefer_filtered=False) or ch.signal_file(prefer_filtered=True)
+        if path is None or not Path(path).is_file():
+            continue
+        samples = Path(path).stat().st_size // BYTES_PER_SAMPLE
+        fs = float(ch.fs or 0.0)
+        nodes.append({
+            "index": ch.node_index,
+            "pcb_id": ch.pcb_id,
+            "role": ch.role,
+            "hw_type": "",
+            "fs": fs,
+            "samples": samples,
+            "seconds": (samples / fs) if fs > 0 else 0.0,
+            "file": str(Path(path).relative_to(raw_root)).replace("\\", "/"),
+        })
+    return nodes
 
 
 def _capture_dirs(folder: Path) -> list[Path]:
@@ -107,13 +124,19 @@ def scan_catalog(raw_root: Path) -> dict:
                 nodes.append({
                     "index": node.get("index", node.get("node_id")),
                     "pcb_id": str(node.get("pcb_id") or node.get("slave_id") or ""),
-                    "role": str(node.get("role") or "").lower() or "unknown",
+                    "role": frd.node_role(node),
                     "hw_type": node.get("hw_type") or "",
                     "fs": fs,
                     "samples": samples,
                     "seconds": (samples / fs) if fs > 0 else 0.0,
                     "file": str(path.relative_to(raw_root)).replace("\\", "/"),
                 })
+            if not nodes:
+                # La metadata no sirvió (sin `nodes`, o sin rutas resolubles).
+                # `discover_dataset` en ese caso descubre los canales por
+                # directorio; el catálogo tiene que hacer lo mismo o la captura
+                # es un disparo que no aparece en ninguna tabla.
+                nodes = _nodes_from_channels(folder, capture_dir, raw_root)
             if not nodes:
                 continue
             roles = {n["role"] for n in nodes}

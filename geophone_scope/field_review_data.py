@@ -1599,33 +1599,47 @@ def _discover_folder_shots(
         order = _capture_order(capture_dir, meta)
         channels = _discover_channels(folder, capture_dir)
         hammer = _first_role(channels, "hammer")
-        geo = _first_role(channels, "geo")
-        if hammer is None or geo is None:
+        # Un tendido puede tener N geófonos: cada uno es un disparo distinto
+        # (mismo golpe, otra distancia), que es exactamente lo que necesita
+        # MASW. Antes se tomaba sólo el primero y los demás no existían para
+        # ninguna de las dos interfaces.
+        geos = sorted([ch for ch in channels if ch.role == "geo"], key=_channel_sort_key)
+        if hammer is None or not geos:
             continue
-        fs = float(meta.get("fs") or hammer.fs or geo.fs or 0.0)
-        distance = _distance_from_channel(geo)
-        if distance is None:
-            distance = _distance_from_name(folder.name)
-        if distance is None:
-            distance = 0.0
         rel_capture = _relative_text(capture_dir, raw_root)
-        shot_id = hashlib.sha1(rel_capture.encode("utf-8")).hexdigest()[:16]
-        shots.append(
-            FieldShot(
-                shot_id=shot_id,
-                folder=folder,
-                capture_dir=capture_dir,
-                folder_name=folder.name,
-                capture_name=capture_dir.name,
-                order=order,
-                fs=fs,
-                distance_m=float(distance),
-                hammer=hammer,
-                geo=geo,
-                folder_hash=folder_hash,
-                duplicate_of=duplicate_of,
+        base_id = hashlib.sha1(rel_capture.encode("utf-8")).hexdigest()[:16]
+        for index, geo in enumerate(geos):
+            fs = float(meta.get("fs") or hammer.fs or geo.fs or 0.0)
+            distance = _distance_from_channel(geo)
+            if distance is None:
+                distance = _distance_from_name(folder.name)
+            if distance is None:
+                distance = 0.0
+            # El PRIMER geófono conserva el id histórico (hash de la ruta de la
+            # captura, sin sufijo): con un solo geófono —que es todo lo que hay
+            # grabado hasta hoy— los ids no cambian y las marcas ya hechas
+            # siguen valiendo. Los demás se distinguen por su nodo.
+            if index == 0:
+                shot_id = base_id
+            else:
+                suffix = geo.pcb_id or (str(geo.node_index) if geo.node_index is not None else str(index))
+                shot_id = hashlib.sha1(f"{rel_capture}#{suffix}".encode("utf-8")).hexdigest()[:16]
+            shots.append(
+                FieldShot(
+                    shot_id=shot_id,
+                    folder=folder,
+                    capture_dir=capture_dir,
+                    folder_name=folder.name,
+                    capture_name=capture_dir.name,
+                    order=order,
+                    fs=fs,
+                    distance_m=float(distance),
+                    hammer=hammer,
+                    geo=geo,
+                    folder_hash=folder_hash,
+                    duplicate_of=duplicate_of,
+                )
             )
-        )
     return shots
 
 
@@ -1710,7 +1724,36 @@ def _discover_channels_by_dirs(folder: Path, capture_dir: Path) -> list[ChannelR
                 label=child.name,
             )
         )
-    return channels
+    return _dedupe_by_slave(channels)
+
+
+def _slave_token(name: str) -> str | None:
+    """El ``s<N>`` final del nombre de un directorio de nodo, si lo tiene.
+
+    ``esclavo_2_s2`` y ``geo1_s2`` son el MISMO nodo (S2) exportado con dos
+    nombres, no dos receptores.
+    """
+    match = re.search(r"_s(\d+)$", name.lower())
+    return match.group(1) if match else None
+
+
+def _dedupe_by_slave(channels: list[ChannelRef]) -> list[ChannelRef]:
+    """Un canal por (rol, nodo físico).
+
+    Sin esto, una captura con los dos exportes de cada nodo aparecería como un
+    tendido de dos geófonos y se inventaría un disparo que no existe. Se
+    conserva el primero por ``_channel_sort_key``, que es exactamente el que
+    elegía ``_first_role`` antes de que hubiera soporte de N geófonos.
+    """
+    vistos: dict[tuple[str, str], ChannelRef] = {}
+    sueltos: list[ChannelRef] = []
+    for channel in sorted(channels, key=_channel_sort_key):
+        token = _slave_token(channel.pcb_id or "")
+        if token is None:
+            sueltos.append(channel)      # sin id de nodo no se puede deducir: no se toca
+            continue
+        vistos.setdefault((channel.role, token), channel)
+    return list(vistos.values()) + sueltos
 
 
 def _resolve_node_file(
@@ -1761,6 +1804,50 @@ def _node_role(node: dict[str, Any]) -> str:
     if "geo" in parts:
         return "geo"
     return "unknown"
+
+
+# ── API pública que consume el servidor web ──────────────────────────────────
+# Las tres de abajo son la versión pública de helpers que ya usaba discover_dataset.
+# Existen para que la web llame a ESTA implementación en vez de tener la suya:
+# tener dos deducciones de rol ya hizo que el catálogo del servidor y
+# discover_dataset no coincidieran (194 vs 186 capturas).
+
+def node_role(node: dict[str, Any]) -> str:
+    """Rol de un nodo de ``metadata.json``: ``hammer`` / ``geo`` / ``unknown``.
+
+    Mira ``role`` y además ``type``/``hw_type``/``name``/``data_dir``/``*_file``,
+    porque no toda captura trae ``role`` escrito.
+    """
+    return _node_role(node)
+
+
+def resolve_node_file(
+    folder: str | Path,
+    capture_dir: str | Path,
+    node: dict[str, Any],
+    key: str = "raw_file",
+    default_name: str = "raw_f32le.bin",
+) -> Path | None:
+    """Ubica el ``.bin`` de un nodo. Contempla rutas absolutas y relativas a la
+    carpeta o a la captura. Es la resolución que usa ``discover_dataset``: el
+    catálogo del servidor tiene que usar ésta y no una propia, o marca "sin
+    señal" nodos que el disparo sí encuentra."""
+    return _resolve_node_file(Path(folder), Path(capture_dir), node, key, default_name)
+
+
+def discover_capture_channels(folder: str | Path, capture_dir: str | Path) -> list[ChannelRef]:
+    """Canales de UNA captura, sin exigir el par hammer+geo.
+
+    ``discover_dataset`` descarta la captura incompleta porque su unidad es el
+    disparo; esto devuelve lo que haya, para poder graficar igual.
+    """
+    return _discover_channels(Path(folder), Path(capture_dir))
+
+
+def zero_by_pretrigger(signal: np.ndarray, trigger_idx: int, fs: float) -> np.ndarray:
+    """Resta la línea de base medida ANTES del golpe (mediana de
+    ``[trigger-0.25 s, trigger-0.005 s]``). Es lo que se grafica en la app."""
+    return _zero_by_pretrigger(signal, trigger_idx, fs)
 
 
 def _first_role(channels: Iterable[ChannelRef], role: str) -> ChannelRef | None:

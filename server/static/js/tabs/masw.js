@@ -21,5 +21,5 @@ export function mount(root) {
   };
   nav.addEventListener('click', onClick);
 
-  return () => nav.removeEventListener('click', onClick);
+  return {};   // se monta una vez y queda; no hay nada que pausar
 }
