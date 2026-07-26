@@ -27,7 +27,7 @@ def get_pipeline(request: Request) -> Pipeline:
 # get_pipeline` y, al estar este módulo en medio de su propia importación,
 # necesitan encontrarlo ya definido.
 from .routers import (admin, alignment, averages, dataset, filters,  # noqa: E402
-                      grouping, ingest, masw, picks)
+                      grouping, ingest, masw, picks, waterfall)
 
 
 class _TitleCaseHeaders:
@@ -97,6 +97,7 @@ def create_app(pipeline: Pipeline) -> FastAPI:
     app.include_router(grouping.router)
     app.include_router(alignment.router)
     app.include_router(averages.router)
+    app.include_router(waterfall.router)
     app.include_router(masw.router)
 
     # Escanear el volumen tarda ~30 s en una campaña de ~950 capturas. Se hace

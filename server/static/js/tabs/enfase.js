@@ -4,7 +4,7 @@
 // Se trabaja POR CARPETA, no por señal: el gráfico muestra el promedio de cada
 // carpeta y el offset la mueve entera, rígida. Las carpetas van ordenadas por
 // pico a pico de su promedio, mayor primero; esa primera define el cero.
-import { createFrame, drawMinMax } from '../plot.js';
+import { createFrame, drawMinMax, attachViewControls } from '../plot.js';
 import { mountCampaignPicker } from '../campaign_picker.js';
 
 const fmt = (n, d = 2) => (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
@@ -93,6 +93,13 @@ export function mount(root) {
   let campaign = '';
   let indice = 0;
   let cargando = false;
+  let frame = null;
+
+  // Alinear a ojo pide mirar de cerca el primer arribo: rueda para acercar,
+  // arrastre para mover, doble click para volver.
+  const view = attachViewControls(elPlot, {
+    getFrame: () => frame, onChange: () => dibujar(),
+  });
 
   const picker = mountCampaignPicker($('#en-campaign'), {
     onChange: (id) => { campaign = id; indice = 0; load(); },
@@ -107,8 +114,12 @@ export function mount(root) {
       `<option value="${l}"${l === data.label ? ' selected' : ''}>${l}</option>`).join('');
 
     const cur = actual();
+    // Offsets por señal viejos: tienen prioridad sobre el de carpeta y pelean
+    // con este ajuste. La app avisa igual y «OK alineado» los limpia.
+    const viejos = cur && cur.legacy_shot_offsets
+      ? ` — ${cur.legacy_shot_offsets} offset(s) por señal viejos (OK los limpia)` : '';
     $('#en-current').textContent = cur
-      ? `${indice + 1} / ${data.folders.length} · ${cur.folder}`
+      ? `${indice + 1} / ${data.folders.length} · ${cur.folder}${viejos}`
       : (cargando ? 'calculando promedios…' : 'sin carpetas en este label');
     $('#en-offset').value = cur ? cur.offset_ms : 0;
     $('#en-reject').classList.toggle('is-primary', !!(cur && cur.rejected));
@@ -137,18 +148,18 @@ export function mount(root) {
   function dibujar() {
     const trazas = data.folders.filter((f) => f.trace && !f.rejected);
     if (!trazas.length) {
-      createFrame(elPlot, { xMin: -0.05, xMax: 1, yMin: -1, yMax: 1,
-        xLabel: 'tiempo relativo al hammer [s]', yLabel: 'Geo promedio [V]' });
+      frame = createFrame(elPlot, view.apply({ xMin: -0.05, xMax: 1, yMin: -1, yMax: 1,
+        xLabel: 'tiempo relativo al hammer [s]', yLabel: 'Geo promedio [V]' }));
       return;
     }
     const lo = Math.min(...trazas.map((f) => f.trace.y_min ?? 0));
     const hi = Math.max(...trazas.map((f) => f.trace.y_max ?? 0));
     const pad = Math.max((hi - lo) * 0.05, 1e-9);
-    const frame = createFrame(elPlot, {
+    frame = createFrame(elPlot, view.apply({
       xMin: -0.05, xMax: 0.6,
       yMin: lo - pad, yMax: hi + pad,
       xLabel: 'tiempo relativo al hammer [s]', yLabel: 'Geo promedio [V]',
-    });
+    }));
     data.folders.forEach((f, i) => {
       if (!f.trace || f.rejected) return;
       // El offset se aplica al dibujar: mover el número corre la traza al
@@ -201,7 +212,9 @@ export function mount(root) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       data = await res.json();
       indice = Math.min(indice, Math.max(0, data.folders.length - 1));
-      $('#en-status').textContent = 'guardado';
+      $('#en-status').textContent = data.legacy_cleared
+        ? `guardado · ${data.legacy_cleared} offset(s) por señal viejos limpiados`
+        : 'guardado';
       render();
     } catch (err) {
       $('#en-status').textContent = `no se pudo guardar: ${err}`;
@@ -253,6 +266,6 @@ export function mount(root) {
 
   return {
     resume() { picker.reload(); load(); },
-    destroy() { ro.disconnect(); },
+    destroy() { view.destroy(); ro.disconnect(); },
   };
 }

@@ -182,14 +182,20 @@ export function createFrame(canvas, opts = {}) {
 /**
  * Traza de un canal decimado (GET /api/signal): { min, max, bucket_dt, ... }.
  *
- * Cada bucket trae el mínimo y el máximo de su franja de tiempo. Se dibuja una
- * sola polilínea de 1 px que alterna mínimo y máximo columna por columna
- * (…, (x,max), (x,min), (x+1,max), (x+1,min), …): la forma de onda tal cual, y
- * a resolución de píxel el mismo dibujo que la polilínea de pyqtgraph.
+ * Cada bucket trae el mínimo y el máximo de su franja de tiempo, y `rising[i]`
+ * dice cuál de los dos ocurrió ANTES. Se dibuja una sola polilínea de 1 px que
+ * emite los dos puntos de cada columna en ese orden temporal.
  *
- * Antes se rellenaba la envolvente cerrada. Sobre señal ruidosa cada columna
- * abarca casi todo el rango vertical, así que el relleno la convertía en una
- * mancha donde no se distinguía nada.
+ * El orden no es un detalle: emitir siempre máximo→mínimo (que es lo que se
+ * hacía antes) dibuja cada subida real como una bajada, y el salto a la
+ * columna siguiente cierra el diente. Sobre una traza suave el resultado es un
+ * serrucho parejo que no existe en la señal. Con `rising` la polilínea sigue la
+ * forma de onda de verdad y a resolución de píxel queda igual que la línea sin
+ * decimar de pyqtgraph.
+ *
+ * Antes de eso se rellenaba la envolvente cerrada. Sobre señal ruidosa cada
+ * columna abarca casi todo el rango vertical, así que el relleno la convertía
+ * en una mancha donde no se distinguía nada.
  *
  * opts.xOffset se resta al tiempo de cada bucket (el geo va relativo al trigger:
  * field_review_app.py `_refresh_plot`, geo_time = time - trigger_s).
@@ -210,8 +216,9 @@ export function drawMinMax(frame, ch, opts = {}) {
   ctx.lineCap = 'butt';
   if (opts.alpha !== undefined) ctx.globalAlpha = opts.alpha;
 
-  // Una sola polilínea que alterna mínimo y máximo columna por columna: es la
-  // forma de onda tal cual. Un bucket sin dato (null) corta el trazo, no vale 0.
+  // Una sola polilínea que recorre los dos extremos de cada columna en el orden
+  // en que ocurrieron. Un bucket sin dato (null) corta el trazo, no vale 0.
+  const rising = ch.rising;
   ctx.beginPath();
   let pen = false;
   for (let i = 0; i < ch.min.length; i++) {
@@ -225,14 +232,189 @@ export function drawMinMax(frame, ch, opts = {}) {
     // bins log y no en pasos iguales). Si no está, se deduce del bucket.
     const x = frame.xOf(ch.x ? ch.x[i] : (t0 + i * ch.bucket_dt - xOffset));
     if (x < frame.x0 - 2 || x > frame.x0 + frame.pw + 2) { pen = false; continue; }
-    const yLo = frame.yOf(mn);
-    const yHi = frame.yOf(mx);
-    if (!pen) { ctx.moveTo(x, yHi); pen = true; }
-    else ctx.lineTo(x, yHi);
-    ctx.lineTo(x, yLo);
+    // Primero el extremo que llegó antes en el tiempo. Sin `rising` (trazas
+    // viejas o el espectro, que no oscila) se cae al orden de siempre.
+    const sube = rising ? !!rising[i] : false;
+    const yA = frame.yOf(sube ? mn : mx);
+    const yB = frame.yOf(sube ? mx : mn);
+    if (!pen) { ctx.moveTo(x, yA); pen = true; }
+    else ctx.lineTo(x, yA);
+    if (yB !== yA) ctx.lineTo(x, yB);
   }
   ctx.stroke();
   ctx.restore();
+}
+
+// ── Vista: zoom y paneo con el mouse ────────────────────────────────────────
+//
+// Equivale al ViewBox de pyqtgraph, que en la app PyQt viene puesto de fábrica
+// con cada PlotWidget: rueda para acercar sobre el cursor, arrastre para
+// mover, doble click para volver al encuadre automático.
+//
+// El estado son los rangos en unidades de dato (segundos, volts, Hz), no un
+// factor: así el encuadre sobrevive a que la traza cambie de escala. `null` =
+// automático, o sea "lo que decida quien dibuja".
+
+function scaleAround(a, b, pivot, factor, log) {
+  const f = log ? Math.log10 : (v) => v;
+  const g = log ? (v) => Math.pow(10, v) : (v) => v;
+  const lo = f(log ? Math.max(a, 1e-12) : a);
+  const hi = f(log ? Math.max(b, 1e-12) : b);
+  const p = f(log ? Math.max(pivot, 1e-12) : pivot);
+  return [g(p + (lo - p) * factor), g(p + (hi - p) * factor)];
+}
+
+function shiftBy(a, b, delta, log) {
+  if (!log) return [a + delta, b + delta];
+  // En log el paneo es multiplicativo: correr una fracción de década.
+  const k = Math.pow(10, delta);
+  return [a * k, b * k];
+}
+
+/**
+ * Engancha zoom/paneo de mouse a un canvas y devuelve el estado de la vista.
+ *
+ *   rueda            zoom sobre el cursor, los dos ejes
+ *   shift + rueda    sólo el eje vertical
+ *   alt/ctrl + rueda sólo el eje horizontal
+ *   arrastre         mover (botón del medio o derecho siempre; el izquierdo
+ *                    sólo si `leftPan()` lo permite, porque en el hammer ese
+ *                    botón ya arrastra el trigger y marca la zona)
+ *   doble click      volver al encuadre automático
+ *
+ * `target` puede ser un canvas o una lista: varios gráficos que comparten una
+ * sola vista (la señal original y la filtrada, que sólo sirven comparadas en la
+ * misma ventana). `getFrame` recibe el canvas donde ocurrió el evento.
+ *
+ * opts: { getFrame, onChange, leftPan }
+ */
+export function attachViewControls(target, opts = {}) {
+  const canvases = Array.isArray(target) ? target : [target];
+  const canvas = canvases[0];
+  const getFrame = opts.getFrame || (() => null);
+  const onChange = opts.onChange || (() => {});
+  const leftPan = opts.leftPan || (() => true);
+  let over = { x: null, y: null };
+
+  const dataAt = (frame, ev) => {
+    const rect = ev.currentTarget.getBoundingClientRect();
+    const mx = ev.clientX - rect.left;
+    const my = ev.clientY - rect.top;
+    const fx = (mx - frame.x0) / frame.pw;
+    const fy = (frame.y0 + frame.ph - my) / frame.ph;
+    const lin = (min, max, t, log) => (log
+      ? Math.pow(10, Math.log10(Math.max(min, 1e-12)) +
+          t * (Math.log10(Math.max(max, 1e-12)) - Math.log10(Math.max(min, 1e-12))))
+      : min + t * (max - min));
+    return {
+      x: lin(frame.xMin, frame.xMax, fx, frame.xLog),
+      y: lin(frame.yMin, frame.yMax, fy, frame.yLog),
+    };
+  };
+
+  function onWheel(ev) {
+    const frame = getFrame(ev.currentTarget);
+    if (!frame) return;
+    ev.preventDefault();
+    const factor = ev.deltaY > 0 ? 1.25 : 0.8;   // mismos pasos que `_zoom_plot` (:1571)
+    const p = dataAt(frame, ev);
+    const soloY = ev.shiftKey;
+    const soloX = ev.altKey || ev.ctrlKey || ev.metaKey;
+    if (!soloY) over.x = scaleAround(frame.xMin, frame.xMax, p.x, factor, frame.xLog);
+    if (!soloX) over.y = scaleAround(frame.yMin, frame.yMax, p.y, factor, frame.yLog);
+    onChange();
+  }
+
+  let pan = null;
+  function onDown(ev) {
+    const el = ev.currentTarget;
+    const frame = getFrame(el);
+    if (!frame) return;
+    if (ev.button === 0 && !leftPan(ev)) return;
+    if (ev.button !== 0 && ev.button !== 1 && ev.button !== 2) return;
+    ev.preventDefault();
+    // Se guardan los rangos del momento: el paneo se calcula siempre contra el
+    // encuadre en que empezó el arrastre, así no se acumula deriva.
+    pan = { x: ev.clientX, y: ev.clientY, frame, el };
+    el.setPointerCapture(ev.pointerId);
+    el.classList.add('is-panning');
+  }
+
+  function onMove(ev) {
+    if (!pan) return;
+    const f = pan.frame;
+    const dx = (ev.clientX - pan.x) / f.pw;
+    const dy = (ev.clientY - pan.y) / f.ph;
+    const spanX = f.xLog
+      ? Math.log10(Math.max(f.xMax, 1e-12)) - Math.log10(Math.max(f.xMin, 1e-12))
+      : f.xMax - f.xMin;
+    const spanY = f.yLog
+      ? Math.log10(Math.max(f.yMax, 1e-12)) - Math.log10(Math.max(f.yMin, 1e-12))
+      : f.yMax - f.yMin;
+    over.x = shiftBy(f.xMin, f.xMax, -dx * spanX, f.xLog);
+    over.y = shiftBy(f.yMin, f.yMax, dy * spanY, f.yLog);
+    onChange();
+  }
+
+  function onUp(ev) {
+    if (!pan) return;
+    const el = pan.el;
+    pan = null;
+    el.classList.remove('is-panning');
+    try { el.releasePointerCapture(ev.pointerId); } catch (_) { /* ya soltado */ }
+  }
+
+  const onDbl = () => { over = { x: null, y: null }; onChange(); };
+  const onMenu = (ev) => ev.preventDefault();   // el botón derecho panea
+
+  for (const el of canvases) {
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('pointerdown', onDown);
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
+    el.addEventListener('dblclick', onDbl);
+    el.addEventListener('contextmenu', onMenu);
+  }
+
+  return {
+    /** Mezcla el encuadre automático con lo que el usuario haya movido. */
+    apply(auto) {
+      const o = { ...auto };
+      if (over.x) { o.xMin = over.x[0]; o.xMax = over.x[1]; }
+      if (over.y) { o.yMin = over.y[0]; o.yMax = over.y[1]; }
+      return o;
+    },
+    /** Zoom por teclado: mismo estado que el mouse, centrado en el marco. */
+    zoom(factor, axis = 'both') {
+      const frame = getFrame(canvas);
+      if (!frame) return;
+      if (axis !== 'y') {
+        over.x = scaleAround(frame.xMin, frame.xMax,
+          frame.xLog ? Math.sqrt(Math.max(frame.xMin * frame.xMax, 1e-24))
+                     : (frame.xMin + frame.xMax) / 2, factor, frame.xLog);
+      }
+      if (axis !== 'x') {
+        over.y = scaleAround(frame.yMin, frame.yMax,
+          frame.yLog ? Math.sqrt(Math.max(frame.yMin * frame.yMax, 1e-24))
+                     : (frame.yMin + frame.yMax) / 2, factor, frame.yLog);
+      }
+      onChange();
+    },
+    reset() { over = { x: null, y: null }; onChange(); },
+    isCustom() { return !!(over.x || over.y); },
+    destroy() {
+      for (const el of canvases) {
+        el.removeEventListener('wheel', onWheel);
+        el.removeEventListener('pointerdown', onDown);
+        el.removeEventListener('pointermove', onMove);
+        el.removeEventListener('pointerup', onUp);
+        el.removeEventListener('pointercancel', onUp);
+        el.removeEventListener('dblclick', onDbl);
+        el.removeEventListener('contextmenu', onMenu);
+      }
+    },
+  };
 }
 
 // Marcador de trigger: línea llena sobre el hammer, punteada sobre el geo

@@ -23,6 +23,7 @@ import numpy as np
 
 from ._gs import frd
 from .datacache import get_dataset
+from .groups import filtered_dataset, load_grouping, project_disabled_for_group
 from .signal_view import _round6, decimate_minmax
 
 
@@ -33,7 +34,7 @@ def arrivals_path(raw_root: str | Path) -> Path:
 def _trace(time_s: np.ndarray, values: np.ndarray, max_points: int) -> dict | None:
     if values.size == 0 or time_s.size == 0:
         return None
-    mins, maxs, stride = decimate_minmax(values.astype(np.float32), max_points)
+    mins, maxs, rising, stride = decimate_minmax(values.astype(np.float32), max_points)
     finite = values[np.isfinite(values)]
     dt = float(time_s[1] - time_s[0]) if time_s.size > 1 else 1e-3
     return {
@@ -44,20 +45,30 @@ def _trace(time_s: np.ndarray, values: np.ndarray, max_points: int) -> dict | No
         "y_max": _round6(float(finite.max())) if finite.size else None,
         "min": [_round6(v) for v in mins],
         "max": [_round6(v) for v in maxs],
+        "rising": [bool(v) for v in rising],
     }
 
 
 def build_averages(raw_root: str | Path, *, max_points: int = 2000,
-                   prefer_filtered: bool = False) -> dict:
-    """Un promedio por distancia, con su arribo anotado si ya existe."""
+                   prefer_filtered: bool = False, group_id: int = 1) -> dict:
+    """Un promedio por distancia **de un grupo**, con su arribo si ya está.
+
+    El grupo importa: cada uno es un tendido distinto y sus distancias no se
+    promedian con las de otro aunque coincidan en metros. Es lo que hace
+    ``_refresh_averages`` (:3044) antes de llamar a ``compute_average_groups``.
+    """
     raw_root = Path(raw_root)
-    dataset = get_dataset(raw_root)
+    group_count, assignments = load_grouping(raw_root)
+    group_id = max(1, min(int(group_id or 1), max(1, group_count)))
+    dataset = filtered_dataset(get_dataset(raw_root), group_id, group_count, assignments)
     anns = frd.load_annotations(frd.default_annotations_path(raw_root))
     settings = frd.load_filter_settings(frd.default_filter_settings_path(raw_root))
     offsets = frd.load_alignment_offsets(frd.default_alignment_offsets_path(raw_root))
     shot_offsets = frd.load_alignment_shot_offsets(
         frd.default_alignment_shot_offsets_path(raw_root))
-    disabled = frd.load_disabled_folders(frd.default_disabled_folders_path(raw_root))
+    disabled = project_disabled_for_group(
+        frd.load_disabled_folders(frd.default_disabled_folders_path(raw_root)),
+        group_id, group_count)
     arrivals = frd.load_average_arrivals(arrivals_path(raw_root))
 
     groups, hammer_global = frd.compute_average_groups(
@@ -96,6 +107,8 @@ def build_averages(raw_root: str | Path, *, max_points: int = 2000,
         "groups": out,
         "hammer_global": hammer,
         "filter_enabled": bool(settings.enabled),
+        "group_id": group_id,
+        "group_count": max(1, group_count),
         "path": str(arrivals_path(raw_root)),
     }
 

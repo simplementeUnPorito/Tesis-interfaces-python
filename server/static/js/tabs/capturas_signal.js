@@ -5,12 +5,14 @@
 //   · trigger arrastrable con su etiqueta (InfiniteLine movable :1114)
 //   · zona auto: dos clicks sobre el hammer, líneas azules (:1140)
 //   · overlays: mismo label, promedio OK, promedio de carpeta (:1186-1325)
-//   · zoom con ↑/↓ (`_zoom_plot` :1571)
+//   · zoom con ↑/↓ (`_zoom_plot` :1571) y con la rueda del mouse sobre el
+//     cursor, arrastre para mover y doble click para reencuadrar (el ViewBox
+//     que pyqtgraph le da de fábrica a cada PlotWidget)
 //
 // Se guarda solo, como la app: soltar el trigger o invertir el geófono avisa
 // al panel izquierdo, que es el que escribe (POST /api/pick). El trigger va a
 // TODOS los geófonos de la captura; la inversión, sólo a este.
-import { createFrame, drawMinMax, drawVLine } from '../plot.js';
+import { createFrame, drawMinMax, drawVLine, attachViewControls } from '../plot.js';
 
 const fmt = (n, d = 2) => (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
 
@@ -33,13 +35,13 @@ function colors() {
   };
 }
 
-function yRange(ch, zoom) {
+function yRange(ch) {
   const lo = ch.y_min ?? 0;
   const hi = ch.y_max ?? 0;
   let range = hi - lo;
   if (range <= 0) range = 1;
   const mid = (lo + hi) / 2;
-  const half = (range / 2) * 1.05 * zoom;
+  const half = (range / 2) * 1.05;
   return { yMin: mid - half, yMax: mid + half };
 }
 
@@ -88,7 +90,6 @@ export function mountViewer(host, opts = {}) {
   let zoneClicks = [];
   let flip = false;
   let kind = 'raw';
-  const zoomLevel = { hammer: 1, geo: 1 };
   let frames = { hammer: null, geo: null };
   let abortSignalReq = null;
   let abortOverlayReq = null;
@@ -96,6 +97,28 @@ export function mountViewer(host, opts = {}) {
   let dragging = false;
 
   function status(text) { elStatus.textContent = text || ''; }
+
+  // ¿El cursor está sobre la línea del trigger? Con 8 px de tolerancia, igual
+  // que el `movable` del InfiniteLine.
+  function sobreTrigger(clientX) {
+    if (!frames.hammer || !payload || payload.trigger_source === 'none') return false;
+    const px = frames.hammer.xOf(trigger);
+    return Math.abs((clientX - elHammer.getBoundingClientRect().left) - px) <= 8;
+  }
+
+  // Rueda, arrastre y doble click sobre cada gráfico. En el hammer el botón
+  // izquierdo ya tiene dueño (arrastrar el trigger, marcar la zona), así que
+  // ahí sólo panea cuando no está haciendo ninguna de las dos cosas.
+  const viewHammer = attachViewControls(elHammer, {
+    getFrame: () => frames.hammer,
+    onChange: () => { render(); quizasRefinar(); },
+    leftPan: (ev) => !markingZone && !sobreTrigger(ev.clientX),
+  });
+  const viewGeo = attachViewControls(elGeo, {
+    getFrame: () => frames.geo,
+    onChange: () => { render(); quizasRefinar(); },
+  });
+  const views = { hammer: viewHammer, geo: viewGeo };
 
   // ── Dibujo ───────────────────────────────────────────────────────────────
   function render() {
@@ -105,17 +128,16 @@ export function mountViewer(host, opts = {}) {
 
     if (ch.hammer) {
       const dur = ch.hammer.duration_s || 0;
-      // Ventana de `_refresh_plot` (:1136): [trigger-0.15, trigger+0.65],
-      // escalada por el zoom alrededor de su centro.
-      const center = trigger + 0.25;
-      const half = 0.4 * zoomLevel.hammer;
-      frames.hammer = createFrame(elHammer, {
-        xMin: Math.max(0, center - half),
-        xMax: Math.min(dur, center + half),
-        ...yRange(ch.hammer, zoomLevel.hammer),
+      // Ventana de `_refresh_plot` (:1136): [trigger-0.15, trigger+0.65]. Es el
+      // encuadre automático; `viewHammer.apply` lo pisa con lo que el usuario
+      // haya movido con la rueda o el arrastre.
+      frames.hammer = createFrame(elHammer, viewHammer.apply({
+        xMin: Math.max(0, trigger - 0.15),
+        xMax: Math.min(dur, trigger + 0.65),
+        ...yRange(ch.hammer),
         xLabel: 'tiempo [s]',
         yLabel: 'Hammer [V]',
-      });
+      }));
       drawMinMax(frames.hammer, ch.hammer, { color: c.hammer });
       if (zone) {
         drawVLine(frames.hammer, zone[0], { color: c.zone, dashed: true, lineWidth: 1.5 });
@@ -134,15 +156,13 @@ export function mountViewer(host, opts = {}) {
     if (ch.geo) {
       const dur = ch.geo.duration_s || 0;
       // Ventana de `_refresh_plot` (:1137): [-0.08, 1.1] relativo al trigger.
-      const center = 0.51;
-      const half = 0.59 * zoomLevel.geo;
-      frames.geo = createFrame(elGeo, {
-        xMin: Math.max(-trigger, center - half),
-        xMax: Math.min(dur - trigger, center + half),
-        ...yRange(ch.geo, zoomLevel.geo),
+      frames.geo = createFrame(elGeo, viewGeo.apply({
+        xMin: Math.max(-trigger, -0.08),
+        xMax: Math.min(dur - trigger, 1.1),
+        ...yRange(ch.geo),
         xLabel: 'tiempo relativo al hammer [s]',
         yLabel: 'Geo [V]',
-      });
+      }));
       // Overlays primero: van por debajo de la traza actual, como los zValue de la app.
       if (overlays) {
         for (const t of overlays.same_label || []) {
@@ -199,17 +219,54 @@ export function mountViewer(host, opts = {}) {
   }
 
   // ── Datos ────────────────────────────────────────────────────────────────
-  function maxPointsFor(canvas) {
+  function pixeles(canvas) {
     const dpr = window.devicePixelRatio || 1;
-    // Un bucket por píxel físico: pedir más es tirar bytes.
-    return Math.min(20000, Math.max(100, Math.round((canvas.clientWidth || 300) * dpr)));
+    return Math.max(100, Math.round((canvas.clientWidth || 300) * dpr));
+  }
+
+  // Cuántos buckets pedir. Un bucket por píxel alcanza sólo si se ve la señal
+  // entera; al acercarse, esos buckets se reparten entre menos tiempo y cada
+  // uno pasa a ocupar varios píxeles: la traza se ve escalonada y el zoom no
+  // devuelve detalle. pyqtgraph no tiene el problema porque redibuja desde los
+  // datos completos. Acá se compensa pidiendo tantos buckets como haría falta
+  // para que la VENTANA VISIBLE tenga uno por píxel.
+  function maxPointsFor(canvas) {
+    const px = pixeles(canvas);
+    const ch = payload && payload.channels
+      ? (payload.channels.geo || payload.channels.hammer) : null;
+    const frame = canvas === elGeo ? frames.geo : frames.hammer;
+    if (!ch || !frame) return px;
+    const dur = ch.duration_s || 0;
+    const visible = Math.max(1e-6, frame.xMax - frame.xMin);
+    const factor = dur > 0 ? Math.max(1, dur / visible) : 1;
+    return Math.min(20000, Math.round(px * factor));
+  }
+
+  // Al cambiar el encuadre se re-pide la señal sólo si hace falta más detalle
+  // del que ya se tiene. Sin este freno cada tick de la rueda dispararía un
+  // pedido.
+  let pedidos = 0;
+  let ultimoMaxPoints = 0;
+  function quizasRefinar() {
+    if (!payload || !row) return;
+    const necesita = Math.max(maxPointsFor(elGeo), maxPointsFor(elHammer));
+    if (necesita <= ultimoMaxPoints * 1.5) return;
+    clearTimeout(pedidos);
+    pedidos = setTimeout(() => {
+      fetchSignal({
+        // No perder el trigger que se está arrastrando: sin esto el refetch lo
+        // devolvería al valor guardado a mitad del zoom.
+        triggerOverride: payload.trigger_source === 'override' ? trigger : null,
+      });
+    }, 180);
   }
 
   async function fetchSignal({ triggerOverride = null } = {}) {
     if (!row) return;
     if (abortSignalReq) abortSignalReq.abort();
     abortSignalReq = new AbortController();
-    const p = new URLSearchParams({ kind, max_points: String(maxPointsFor(elHammer)) });
+    ultimoMaxPoints = Math.max(maxPointsFor(elGeo), maxPointsFor(elHammer));
+    const p = new URLSearchParams({ kind, max_points: String(ultimoMaxPoints) });
     // Cada campaña es su propia raíz de datos: sin esto el shot_id se busca
     // en la raíz equivocada y no aparece.
     if (row.campaign) p.set('campaign', row.campaign);
@@ -338,9 +395,8 @@ export function mountViewer(host, opts = {}) {
   });
 
   host.querySelector('#vm-zoom-reset').addEventListener('click', () => {
-    zoomLevel.hammer = 1;
-    zoomLevel.geo = 1;
-    render();
+    viewHammer.reset();
+    viewGeo.reset();
   });
 
   const ro = new ResizeObserver(() => render());
@@ -418,12 +474,13 @@ export function mountViewer(host, opts = {}) {
       render();
     },
 
-    zoom(which, zoomIn) {
-      // `_zoom_plot` (:1571): 0.8 para acercar, 1.25 para alejar.
-      const f = zoomIn ? 0.8 : 1.25;
-      zoomLevel[which] = Math.max(0.02, Math.min(8, zoomLevel[which] * f));
-      render();
+    zoom(which, zoomIn, axis = 'both') {
+      // `_zoom_plot` (:1571): 0.8 para acercar, 1.25 para alejar. Mismo estado
+      // que la rueda, así teclado y mouse no se pelean por el encuadre.
+      if (views[which]) views[which].zoom(zoomIn ? 0.8 : 1.25, axis);
     },
+
+    resetZoom() { viewHammer.reset(); viewGeo.reset(); },
 
     toggleFlip() {
       flip = !flip;
@@ -439,6 +496,8 @@ export function mountViewer(host, opts = {}) {
     destroy() {
       if (abortSignalReq) abortSignalReq.abort();
       if (abortOverlayReq) abortOverlayReq.abort();
+      viewHammer.destroy();
+      viewGeo.destroy();
       ro.disconnect();
       mo.disconnect();
     },

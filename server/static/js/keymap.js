@@ -17,6 +17,7 @@ export const ACTIONS = [
   { id: 'zoomOut',   label: 'Zoom − hammer',               def: 'ArrowDown' },
   { id: 'zoomInGeo',  label: 'Zoom + geófono',             def: 'q' },
   { id: 'zoomOutGeo', label: 'Zoom − geófono',             def: 'e' },
+  { id: 'zoomReset',  label: 'Reencuadrar los dos',        def: '0' },
   { id: 'cycle',     label: 'Rotar estado',                def: ' ' },
   { id: 'flip',      label: 'Invertir la señal',           def: 'x' },
   { id: 'auto',      label: 'Recalcular el auto',          def: 'r' },

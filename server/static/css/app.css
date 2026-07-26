@@ -429,6 +429,9 @@ canvas.plot {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--plot-bg);
+  /* Sin esto el navegador se queda el arrastre para hacer scroll de la página
+     y el paneo del gráfico nunca llega a recibir los pointermove. */
+  touch-action: none;
 }
 
 /* ── Panel izquierdo de Capturas ─────────────────────────────────────────── */
@@ -594,6 +597,7 @@ button.is-primary {
 
 canvas.plot.is-grabbable { cursor: ew-resize }
 canvas.plot.is-dragging { cursor: grabbing }
+canvas.plot.is-panning { cursor: move }
 
 /* ── Paneles todavía no portados ─────────────────────────────────────────── */
 .pending {

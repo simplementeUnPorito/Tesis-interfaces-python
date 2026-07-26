@@ -1,5 +1,8 @@
-// Tab MASW: sólo enruta las 3 subtabs (Dispersion/Inversion/Perfil Vs).
-// Dibujar dispersión, inversión y perfil es PORT_PLAN §3.5, otro ítem.
+// Tab MASW: enruta las 3 subtabs (Dispersion/Inversion/Perfil Vs) y monta la
+// primera. Inversión y perfil siguen pendientes (PORT_PLAN §3.5, DUDAS #17):
+// los backends de `masw_backends.py` tardan minutos y tienen que correr como
+// trabajos del Pipeline, no dentro de un request.
+import * as dispersion from './masw_dispersion.js';
 
 function activateSubtab(root, name) {
   for (const btn of root.querySelectorAll('.subtab-btn')) {
@@ -21,5 +24,13 @@ export function mount(root) {
   };
   nav.addEventListener('click', onClick);
 
-  return {};   // se monta una vez y queda; no hay nada que pausar
+  // La subtab de dispersión se monta una sola vez, igual que las tabs de
+  // arriba: cambiar de subtab no puede tirar la imagen ya calculada.
+  const panel = root.querySelector('#subpanel-dispersion');
+  const sub = panel ? dispersion.mount(panel) : null;
+
+  return {
+    resume() { if (sub && sub.resume) sub.resume(); },
+    destroy() { if (sub && sub.destroy) sub.destroy(); },
+  };
 }

@@ -206,19 +206,36 @@ class Pipeline:
         return True
 
     # ── borrado (siempre pedido por un humano) ──────────────────────────────
-    def delete_folder(self, folder_name: str, with_zip: bool = False) -> dict:
+    def delete_folder(self, folder_name: str, with_zip: bool = False,
+                      campaign: str = "") -> dict:
         """Borra una carpeta extraída. Nunca se llama sola.
 
         Política: nada se borra automáticamente, ni por estar incompleto ni por
         antigüedad. El ZIP original se conserva salvo pedido explícito, porque es
         el dato tal como salió del campo y no siempre se puede volver a pedir.
+
+        ``campaign`` es el id de campaña (``"."`` o vacío = la raíz). Sin él sólo
+        se podían borrar las carpetas que cuelgan directo de ``raw_root``, y las
+        de una campaña quedaban fuera de alcance.
         """
         import shutil
 
         safe = Path(folder_name).name
         if not safe or safe in (".", ".."):
             return {"ok": False, "error": "nombre inválido"}
-        target = (self.raw_root / safe).resolve()
+
+        base = self.raw_root
+        if campaign and campaign != ".":
+            sub = Path(campaign).name
+            if not sub or sub in (".", ".."):
+                return {"ok": False, "error": "campaña inválida"}
+            base = self.raw_root / sub
+            if not base.is_dir():
+                return {"ok": False, "error": f"campaña desconocida: {campaign}"}
+
+        target = (base / safe).resolve()
+        # Se compara contra raw_root igual: la campaña siempre cuelga de ahí, y
+        # esto ataja un `..` que se haya colado por cualquiera de los dos lados.
         if not str(target).startswith(str(self.raw_root.resolve())):
             return {"ok": False, "error": "fuera de raw_root"}
         if not target.is_dir():

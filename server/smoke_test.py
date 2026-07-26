@@ -352,11 +352,11 @@ MASW_SUBTABS = (
     ("3. Perfil Vs", "perfil"),
 )
 
-# `filtros` salió de esta lista el 2026-07-26: ya está portado (§3.2), así que
-# su panel lo llena el JS y no tiene —ni debe tener— un placeholder.
+# `filtros` salió de esta lista el 2026-07-26 (§3.2) y `waterfall` el mismo día
+# (§3.4): ya están portados, así que sus paneles los llena el JS y no tienen
+# —ni deben tener— un placeholder.
 PANELES_PENDIENTES = (
-    "waterfall",
-    "subpanel-dispersion", "subpanel-inversion", "subpanel-perfil",
+    "subpanel-inversion", "subpanel-perfil",
 )
 
 
@@ -489,6 +489,76 @@ def _filtros_preview(ctx: Ctx) -> None:
 
     code, body, _ = ctx.get("/api/filter/preview?shot_id=0000000000000000")
     assert code == 404, f"shot_id inexistente -> {code}, se esperaba 404"
+
+
+@check("waterfall.vista_vs_persistente",
+       "el recorte/ocultar es sólo vista; «Invertir traza» sí escribe geo_flip",
+       mode="sandbox")
+def _waterfall_vista_vs_persistente(ctx: Ctx) -> None:
+    """La distinción que documenta `WaterfallPanel` (:3341) y que es fácil de
+    romper: tildar trazas y recortar el tiempo NO pueden tocar las anotaciones,
+    porque el export de Promedios sigue usando todo. «Invertir traza» sí, y por
+    eso llega a promedios, MASW y export."""
+    import hashlib
+
+    shot_id = _write_fixture(ctx, "smoke_waterfall", spike=0.61, with_nan=False)
+    # Sólo entran al promedio las capturas accepted Y reviewed: sin validarla el
+    # waterfall queda vacío a propósito.
+    vacio = ctx.json_get("/api/waterfall")
+    assert vacio["traces"] == [], f"waterfall con capturas sin validar: {vacio['traces']}"
+
+    code, raw, _ = ctx.post("/api/pick", json.dumps(
+        {"shot_id": shot_id, "reviewed": True, "accepted": True}).encode("utf-8"),
+        {"Content-Type": "application/json"})
+    assert code == 200, f"POST /api/pick -> {code}: {raw[:200]!r}"
+
+    wf = ctx.json_get("/api/waterfall")
+    assert len(wf["traces"]) == 1, f"se esperaba 1 traza, hay {len(wf['traces'])}"
+    traza = wf["traces"][0]
+    assert abs(float(traza["distance_m"]) - 4.0) < 1e-6, traza["distance_m"]
+    for clave in ("min", "max", "rising", "t0", "bucket_dt", "label", "peak"):
+        assert clave in traza, f"la traza no trae {clave!r}"
+    assert len(traza["rising"]) == len(traza["min"]), "rising y min de largo distinto"
+    # La curva viene corrida a su distancia: oscila alrededor de 4 m, no de 0.
+    centro = (min(v for v in traza["min"] if v is not None)
+              + max(v for v in traza["max"] if v is not None)) / 2
+    assert abs(centro - 4.0) < 1.0, (
+        f"la traza no está centrada en su distancia (centro={centro:.3f}, esperado ~4.0)")
+
+    def _huella() -> str:
+        # El archivo de anotaciones lo resuelve el servidor; se lo pregunta a él.
+        ruta = Path(ctx.json_get("/api/filter")["path"]).with_name(
+            "field_review_annotations.json")
+        return hashlib.md5(ruta.read_bytes()).hexdigest() if ruta.is_file() else ""
+
+    antes = _huella()
+    assert antes, "no se encontró el archivo de anotaciones del sandbox"
+
+    # Sólo vista: ocultar la traza la saca del dibujo y no toca las anotaciones.
+    code, raw, _ = ctx.post("/api/waterfall/view", json.dumps(
+        {"hidden_distances": [4.0]}).encode("utf-8"), {"Content-Type": "application/json"})
+    assert code == 200, f"POST /api/waterfall/view -> {code}: {raw[:200]!r}"
+    oculto = json.loads(raw)
+    assert oculto["traces"] == [], "ocultar la traza no la sacó del waterfall"
+    assert oculto["n_averages"] == 1, (
+        "ocultar una traza cambió la cantidad de promedios: es sólo vista, "
+        "el export sigue usando todas")
+    assert _huella() == antes, "un cambio de VISTA escribió las anotaciones"
+
+    ctx.post("/api/waterfall/view", json.dumps({"hidden_distances": []}).encode("utf-8"),
+             {"Content-Type": "application/json"})
+
+    # Persistente: invertir la traza sí escribe geo_flip.
+    code, raw, _ = ctx.post("/api/waterfall/flip", json.dumps(
+        {"distance_m": 4.0}).encode("utf-8"), {"Content-Type": "application/json"})
+    assert code == 200, f"POST /api/waterfall/flip -> {code}: {raw[:200]!r}"
+    volteado = json.loads(raw)
+    assert volteado["flip"]["changed"] >= 1, volteado["flip"]
+    assert _huella() != antes, "«Invertir traza» no escribió las anotaciones"
+
+    señal = ctx.json_get(f"/api/signal?shot_id={shot_id}")
+    assert señal["geo_flip"] is True, (
+        "el flip del waterfall no llegó al visor: tiene que ser el mismo geo_flip")
 
 
 @check("tabs.tema_toggle", "el botón de tema y las reglas [data-theme] de los dos temas existen")

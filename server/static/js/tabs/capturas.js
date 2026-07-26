@@ -503,6 +503,7 @@ export function mount(root) {
     zoomOut: (ev) => viewer.zoom(ev.shiftKey ? 'geo' : 'hammer', false),
     zoomInGeo: () => viewer.zoom('geo', true),
     zoomOutGeo: () => viewer.zoom('geo', false),
+    zoomReset: () => viewer.resetZoom(),
     flip: () => viewer.toggleFlip(),
     auto: () => viewer.reautoPick(),
     cycle: () => cycleEstado(),

@@ -4,7 +4,7 @@
 // sólo capturas validadas, sin las carpetas rechazadas en Enfase, corridas por
 // su offset y filtradas si el filtro está activo. Acá se marca el primer arribo
 // del promedio, que es lo que después alimenta la curva tiempo-distancia.
-import { createFrame, drawMinMax, drawVLine } from '../plot.js';
+import { createFrame, drawMinMax, drawVLine, attachViewControls } from '../plot.js';
 import { mountCampaignPicker } from '../campaign_picker.js';
 
 const fmt = (n, d = 4) => (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
@@ -19,6 +19,15 @@ export function mount(root) {
     <div class="workspace">
       <div class="ws-left">
         <div class="card" id="pr-campaign"></div>
+
+        <div class="card">
+          <div class="field-row">
+            <label for="pr-group">Grupo</label>
+            <select id="pr-group"></select>
+          </div>
+          <p class="note">Cada grupo es un tendido distinto: sus distancias no se promedian
+          con las de otro aunque coincidan en metros.</p>
+        </div>
 
         <div class="card pane-list">
           <div id="pr-summary" class="summary">cargando…</div>
@@ -73,19 +82,39 @@ export function mount(root) {
   const $ = (s) => root.querySelector(s);
   const elGeo = $('#pr-geo');
   const elHam = $('#pr-hammer');
-  let data = { groups: [], hammer_global: null };
+  let data = { groups: [], hammer_global: null, group_id: 1, group_count: 1 };
   let campaign = '';
   let indice = 0;
+  let grupo = 1;
   let frameGeo = null;
+  let frameHam = null;
+
+  // Marcar el arribo pide acercarse al primer movimiento. Sobre el geófono el
+  // botón izquierdo ya pone el arribo, así que ahí se panea con el del medio o
+  // el derecho; doble click reencuadra en los dos.
+  const viewHam = attachViewControls(elHam, {
+    getFrame: () => frameHam, onChange: () => dibujar(),
+  });
+  const viewGeo = attachViewControls(elGeo, {
+    getFrame: () => frameGeo, onChange: () => dibujar(), leftPan: () => false,
+  });
 
   const picker = mountCampaignPicker($('#pr-campaign'), {
-    onChange: (id) => { campaign = id; indice = 0; load(); },
+    onChange: (id) => { campaign = id; indice = 0; grupo = 1; load(); },
+  });
+
+  $('#pr-group').addEventListener('change', (ev) => {
+    grupo = Number(ev.target.value) || 1;
+    indice = 0;
+    load();
   });
 
   const actual = () => data.groups[indice] || null;
 
   function render() {
     const g = actual();
+    $('#pr-group').innerHTML = Array.from({ length: data.group_count || 1 }, (_, i) =>
+      `<option value="${i + 1}"${(i + 1) === data.group_id ? ' selected' : ''}>Grupo ${i + 1}</option>`).join('');
     $('#pr-summary').textContent =
       `${data.groups.length} distancias · ` +
       `${data.groups.filter((x) => x.reviewed).length} validadas` +
@@ -121,7 +150,11 @@ export function mount(root) {
     const vacio = (canvas, yLabel) => createFrame(canvas, {
       xMin: -0.05, xMax: 1, yMin: -1, yMax: 1,
       xLabel: 'tiempo relativo al hammer [s]', yLabel });
-    if (!g) { vacio(elHam, 'Hammer [V]'); frameGeo = vacio(elGeo, 'Geo [V]'); return; }
+    if (!g) {
+      frameHam = vacio(elHam, 'Hammer [V]');
+      frameGeo = vacio(elGeo, 'Geo [V]');
+      return;
+    }
 
     const eje = (tr) => {
       const lo = tr && tr.y_min !== null ? tr.y_min : -1;
@@ -131,11 +164,11 @@ export function mount(root) {
                xLabel: 'tiempo relativo al hammer [s]' };
     };
 
-    const fh = createFrame(elHam, { ...eje(g.hammer), yLabel: 'Hammer [V]' });
-    if (g.hammer) drawMinMax(fh, g.hammer, { color: c.hammer, lineWidth: 1 });
-    drawVLine(fh, 0, { color: c.trigger, dashed: true });
+    frameHam = createFrame(elHam, viewHam.apply({ ...eje(g.hammer), yLabel: 'Hammer [V]' }));
+    if (g.hammer) drawMinMax(frameHam, g.hammer, { color: c.hammer, lineWidth: 1 });
+    drawVLine(frameHam, 0, { color: c.trigger, dashed: true });
 
-    frameGeo = createFrame(elGeo, { ...eje(g.geo), yLabel: 'Geo [V]' });
+    frameGeo = createFrame(elGeo, viewGeo.apply({ ...eje(g.geo), yLabel: 'Geo [V]' }));
     if (g.geo) drawMinMax(frameGeo, g.geo, { color: c.geo, lineWidth: 1 });
     drawVLine(frameGeo, 0, { color: c.trigger, dashed: true });
     if (g.arrival_s !== null && g.arrival_s !== undefined) {
@@ -147,7 +180,7 @@ export function mount(root) {
   async function load() {
     $('#pr-meta').textContent = 'calculando promedios…';
     try {
-      const q = new URLSearchParams({ campaign,
+      const q = new URLSearchParams({ campaign, group_id: String(grupo),
         max_points: String(Math.max(200, Math.round(elGeo.clientWidth || 800))) });
       data = await fetch(`/api/averages?${q}`, { cache: 'no-store' }).then((r) => r.json());
       indice = Math.min(indice, Math.max(0, data.groups.length - 1));
@@ -212,6 +245,6 @@ export function mount(root) {
 
   return {
     resume() { picker.reload(); load(); },
-    destroy() { ro.disconnect(); },
+    destroy() { viewHam.destroy(); viewGeo.destroy(); ro.disconnect(); },
   };
 }

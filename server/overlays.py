@@ -54,7 +54,7 @@ def _trace(signal: np.ndarray, *, t0: float, fs: float, max_points: int) -> dict
     """Traza decimada lista para dibujar, con su origen de tiempo propio."""
     if signal.size == 0 or fs <= 0:
         return None
-    mins, maxs, stride = decimate_minmax(signal, max_points)
+    mins, maxs, rising, stride = decimate_minmax(signal, max_points)
     finite = signal[np.isfinite(signal)]
     return {
         "t0": _round6(t0),
@@ -64,6 +64,7 @@ def _trace(signal: np.ndarray, *, t0: float, fs: float, max_points: int) -> dict
         "y_max": _round6(float(np.max(finite))) if finite.size else None,
         "min": [_round6(v) for v in mins],
         "max": [_round6(v) for v in maxs],
+        "rising": [bool(v) for v in rising],
     }
 
 

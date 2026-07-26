@@ -37,6 +37,29 @@ def offsets_path(raw_root: str | Path) -> Path:
     return frd.default_alignment_offsets_path(raw_root)
 
 
+def shot_offsets_path(raw_root: str | Path) -> Path:
+    return frd.default_alignment_shot_offsets_path(raw_root)
+
+
+def _limpiar_shot_offsets(raw_root: Path, pairs) -> int:
+    """Borra los offsets por señal de esas capturas. Devuelve cuántos sacó.
+
+    Los offsets por señal son de una versión vieja del flujo y tienen prioridad
+    sobre el de carpeta: si quedan, pelean con el ajuste que se acaba de hacer.
+    La app los limpia en «OK», al rechazar y al resetear el label (:2718, :2734,
+    :2763); no los crea en ningún lado.
+    """
+    path = shot_offsets_path(raw_root)
+    shot_offsets = frd.load_alignment_shot_offsets(path)
+    sacados = 0
+    for shot, _ann in pairs:
+        if shot_offsets.pop(shot.shot_id, None) is not None:
+            sacados += 1
+    if sacados:
+        frd.save_alignment_shot_offsets(path, shot_offsets)
+    return sacados
+
+
 def disabled_path(raw_root: str | Path) -> Path:
     return frd.default_disabled_folders_path(raw_root)
 
@@ -116,6 +139,11 @@ def load_alignment(raw_root: str | Path, *, group_id: int = 1,
     raw_root = Path(raw_root)
     offsets = frd.load_alignment_offsets(offsets_path(raw_root))
     disabled = frd.load_disabled_folders(disabled_path(raw_root))
+    # Offsets por señal: son de una versión vieja del flujo. La app ya no los
+    # crea —el ajuste fino ahora es el trigger en Capturas— pero los que hayan
+    # quedado tienen PRIORIDAD sobre el de carpeta y pelean con él, así que se
+    # cuentan para avisar y «OK alineado» los limpia (`_mark_ok` :2705).
+    shot_offsets = frd.load_alignment_shot_offsets(shot_offsets_path(raw_root))
     group_count, _assign = frd.load_dispersion_groups(
         frd.default_dispersion_groups_path(raw_root))
     group_count = max(1, int(group_count or 1))
@@ -141,7 +169,7 @@ def load_alignment(raw_root: str | Path, *, group_id: int = 1,
         grid, mean = avg
         finite = mean[np.isfinite(mean)]
         p2p = float(finite.max() - finite.min()) if finite.size else 0.0
-        mins, maxs, stride = decimate_minmax(mean.astype(np.float32), max_points)
+        mins, maxs, rising, stride = decimate_minmax(mean.astype(np.float32), max_points)
         dt = float(grid[1] - grid[0]) if grid.size > 1 else 1e-3
         folders.append({
             "folder": carpeta,
@@ -150,6 +178,8 @@ def load_alignment(raw_root: str | Path, *, group_id: int = 1,
             "offset_ms": _round6(float(offsets.get(activo, {}).get(carpeta, 0.0)) * 1000.0),
             # "Acumulada" = ya tiene offset guardado, o sea que se confirmó.
             "confirmed": carpeta in offsets.get(activo, {}),
+            "legacy_shot_offsets": sum(1 for shot, _a in pairs
+                                       if shot.shot_id in shot_offsets),
             "rejected": any(carpeta in disabled.get(k, ()) for k in claves_rechazo),
             "trace": {
                 "t0": _round6(float(grid[0])),
@@ -159,6 +189,7 @@ def load_alignment(raw_root: str | Path, *, group_id: int = 1,
                 "y_max": _round6(float(finite.max())) if finite.size else None,
                 "min": [_round6(v) for v in mins],
                 "max": [_round6(v) for v in maxs],
+                "rising": [bool(v) for v in rising],
             },
         })
 
@@ -176,13 +207,20 @@ def load_alignment(raw_root: str | Path, *, group_id: int = 1,
 
 
 def set_offset(raw_root: str | Path, *, label: str, folder: str,
-               offset_ms: float) -> None:
-    """Offset de una carpeta dentro de un label, en milisegundos."""
+               offset_ms: float, group_id: int = 1) -> int:
+    """Offset de una carpeta dentro de un label, en milisegundos.
+
+    Limpia de paso los offsets por señal viejos de esa carpeta, como «OK
+    alineado» de la app (`_mark_ok` :2705): tienen prioridad sobre el de
+    carpeta y pelearían con este ajuste. Devuelve cuántos limpió.
+    """
     raw_root = Path(raw_root)
     path = offsets_path(raw_root)
     offsets = frd.load_alignment_offsets(path)
     offsets.setdefault(label, {})[folder] = float(offset_ms) / 1000.0
     frd.save_alignment_offsets(path, offsets)
+    pairs = _pairs_by_label(raw_root, group_id).get(label, {}).get(folder, [])
+    return _limpiar_shot_offsets(raw_root, pairs)
 
 
 def reset_folder(raw_root: str | Path, *, label: str, folder: str) -> None:
@@ -194,12 +232,18 @@ def reset_folder(raw_root: str | Path, *, label: str, folder: str) -> None:
     frd.save_alignment_offsets(path, offsets)
 
 
-def reset_label(raw_root: str | Path, *, label: str) -> None:
+def reset_label(raw_root: str | Path, *, label: str, group_id: int = 1) -> int:
+    """Borra los offsets de todo el label, y los por señal de sus carpetas
+    (`_reset_label` :2755). Devuelve cuántos offsets por señal limpió."""
     raw_root = Path(raw_root)
     path = offsets_path(raw_root)
     offsets = frd.load_alignment_offsets(path)
     offsets.pop(label, None)
     frd.save_alignment_offsets(path, offsets)
+    sacados = 0
+    for _carpeta, pairs in _pairs_by_label(raw_root, group_id).get(label, {}).items():
+        sacados += _limpiar_shot_offsets(raw_root, pairs)
+    return sacados
 
 
 def set_rejected(raw_root: str | Path, *, label: str, folder: str,
@@ -222,6 +266,14 @@ def set_rejected(raw_root: str | Path, *, label: str, folder: str,
         entrada = disabled.setdefault(clave, [])
         if folder not in entrada:
             entrada.append(folder)
+        # Rechazar también saca el offset de carpeta y los por señal, igual que
+        # `_toggle_reject` (:2734): la carpeta deja de participar, sus ajustes
+        # de alineación no tienen a qué aplicarse.
+        offs = frd.load_alignment_offsets(offsets_path(raw_root))
+        if label in offs and offs[label].pop(folder, None) is not None:
+            frd.save_alignment_offsets(offsets_path(raw_root), offs)
+        _limpiar_shot_offsets(
+            raw_root, _pairs_by_label(raw_root, group_id).get(label, {}).get(folder, []))
     else:
         claves = {label} | {_group_key(label, gid, group_count)
                             for gid in range(1, group_count + 1)}

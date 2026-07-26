@@ -29,6 +29,7 @@ def averages_get(
     campaign: str = Query(""),
     max_points: int = Query(2000),
     kind: str = Query("raw"),
+    group_id: int = Query(1),
     pipeline: Pipeline = Depends(get_pipeline),
 ):
     """Promedios por distancia. Handler síncrono: promediar lee todo el grupo."""
@@ -36,6 +37,7 @@ def averages_get(
         _campaign_root(pipeline, campaign),
         max_points=max(100, min(20000, max_points)),
         prefer_filtered=(kind == "filt"),
+        group_id=group_id,
     )
     return Response(content=json.dumps(payload, allow_nan=False, ensure_ascii=False),
                     media_type="application/json")

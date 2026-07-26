@@ -9,7 +9,7 @@
 // Los parámetros se guardan en el mismo archivo que la app
 // (filter_settings.json de la campaña) y se aplican a promedios, waterfall,
 // MASW y export. Acá sólo se previsualizan sobre la captura elegida en Capturas.
-import { createFrame, drawMinMax } from '../plot.js';
+import { createFrame, drawMinMax, attachViewControls } from '../plot.js';
 
 const fmt = (n, d = 2) => (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
 
@@ -121,6 +121,20 @@ export function mount(root) {
   let preview = null;
   let campaign = '';
   let abortReq = null;
+  const frames = { orig: null, filt: null, spec: null };
+
+  // Rueda para acercar sobre el cursor, arrastre para mover, doble click para
+  // reencuadrar. En el espectro los ejes son logarítmicos y el zoom lo respeta.
+  // Los dos marcos de tiempo comparten vista: mirar la original y la filtrada
+  // en ventanas distintas no sirve para compararlas.
+  const viewTiempo = attachViewControls([elOrig, elFilt], {
+    getFrame: (el) => (el === elFilt ? frames.filt : frames.orig),
+    onChange: () => render(),
+  });
+  const viewSpec = attachViewControls(elSpec, {
+    getFrame: () => frames.spec,
+    onChange: () => render(),
+  });
 
   function params() {
     return {
@@ -152,9 +166,10 @@ export function mount(root) {
       xLabel: 'tiempo relativo al hammer [s]', yLabel: 'Geo [V]', ...opts });
 
     if (!preview) {
-      vacio(elOrig); vacio(elFilt);
-      vacio(elSpec, { xMin: 1, xMax: 1000, yMin: 1e-3, yMax: 1, xLog: true, yLog: true,
-                      xLabel: 'frecuencia [Hz]', yLabel: '|FFT|' });
+      frames.orig = vacio(elOrig);
+      frames.filt = vacio(elFilt);
+      frames.spec = vacio(elSpec, { xMin: 1, xMax: 1000, yMin: 1e-3, yMax: 1,
+        xLog: true, yLog: true, xLabel: 'frecuencia [Hz]', yLabel: '|FFT|' });
       return;
     }
 
@@ -168,28 +183,28 @@ export function mount(root) {
       const hi = Math.max(...trazas.map((x) => x.y_max ?? 0));
       const pad = Math.max((hi - lo) * 0.05, 1e-9);
       const dur = Math.max(...trazas.map((x) => (x.t0 || 0) + x.samples / (x.fs || 1)));
-      const eje = { xMin: -0.08, xMax: Math.min(dur, 1.1), yMin: lo - pad, yMax: hi + pad,
-                    xLabel: 'tiempo relativo al hammer [s]', yLabel: 'Geo [V]' };
-      if (t.original) {
-        drawMinMax(createFrame(elOrig, eje), t.original, { color: c.orig, lineWidth: 1 });
-      }
-      if (t.filtered) {
-        drawMinMax(createFrame(elFilt, eje), t.filtered, { color: c.filt, lineWidth: 1 });
-      }
+      const eje = viewTiempo.apply({
+        xMin: -0.08, xMax: Math.min(dur, 1.1), yMin: lo - pad, yMax: hi + pad,
+        xLabel: 'tiempo relativo al hammer [s]', yLabel: 'Geo [V]' });
+      frames.orig = createFrame(elOrig, eje);
+      if (t.original) drawMinMax(frames.orig, t.original, { color: c.orig, lineWidth: 1 });
+      frames.filt = createFrame(elFilt, eje);
+      if (t.filtered) drawMinMax(frames.filt, t.filtered, { color: c.filt, lineWidth: 1 });
     }
 
     const s = preview.spectrum;
     const specs = [s.original, s.filtered].filter(Boolean);
     if (specs.length) {
       const yHi = Math.max(...specs.map((x) => x.y_max ?? 1));
-      const frame = createFrame(elSpec, {
+      const frame = createFrame(elSpec, viewSpec.apply({
         xMin: Math.min(...specs.map((x) => x.f_min || 1)),
         xMax: Math.max(...specs.map((x) => x.f_max || 1000)),
         // Seis décadas por debajo del máximo: más abajo es sólo ruido numérico.
         yMin: Math.max(yHi * 1e-6, 1e-12), yMax: yHi,
         xLog: true, yLog: true,
         xLabel: 'frecuencia [Hz]', yLabel: '|FFT|',
-      });
+      }));
+      frames.spec = frame;
       // El espectro trae su abscisa punto por punto (bins en log, no pasos iguales).
       if (s.original) drawMinMax(frame, { ...s.original, x: s.original.f },
                                  { color: c.orig, lineWidth: 1, alpha: 0.7 });
@@ -356,6 +371,6 @@ export function mount(root) {
   return {
     // Al volver a la pestaña puede haber cambiado la captura elegida en Capturas.
     resume() { filaCache = null; loadSettings().then(refreshPreview); },
-    destroy() { ro.disconnect(); mo.disconnect(); },
+    destroy() { viewTiempo.destroy(); viewSpec.destroy(); ro.disconnect(); mo.disconnect(); },
   };
 }

@@ -6,6 +6,7 @@ import * as filtros from './tabs/filtros.js';
 import * as agrupamiento from './tabs/agrupamiento.js';
 import * as enfase from './tabs/enfase.js';
 import * as promedios from './tabs/promedios.js';
+import * as waterfall from './tabs/waterfall.js';
 
 const TABS = {
   capturas: capturas,
@@ -15,6 +16,7 @@ const TABS = {
   agrupamiento: agrupamiento,
   enfase: enfase,
   promedios: promedios,
+  waterfall: waterfall,
 };
 
 // Cada tab se monta UNA vez y después sólo se muestra u oculta. Antes se

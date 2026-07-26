@@ -59,12 +59,14 @@ def alignment_post(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
     if not label:
         raise HTTPException(400, "falta label")
 
+    limpiados = 0
     try:
         if accion == "offset":
             if not folder:
                 raise HTTPException(400, "falta folder")
-            set_offset(root, label=label, folder=folder,
-                       offset_ms=float(body.get("offset_ms", 0.0)))
+            limpiados = set_offset(root, label=label, folder=folder,
+                                   offset_ms=float(body.get("offset_ms", 0.0)),
+                                   group_id=group_id)
         elif accion == "reject":
             if not folder:
                 raise HTTPException(400, "falta folder")
@@ -75,7 +77,7 @@ def alignment_post(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
                 raise HTTPException(400, "falta folder")
             reset_folder(root, label=label, folder=folder)
         elif accion == "reset_label":
-            reset_label(root, label=label)
+            limpiados = reset_label(root, label=label, group_id=group_id)
         else:
             raise HTTPException(400, f"acción desconocida: {accion!r}")
     except (TypeError, ValueError) as exc:
@@ -83,5 +85,6 @@ def alignment_post(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
 
     payload = load_alignment(root, group_id=group_id, label=label,
                              max_points=int(body.get("max_points", 2000) or 2000))
+    payload["legacy_cleared"] = int(limpiados)
     return Response(content=json.dumps(payload, allow_nan=False, ensure_ascii=False),
                     media_type="application/json")

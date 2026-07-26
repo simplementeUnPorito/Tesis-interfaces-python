@@ -26,19 +26,29 @@ class InvalidKind(Exception):
     """``kind`` distinto de ``raw``/``filt``."""
 
 
-def decimate_minmax(x: np.ndarray, max_points: int) -> tuple[np.ndarray, np.ndarray, int]:
-    """Envolvente min/max por bucket. Devuelve ``(mins, maxs, stride)``.
+def decimate_minmax(
+    x: np.ndarray, max_points: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Envolvente min/max por bucket. Devuelve ``(mins, maxs, rising, stride)``.
 
     Por qué min/max y no un promedio ni un salteado: el primer arribo es un
     pico de pocas muestras. Promediar lo suaviza hasta hacerlo invisible y
     saltear se lo come cuando el pico cae entre dos muestras elegidas. Con
     min/max, cada píxel dibuja el rango real que hay abajo: la envolvente
     pasa exactamente por los extremos de la señal completa.
+
+    ``rising[i]`` dice si dentro del bucket ``i`` el mínimo ocurrió **antes**
+    que el máximo. Sin ese dato el dibujante no sabe en qué orden unir los dos
+    puntos de cada columna y termina emitiendo siempre máximo→mínimo: sobre
+    cualquier traza suave eso da un diente de sierra que no está en la señal
+    (la subida real se dibuja como bajada y el salto a la columna siguiente
+    hace el diente). Con el orden temporal correcto la polilínea sigue la forma
+    de onda de verdad, igual que la línea sin decimar de pyqtgraph.
     """
     n = int(x.size)
     if n == 0:
         empty = np.array([], dtype=np.float32)
-        return empty, empty, 1
+        return empty, empty, np.array([], dtype=bool), 1
     x = x.astype(np.float32, copy=False)
     stride = max(1, -(-n // max_points))        # ceil(n / max_points)
     nb = -(-n // stride)                        # ceil(n / stride)  <= max_points
@@ -49,7 +59,17 @@ def decimate_minmax(x: np.ndarray, max_points: int) -> tuple[np.ndarray, np.ndar
     with warnings.catch_warnings():             # buckets all-NaN avisan y devuelven NaN
         warnings.simplefilter("ignore", RuntimeWarning)
         mins, maxs = np.nanmin(m, axis=1), np.nanmax(m, axis=1)
-    return mins, maxs, stride
+    if stride == 1:
+        # Un bucket = una muestra: no hay dos puntos que ordenar.
+        rising = np.ones(nb, dtype=bool)
+    else:
+        # argmin/argmax ignorando NaN sin que un bucket entero de NaN reviente:
+        # se los manda al extremo que no puede ganar.
+        nan = np.isnan(m)
+        imin = np.where(nan, np.inf, m).argmin(axis=1)
+        imax = np.where(nan, -np.inf, m).argmax(axis=1)
+        rising = imin <= imax
+    return mins, maxs, rising, stride
 
 
 def _round6(v: float) -> float | None:
@@ -174,7 +194,7 @@ def _channel_payload(
     else:
         zeroed = signal.astype(np.float32, copy=False)
 
-    mins, maxs, stride = decimate_minmax(zeroed, max_points)
+    mins, maxs, rising, stride = decimate_minmax(zeroed, max_points)
     buckets = int(mins.size)
 
     finite = zeroed[np.isfinite(zeroed)]
@@ -206,6 +226,7 @@ def _channel_payload(
         "y_max": y_max,
         "min": [_round6(v) for v in mins],
         "max": [_round6(v) for v in maxs],
+        "rising": [bool(v) for v in rising],
     }
 
 
