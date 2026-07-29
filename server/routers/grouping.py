@@ -10,6 +10,7 @@ from .. import campaigns
 from ..api import get_pipeline
 from ..grouping import load_groups, save_groups
 from ..pipeline import Pipeline
+from ..state import RevisionConflict
 
 router = APIRouter()
 
@@ -43,6 +44,11 @@ def groups_post(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
             root,
             group_count=None if body.get("group_count") is None else int(body["group_count"]),
             assign={str(k): int(v) for k, v in assign.items()},
+            base_revision=str(body.get("base_revision", "")),
         )
+    except RevisionConflict as exc:
+        raise HTTPException(
+            409, {"message": str(exc), "revision": exc.current}
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, f"valor inválido: {exc}") from exc

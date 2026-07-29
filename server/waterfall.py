@@ -34,6 +34,7 @@ from .averages import arrivals_path
 from .datacache import get_dataset
 from .groups import filtered_dataset, load_grouping, project_disabled_for_group
 from .signal_view import _round6, decimate_minmax
+from .state import locked, require_revision, revision
 
 _write_lock = threading.Lock()
 
@@ -47,6 +48,7 @@ DEFAULT_VIEW: dict[str, Any] = {
     "trim_start": 0.0,
     "trim_end": 1.0,
     "raw_amplitude": False,
+    "wiggle": False,
     "kfilter_mode": "off",
     "hidden_distances": [],
 }
@@ -82,7 +84,7 @@ def load_view(raw_root: str | Path, group_id: int) -> dict:
         crudo = wf if wf.get("group_id") in (None, int(group_id)) else {}
 
     vista = dict(DEFAULT_VIEW)
-    for k in ("trim_enabled", "raw_amplitude"):
+    for k in ("trim_enabled", "raw_amplitude", "wiggle"):
         if k in crudo:
             vista[k] = bool(crudo[k])
     for k in ("trim_start", "trim_end"):
@@ -108,10 +110,17 @@ def _es_numero(v: Any) -> bool:
         return False
 
 
-def save_view(raw_root: str | Path, group_id: int, patch: dict) -> dict:
+def save_view(
+    raw_root: str | Path,
+    group_id: int,
+    patch: dict,
+    *,
+    base_revision: str = "",
+) -> dict:
     """Guarda los ajustes de vista de un grupo. Parcial: sólo pisa lo que llega."""
-    with _write_lock:
-        path = state_path(raw_root)
+    path = state_path(raw_root)
+    with _write_lock, locked(path):
+        require_revision(path, base_revision)
         estado = frd.load_masw_state(path) or {}
         wf = estado.get("waterfall")
         if not isinstance(wf, dict):
@@ -121,7 +130,7 @@ def save_view(raw_root: str | Path, group_id: int, patch: dict) -> dict:
             por_grupo = {}
 
         vista = load_view(raw_root, group_id)
-        for k in ("trim_enabled", "raw_amplitude"):
+        for k in ("trim_enabled", "raw_amplitude", "wiggle"):
             if k in patch:
                 vista[k] = bool(patch[k])
         for k in ("trim_start", "trim_end"):
@@ -290,6 +299,8 @@ def build_waterfall(raw_root: str | Path, *, group_id: int = 1,
         "n_averages": len(groups),
         "filter_enabled": filtro_activo,
         "view": vista,
+        "revision": revision(state_path(raw_root)),
+        "annotation_revision": revision(frd.default_annotations_path(raw_root)),
         "traces": [],
         "hammer": None,
         "spacing": 1.0,
@@ -395,7 +406,7 @@ def build_waterfall(raw_root: str | Path, *, group_id: int = 1,
     return base
 
 
-def auto_polarity(raw_root: str | Path) -> dict:
+def auto_polarity(raw_root: str | Path, *, base_revision: str = "") -> dict:
     """«Auto polaridad»: las dos etapas de ``frd.auto_align_polarity``.
 
     No se reimplementa nada: se llama la misma función que el botón de la app
@@ -413,9 +424,10 @@ def auto_polarity(raw_root: str | Path) -> dict:
     idempotente: una segunda corrida no debería cambiar nada.
     """
     raw_root = Path(raw_root)
-    with _write_lock:
+    path = frd.default_annotations_path(raw_root)
+    with _write_lock, locked(path):
+        require_revision(path, base_revision)
         dataset = get_dataset(raw_root)
-        path = frd.default_annotations_path(raw_root)
         anns = frd.load_annotations(path)
         settings = frd.load_filter_settings(frd.default_filter_settings_path(raw_root))
         reporte = frd.auto_align_polarity(
@@ -441,24 +453,28 @@ def auto_polarity(raw_root: str | Path) -> dict:
                             for d in sorted(set(reporte.get("stage_b_skipped_distances", [])))],
         "changed": bool(etapa_a or etapa_b),
         "path": str(path),
+        "revision": revision(path),
     }
 
 
-def flip_distance(raw_root: str | Path, distance_m: float) -> dict:
+def flip_distance(
+    raw_root: str | Path, distance_m: float, *, base_revision: str = ""
+) -> dict:
     """«Invertir traza»: toggplea ``geo_flip`` en TODAS las capturas de esa
     distancia y lo guarda. NO es de vista — llega a promedios, MASW y export
     (es la excepción que documenta el panel)."""
     raw_root = Path(raw_root)
-    with _write_lock:
+    path = frd.default_annotations_path(raw_root)
+    with _write_lock, locked(path):
+        require_revision(path, base_revision)
         # Dataset COMPLETO, no el del grupo: el flip es de todas las capturas de
         # esa distancia, y `save_annotations` además guarda el conteo de
         # disparos del dataset entero en el encabezado del archivo.
         dataset = get_dataset(raw_root)
-        path = frd.default_annotations_path(raw_root)
         anns = frd.load_annotations(path)
         cambiadas = frd.flip_distance_group(dataset, anns, float(distance_m),
                                             source="waterfall")
         if cambiadas:
             frd.save_annotations(path, dataset, anns)
     return {"distance_m": _round6(float(distance_m)), "changed": int(cambiadas),
-            "path": str(path)}
+            "path": str(path), "revision": revision(path)}

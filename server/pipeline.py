@@ -15,8 +15,10 @@ trabajar sobre el mismo volumen sin traducciones de por medio.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import queue
+import shutil
 import threading
 import time
 import traceback
@@ -31,6 +33,15 @@ from pathlib import Path
 from ._gs import frd   # noqa: E402
 
 from .catalog import scan_catalog   # noqa: E402
+from .limits import (  # noqa: E402
+    MAX_COMPRESSION_RATIO,
+    MAX_UNCOMPRESSED_BYTES,
+    MAX_ZIP_FILES,
+)
+from .state import atomic_write_bytes  # noqa: E402
+
+
+SUPPORTED_ARCHIVE_SCHEMA = "geophone_scope_web_zip_v4"
 
 
 def _invalidate_caches(raw_root) -> None:
@@ -52,8 +63,12 @@ class Job:
     job_id: str
     filename: str
     bytes_received: int
+    kind: str = "ingest"
     state: str = "pendiente"        # pendiente|descomprimiendo|procesando|listo|error
+    stage: str = "queued"
+    progress: float = 0.0
     created_at: str = field(default_factory=_now)
+    started_at: str = ""
     finished_at: str = ""
     folder: str = ""                # carpeta del dataset que quedó
     captures: int = 0
@@ -61,15 +76,22 @@ class Job:
     shots: int = 0
     picks: int = 0
     error: str = ""
+    sha256: str = ""
+    duplicate_of: str = ""
     log: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
+            "id": self.job_id,
             "job_id": self.job_id,
+            "kind": self.kind,
             "filename": self.filename,
             "bytes": self.bytes_received,
             "state": self.state,
+            "stage": self.stage,
+            "progress": round(float(self.progress), 4),
             "created_at": self.created_at,
+            "started_at": self.started_at,
             "finished_at": self.finished_at,
             "folder": self.folder,
             "captures": self.captures,
@@ -77,6 +99,8 @@ class Job:
             "shots": self.shots,
             "picks": self.picks,
             "error": self.error,
+            "sha256": self.sha256,
+            "duplicate_of": self.duplicate_of,
             "log": self.log[-20:],
         }
 
@@ -97,8 +121,10 @@ class Pipeline:
         # donde la app de escritorio también lo ve. Un solo dato, dos interfaces.
         self.raw_root = Path(raw_root) if raw_root else (self.data_root / "raw")
         self.zips_root = self.data_root / "zips"
+        self.incoming_root = self.data_root / "incoming"
         self.state_path = self.data_root / "jobs.json"
-        for d in (self.raw_root, self.zips_root):
+        self.staging_root = self.raw_root / ".ingest_staging"
+        for d in (self.raw_root, self.zips_root, self.incoming_root, self.staging_root):
             d.mkdir(parents=True, exist_ok=True)
 
         self._q: queue.Queue[str] = queue.Queue()
@@ -109,9 +135,12 @@ class Pipeline:
         # pero sin él dos ingestas simultáneas escriben el MISMO .tmp y en
         # Windows la segunda muere con PermissionError, perdiendo la cola.
         self._state_io_lock = threading.Lock()
+        self._recover_ids: list[str] = []
         self._load_state()
         self._worker = threading.Thread(target=self._run, name="pipeline", daemon=True)
         self._worker.start()
+        for job_id in self._recover_ids:
+            self._q.put(job_id)
 
     # ── estado ──────────────────────────────────────────────────────────────
     def _load_state(self) -> None:
@@ -124,8 +153,12 @@ class Pipeline:
                 job_id=d.get("job_id", ""),
                 filename=d.get("filename", ""),
                 bytes_received=int(d.get("bytes", 0)),
+                kind=d.get("kind", "ingest"),
                 state=d.get("state", "pendiente"),
+                stage=d.get("stage", "queued"),
+                progress=float(d.get("progress", 0.0) or 0.0),
                 created_at=d.get("created_at", ""),
+                started_at=d.get("started_at", ""),
                 finished_at=d.get("finished_at", ""),
                 folder=d.get("folder", ""),
                 captures=int(d.get("captures", 0)),
@@ -133,16 +166,20 @@ class Pipeline:
                 shots=int(d.get("shots", 0)),
                 picks=int(d.get("picks", 0)),
                 error=d.get("error", ""),
+                sha256=d.get("sha256", ""),
+                duplicate_of=d.get("duplicate_of", ""),
                 log=list(d.get("log", [])),
             )
-            # Un trabajo que quedó a mitad de camino en un corte se marca como
-            # error en vez de fingir que sigue vivo: el ZIP está guardado y se
-            # puede reprocesar.
             if job.state in ("descomprimiendo", "procesando", "pendiente"):
-                job.state = "error"
-                job.error = "interrumpido por un reinicio del servidor"
+                job.state = "pendiente"
+                job.stage = "recovered"
+                job.progress = 0.0
+                job.error = ""
+                job.log.append(f"{_now()} recuperado después de reiniciar el servidor")
             if job.job_id:
                 self._jobs[job.job_id] = job
+                if job.state == "pendiente":
+                    self._recover_ids.append(job.job_id)
 
     def _save_state(self) -> None:
         with self._lock:
@@ -150,14 +187,7 @@ class Pipeline:
                     "jobs": [j.to_dict() for j in self._jobs.values()]}
         blob = json.dumps(data, indent=2, ensure_ascii=False)
         with self._state_io_lock:
-            # Nombre único por escritura: si el replace de otro hilo llegara a
-            # solaparse igual, no comparten el archivo temporal.
-            tmp = self.state_path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-            try:
-                tmp.write_text(blob, encoding="utf-8")
-                tmp.replace(self.state_path)
-            finally:
-                tmp.unlink(missing_ok=True)
+            atomic_write_bytes(self.state_path, blob.encode("utf-8"))
 
     def jobs(self) -> list[dict]:
         with self._lock:
@@ -178,16 +208,60 @@ class Pipeline:
         dato original y volver a pedírselo al equipo de campo no siempre es
         posible.
         """
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe = Path(filename).name or "captura.zip"
-        job_id = f"{stamp}_{safe.rsplit('.', 1)[0]}"[:80]
-        dest = self.zips_root / f"{job_id}.zip"
-        dest.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        tmp = self.incoming_root / (
+            f"upload-{os.getpid()}-{threading.get_ident()}-{time.time_ns()}.tmp"
+        )
+        tmp.write_bytes(data)
+        return self.submit_zip_file(tmp, filename, digest=digest, size=len(data))
 
-        job = Job(job_id=job_id, filename=safe, bytes_received=len(data))
-        job.log.append(f"{_now()} ZIP guardado en {dest.name} ({len(data)} B)")
+    def submit_zip_file(
+        self,
+        temp_path: str | Path,
+        filename: str,
+        *,
+        digest: str,
+        size: int,
+    ) -> Job:
+        """Publica una subida ya transmitida y la encola de forma idempotente."""
+        temp_path = Path(temp_path)
+        # Validación estructural rápida antes de responder al ESP. El CRC
+        # completo exige descomprimir el archivo entero y se hace en el worker,
+        # para que la recepción no quede bloqueada por un ZIP grande.
+        self._validate_archive(temp_path, verify_crc=False)
+        safe = Path(filename).name or "captura.zip"
+        digest = str(digest).lower()
         with self._lock:
-            self._jobs[job_id] = job
+            previous = next(
+                (j for j in self._jobs.values() if j.sha256 == digest), None
+            )
+            if previous is not None:
+                previous.log.append(
+                    f"{_now()} reintento idempotente recibido; se reutiliza este trabajo"
+                )
+            else:
+                # La comprobación y la reserva son una sola sección crítica:
+                # dos reintentos simultáneos del mismo SHA no pueden publicar
+                # dos trabajos ni pelear por el mismo ZIP.
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                job_id = f"{stamp}_{digest[:12]}"
+                dest = self.zips_root / f"{job_id}.zip"
+                temp_path.replace(dest)
+                job = Job(
+                    job_id=job_id,
+                    filename=safe,
+                    bytes_received=int(size),
+                    sha256=digest,
+                )
+                job.log.append(
+                    f"{_now()} ZIP guardado en {dest.name} "
+                    f"({size} B, sha256 {digest[:12]})"
+                )
+                self._jobs[job_id] = job
+        if previous is not None:
+            temp_path.unlink(missing_ok=True)
+            self._save_state()
+            return previous
         self._save_state()
         self._q.put(job_id)
         return job
@@ -199,68 +273,46 @@ class Pipeline:
             if job is None:
                 return False
             job.state = "pendiente"
+            job.stage = "queued"
+            job.progress = 0.0
             job.error = ""
             job.finished_at = ""
         self._save_state()
         self._q.put(job_id)
         return True
 
+    def cancel(self, job_id: str) -> bool:
+        """Cancela sólo una ingesta todavía en cola; un proceso iniciado termina."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.state != "pendiente":
+                return False
+            job.state = "cancelado"
+            job.stage = "canceled"
+            job.finished_at = _now()
+            job.log.append(f"{_now()} cancelado antes de procesar")
+        self._save_state()
+        return True
+
     # ── borrado (siempre pedido por un humano) ──────────────────────────────
     def delete_folder(self, folder_name: str, with_zip: bool = False,
                       campaign: str = "") -> dict:
-        """Borra una carpeta extraída. Nunca se llama sola.
+        """Compatibilidad defensiva: el borrado físico está clausurado.
 
-        Política: nada se borra automáticamente, ni por estar incompleto ni por
-        antigüedad. El ZIP original se conserva salvo pedido explícito, porque es
-        el dato tal como salió del campo y no siempre se puede volver a pedir.
-
-        ``campaign`` es el id de campaña (``"."`` o vacío = la raíz). Sin él sólo
-        se podían borrar las carpetas que cuelgan directo de ``raw_root``, y las
-        de una campaña quedaban fuera de alcance.
+        La cuarentena reversible vive en ``server.deletion``. Mantener este
+        método como rechazo explícito evita que una integración antigua pueda
+        volver a habilitar accidentalmente ``rmtree`` o el borrado de ZIP.
         """
-        import shutil
-
-        safe = Path(folder_name).name
-        if not safe or safe in (".", ".."):
-            return {"ok": False, "error": "nombre inválido"}
-
-        base = self.raw_root
-        if campaign and campaign != ".":
-            sub = Path(campaign).name
-            if not sub or sub in (".", ".."):
-                return {"ok": False, "error": "campaña inválida"}
-            base = self.raw_root / sub
-            if not base.is_dir():
-                return {"ok": False, "error": f"campaña desconocida: {campaign}"}
-
-        target = (base / safe).resolve()
-        # Se compara contra raw_root igual: la campaña siempre cuelga de ahí, y
-        # esto ataja un `..` que se haya colado por cualquiera de los dos lados.
-        if not str(target).startswith(str(self.raw_root.resolve())):
-            return {"ok": False, "error": "fuera de raw_root"}
-        if not target.is_dir():
-            return {"ok": False, "error": "no existe"}
-
-        shutil.rmtree(target)
-        zips = []
-        if with_zip:
-            for job_id, job in list(self._jobs.items()):
-                if job.folder == safe:
-                    z = self.zips_root / f"{job_id}.zip"
-                    if z.exists():
-                        z.unlink()
-                        zips.append(z.name)
-        # El trabajo queda en la lista, marcado: el historial de lo que llegó no
-        # se pierde por haber borrado los archivos.
-        with self._lock:
-            for job in self._jobs.values():
-                if job.folder == safe:
-                    job.state = "borrado"
-                    job.log.append(f"{_now()} borrado por el usuario"
-                                   + (" (con ZIP)" if with_zip else " (ZIP conservado)"))
-        self._save_state()
-        _invalidate_caches(self.raw_root)
-        return {"ok": True, "folder": safe, "zips_deleted": zips}
+        return {
+            "ok": False,
+            "folder": Path(folder_name).name,
+            "error": (
+                "borrado físico deshabilitado; use /api/deletion/disable "
+                "para aplicar la bandera reversible"
+            ),
+            "zip_preserved": True,
+            "physical_deletion": False,
+        }
 
     # ── worker ──────────────────────────────────────────────────────────────
     def _set(self, job_id: str, **kw) -> None:
@@ -279,9 +331,13 @@ class Pipeline:
         while True:
             job_id = self._q.get()
             try:
+                with self._lock:
+                    queued = self._jobs.get(job_id)
+                    if queued is None or queued.state == "cancelado":
+                        continue
                 self._process(job_id)
             except Exception:
-                self._set(job_id, state="error", finished_at=_now(),
+                self._set(job_id, state="error", stage="failed", finished_at=_now(),
                           error=traceback.format_exc(limit=3),
                           log_line="falló el procesado")
             finally:
@@ -297,12 +353,20 @@ class Pipeline:
             self._set(job_id, state="error", error="el ZIP ya no está en disco")
             return
 
-        self._set(job_id, state="descomprimiendo", log_line="descomprimiendo")
+        self._set(
+            job_id,
+            state="descomprimiendo",
+            stage="validating",
+            progress=0.05,
+            started_at=_now(),
+            log_line="validando y descomprimiendo",
+        )
         folder = self._extract(zip_path, job_id)
-        self._set(job_id, folder=folder.name,
+        self._set(job_id, folder=folder.name, stage="cataloging", progress=0.55,
                   log_line=f"extraído en raw/{folder.name}")
 
-        self._set(job_id, state="procesando", log_line="descubriendo el dataset")
+        self._set(job_id, state="procesando", stage="cataloging", progress=0.65,
+                  log_line="descubriendo el dataset")
         t0 = time.time()
         dataset = frd.discover_dataset(self.raw_root)
         # Solo los disparos de esta carpeta: el dataset abarca todo el raw_root.
@@ -321,18 +385,20 @@ class Pipeline:
             caps = len(mias["captures"]) if mias else 0
             nodos = sum(len(c["nodes"]) for c in mias["captures"]) if mias else 0
             self._set(job_id, captures=caps, nodes=nodos,
-                      state="listo", finished_at=_now(),
+                      state="listo", stage="complete", progress=1.0,
+                      finished_at=_now(),
                       log_line=f"{caps} captura(s), {nodos} nodo(s) catalogados; "
                                f"sin picking (falta el martillo)")
             return
 
-        self._set(job_id, log_line="picking automático del primer arribo")
+        self._set(job_id, stage="autopick", progress=0.75,
+                  log_line="picking automático del primer arribo")
         # Mismo archivo que usa la app PyQt (procesados/field_review_annotations
         # .json): así lo que preprocesa el servidor lo ve la app y al revés.
         picks_path = frd.default_annotations_path(self.raw_root)
         annotations = frd.load_annotations(picks_path)
         hechos = 0
-        for shot in shots:
+        for index, shot in enumerate(shots):
             # No pisar lo que un humano ya revisó: el preprocesado es un punto de
             # partida, no la verdad.
             prev = annotations.get(shot.shot_id)
@@ -343,11 +409,126 @@ class Pipeline:
                 hechos += 1
             except Exception as exc:
                 self._set(job_id, log_line=f"picking falló en {shot.capture_name}: {exc}")
+            if index % 10 == 0:
+                self._set(
+                    job_id,
+                    progress=0.75 + 0.2 * ((index + 1) / max(1, len(shots))),
+                )
 
         frd.save_annotations(picks_path, dataset, annotations)
-        self._set(job_id, picks=hechos, state="listo", finished_at=_now(),
+        self._set(job_id, picks=hechos, state="listo", stage="complete",
+                  progress=1.0, finished_at=_now(),
                   log_line=f"{hechos} picks automáticos en {time.time() - t0:.1f} s "
                            f"-> {Path(picks_path).name}")
+
+    def _validate_archive(
+        self, zip_path: Path, *, verify_crc: bool = True
+    ) -> list[zipfile.ZipInfo]:
+        """Valida límites, rutas y el contrato ZIP actual antes de extraer.
+
+        Una captura sin martillo o sin geófono sigue siendo válida: precisamente
+        debe llegar a Capturas/Borrado para que el analista la clasifique. Lo que
+        no se acepta es un ZIP arbitrario sin el ``metadata.json`` v4 que genera
+        el master.
+        """
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                infos = [info for info in zf.infolist() if not info.is_dir()]
+                if not infos:
+                    raise ValueError("el ZIP está vacío")
+                if len(infos) > MAX_ZIP_FILES:
+                    raise ValueError(
+                        f"demasiados archivos ({len(infos)}; máximo {MAX_ZIP_FILES})"
+                    )
+                expanded = sum(max(0, int(info.file_size)) for info in infos)
+                compressed = sum(max(0, int(info.compress_size)) for info in infos)
+                if expanded > MAX_UNCOMPRESSED_BYTES:
+                    raise ValueError(
+                        f"ZIP expandido demasiado grande ({expanded} B; "
+                        f"máximo {MAX_UNCOMPRESSED_BYTES} B)"
+                    )
+                ratio = expanded / max(1, compressed)
+                if ratio > MAX_COMPRESSION_RATIO:
+                    raise ValueError(
+                        f"relación de compresión sospechosa ({ratio:.1f}×; "
+                        f"máximo {MAX_COMPRESSION_RATIO:g}×)"
+                    )
+                normalized: dict[str, zipfile.ZipInfo] = {}
+                normalized_folded: dict[str, str] = {}
+                for info in infos:
+                    name = info.filename.replace("\\", "/")
+                    parts = Path(name).parts
+                    if (
+                        not name
+                        or name.startswith("/")
+                        or (len(name) > 1 and name[1] == ":")
+                        or ".." in parts
+                        or any(":" in part for part in parts)
+                    ):
+                        raise ValueError(f"ruta sospechosa en el ZIP: {info.filename}")
+                    if info.flag_bits & 0x1:
+                        raise ValueError(
+                            f"archivo cifrado no soportado: {info.filename}"
+                        )
+                    if info.compress_type not in {
+                        zipfile.ZIP_STORED,
+                        zipfile.ZIP_DEFLATED,
+                    }:
+                        raise ValueError(
+                            f"compresión no soportada en {info.filename}"
+                        )
+                    canonical = name.strip("/")
+                    folded = canonical.casefold()
+                    if folded in normalized_folded:
+                        raise ValueError(
+                            "ruta duplicada en el ZIP: "
+                            f"{normalized_folded[folded]} y {info.filename}"
+                        )
+                    normalized_folded[folded] = info.filename
+                    normalized[canonical] = info
+                first_parts = {
+                    name.split("/", 1)[0] for name in normalized if "/" in name
+                }
+                has_root_file = any("/" not in name for name in normalized)
+                if not has_root_file and len(first_parts) == 1:
+                    prefix = next(iter(first_parts)) + "/"
+                    normalized = {
+                        name[len(prefix):]: info
+                        for name, info in normalized.items()
+                        if name.startswith(prefix)
+                    }
+
+                metadata_info = normalized.get("metadata.json")
+                if metadata_info is None:
+                    raise ValueError(
+                        "estructura inesperada: falta metadata.json del master"
+                    )
+                try:
+                    metadata = json.loads(
+                        zf.read(metadata_info).decode("utf-8-sig")
+                    )
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError(
+                        "estructura inesperada: metadata.json no es JSON válido"
+                    ) from exc
+                if not isinstance(metadata, dict):
+                    raise ValueError(
+                        "estructura inesperada: metadata.json debe ser un objeto"
+                    )
+                schema = str(metadata.get("schema") or "")
+                if schema != SUPPORTED_ARCHIVE_SCHEMA:
+                    raise ValueError(
+                        "estructura inesperada: esquema "
+                        f"{schema or '(ausente)'}; se esperaba "
+                        f"{SUPPORTED_ARCHIVE_SCHEMA}"
+                    )
+                if verify_crc:
+                    bad = zf.testzip()
+                    if bad:
+                        raise ValueError(f"CRC inválido en {bad}")
+                return infos
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"ZIP inválido: {exc}") from exc
 
     def _extract(self, zip_path: Path, job_id: str) -> Path:
         """Extrae el ZIP a raw/<carpeta>.
@@ -357,42 +538,61 @@ class Pipeline:
         acá no se reordena nada: solo se elige el nombre de la carpeta contenedora
         y se saca el prefijo si el ZIP ya venía con uno.
         """
+        for candidate in self.raw_root.iterdir():
+            marker = candidate / ".ingest_job"
+            if candidate.is_dir() and marker.is_file():
+                try:
+                    if marker.read_text(encoding="utf-8").strip() == job_id:
+                        return candidate
+                except OSError:
+                    pass
+
+        infos = self._validate_archive(zip_path, verify_crc=True)
         with zipfile.ZipFile(zip_path) as zf:
-            names = [n for n in zf.namelist() if not n.endswith("/")]
-            if not names:
-                raise ValueError("el ZIP está vacío")
+            names = [info.filename.replace("\\", "/") for info in infos]
 
             # ¿Todo cuelga de una única carpeta raíz? Entonces esa es la carpeta.
             tops = {n.split("/", 1)[0] for n in names if "/" in n}
             single_root = len(tops) == 1 and all("/" in n for n in names)
             base = (tops.pop() if single_root
                     else Path(zip_path.stem).name)
-            dest = self.raw_root / base
+            dest = self.raw_root / Path(base).name
             # Nunca sobrescribir una carpeta existente: dos capturas del mismo
             # punto son dos datos, no una corrección.
             n = 1
             while dest.exists():
                 n += 1
                 dest = self.raw_root / f"{base}_{n}"
-            dest.mkdir(parents=True)
-
-            for info in zf.infolist():
-                if info.is_dir():
-                    continue
-                rel = info.filename
-                if single_root:
-                    rel = rel.split("/", 1)[1] if "/" in rel else rel
-                if not rel:
-                    continue
-                # Zip-slip: rechazar rutas absolutas o con ".."
-                target = (dest / rel).resolve()
-                if not str(target).startswith(str(dest.resolve())):
-                    raise ValueError(f"ruta sospechosa en el ZIP: {info.filename}")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(info) as src, open(target, "wb") as out:
-                    while True:
-                        chunk = src.read(65536)
-                        if not chunk:
-                            break
-                        out.write(chunk)
-            return dest
+            stage = self.staging_root / job_id
+            if stage.exists():
+                shutil.rmtree(stage)
+            stage.mkdir(parents=True)
+            try:
+                stage_resolved = stage.resolve()
+                for index, info in enumerate(infos):
+                    rel = info.filename.replace("\\", "/")
+                    if single_root:
+                        rel = rel.split("/", 1)[1] if "/" in rel else rel
+                    if not rel:
+                        continue
+                    target = (stage / rel).resolve()
+                    if not target.is_relative_to(stage_resolved):
+                        raise ValueError(
+                            f"ruta sospechosa en el ZIP: {info.filename}"
+                        )
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as src, target.open("wb") as out:
+                        shutil.copyfileobj(src, out, length=1024 * 1024)
+                    if index % 50 == 0:
+                        self._set(
+                            job_id,
+                            stage="extracting",
+                            progress=0.1
+                            + 0.4 * ((index + 1) / max(1, len(infos))),
+                        )
+                (stage / ".ingest_job").write_text(job_id + "\n", encoding="utf-8")
+                stage.replace(dest)
+                return dest
+            except Exception:
+                shutil.rmtree(stage, ignore_errors=True)
+                raise

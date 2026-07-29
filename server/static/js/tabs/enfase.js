@@ -51,6 +51,14 @@ export function mount(root) {
             <button type="button" id="en-ok">OK alineado</button>
             <button type="button" id="en-reject" class="btn-quiet">Rechazar esta carpeta</button>
           </div>
+          <div class="field-row">
+            <label for="en-auto-shift">Búsqueda auto</label>
+            <input type="number" id="en-auto-shift" min="1" max="250" step="1"
+              value="100" class="num-input"> <span class="note">± ms</span>
+          </div>
+          <div class="toolbar">
+            <button type="button" id="en-auto">Autoenfase del label</button>
+          </div>
           <div class="toolbar">
             <button type="button" id="en-reset-folder" class="btn-quiet btn-sm">Reset esta carpeta</button>
             <button type="button" id="en-reset-label" class="btn-quiet btn-sm">Reset todo el label</button>
@@ -206,15 +214,28 @@ export function mount(root) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           campaign, group_id: data.group_id, label: data.label,
-          folder: cur ? cur.folder : '', max_points: 1200, ...body,
+          folder: cur ? cur.folder : '', max_points: 1200,
+          base_revision: data.revision, ...body,
         }),
       });
+      if (res.status === 409) {
+        await load();
+        throw new Error('el enfase cambió en PyQt u otra ventana; se recargó');
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       data = await res.json();
       indice = Math.min(indice, Math.max(0, data.folders.length - 1));
-      $('#en-status').textContent = data.legacy_cleared
-        ? `guardado · ${data.legacy_cleared} offset(s) por señal viejos limpiados`
-        : 'guardado';
+      if (data.auto_align) {
+        const applied = data.auto_align.applied || [];
+        const skipped = data.auto_align.skipped || [];
+        $('#en-status').textContent =
+          `autoenfase: ${applied.length} aplicada(s), ${skipped.length} para revisión manual` +
+          (data.legacy_cleared ? ` · ${data.legacy_cleared} offset(s) viejos limpiados` : '');
+      } else {
+        $('#en-status').textContent = data.legacy_cleared
+          ? `guardado · ${data.legacy_cleared} offset(s) por señal viejos limpiados`
+          : 'guardado';
+      }
       render();
     } catch (err) {
       $('#en-status').textContent = `no se pudo guardar: ${err}`;
@@ -254,6 +275,12 @@ export function mount(root) {
     const cur = actual();
     if (cur) accion({ action: 'reject', rejected: !cur.rejected });
   });
+  $('#en-auto').addEventListener('click', () => accion({
+    action: 'auto_align',
+    max_shift_ms: Math.max(1, Math.min(250, Number($('#en-auto-shift').value) || 100)),
+    min_score: 0.6,
+    ambiguity_ratio: 0.9,
+  }));
   $('#en-reset-folder').addEventListener('click', () => accion({ action: 'reset_folder' }));
   $('#en-reset-label').addEventListener('click', () => {
     if (confirm(`¿Borrar los offsets de TODO el label ${data.label}?`)) {
@@ -265,7 +292,14 @@ export function mount(root) {
   ro.observe(elPlot);
 
   return {
-    resume() { picker.reload(); load(); },
+    resume() {
+      picker.reload().then((id) => {
+        campaign = id;
+        return load();
+      }).catch((err) => {
+        $('#en-meta').textContent = `no se pudo recargar la campaña: ${err}`;
+      });
+    },
     destroy() { view.destroy(); ro.disconnect(); },
   };
 }

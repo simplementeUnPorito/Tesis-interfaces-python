@@ -15,7 +15,9 @@ from ..datacache import get_dataset
 from ..captures import build_all_campaigns, peak_to_peak_map
 from ..overlays import build_overlays
 from ..signal_view import InvalidKind, UnknownShot, build_signal_payload
-from ..api import get_pipeline
+from ..state import RevisionConflict
+from ..api import get_analysis_jobs, get_pipeline
+from ..analysis_jobs import AnalysisJobs
 
 router = APIRouter()
 
@@ -71,8 +73,13 @@ def health():
 
 
 @router.get("/api/jobs")
-def jobs(pipeline: Pipeline = Depends(get_pipeline)):
-    return {"jobs": pipeline.jobs()}
+def jobs(
+    pipeline: Pipeline = Depends(get_pipeline),
+    analysis: AnalysisJobs = Depends(get_analysis_jobs),
+):
+    combined = pipeline.jobs() + analysis.list()
+    combined.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return {"jobs": combined}
 
 
 @router.get("/api/dataset")
@@ -95,7 +102,8 @@ def _campaign_root(pipeline: Pipeline, campaign: str) -> Path:
 def campaigns_route(pipeline: Pipeline = Depends(get_pipeline)):
     """Qué campañas hay bajo raw_root, con su nombre, si se usan y su metadata."""
     return {"campaigns": campaigns.list_campaigns(pipeline.raw_root, pipeline.data_root),
-            "raw_root": str(pipeline.raw_root)}
+            "raw_root": str(pipeline.raw_root),
+            "revision": campaigns.config_revision(pipeline.data_root)}
 
 
 @router.post("/api/campaigns")
@@ -108,13 +116,22 @@ def campaigns_update_route(body: dict, pipeline: Pipeline = Depends(get_pipeline
         raise HTTPException(404, f"campaña desconocida: {campaign_id}")
     name = body.get("name")
     enabled = body.get("enabled")
-    campaigns.update_campaign(
-        pipeline.data_root, campaign_id,
-        name=None if name is None else str(name),
-        enabled=None if enabled is None else bool(enabled),
-    )
+    try:
+        campaigns.update_campaign(
+            pipeline.data_root, campaign_id,
+            name=None if name is None else str(name),
+            enabled=None if enabled is None else bool(enabled),
+            base_revision=str(body.get("base_revision", "")),
+        )
+    except RevisionConflict as exc:
+        raise HTTPException(
+            409, {"message": str(exc), "revision": exc.current}
+        ) from exc
     return {"ok": True,
-            "campaign": campaigns.campaign_info(pipeline.raw_root, pipeline.data_root, campaign_id)}
+            "campaign": campaigns.campaign_info(
+                pipeline.raw_root, pipeline.data_root, campaign_id
+            ),
+            "revision": campaigns.config_revision(pipeline.data_root)}
 
 
 @router.get("/api/captures")

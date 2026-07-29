@@ -198,10 +198,21 @@ export function mount(root) {
       const res = await fetch('/api/averages/arrival', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ campaign, label: g.label, distance_m: g.distance_m, ...patch }),
+        body: JSON.stringify({
+          campaign,
+          label: g.label,
+          distance_m: g.distance_m,
+          base_revision: data.revision,
+          ...patch,
+        }),
       });
+      if (res.status === 409) {
+        await load();
+        throw new Error('los arrivals cambiaron en PyQt u otra ventana; se recargaron');
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const out = await res.json();
+      data.revision = out.revision;
       Object.assign(g, { arrival_s: out.arrival_s, reviewed: out.reviewed, notes: out.notes });
       $('#pr-status').textContent = `guardado en ${out.path}`;
       if (avanzar) indice = Math.min(data.groups.length - 1, indice + 1);
@@ -244,7 +255,14 @@ export function mount(root) {
   ro.observe(elGeo);
 
   return {
-    resume() { picker.reload(); load(); },
+    resume() {
+      picker.reload().then((id) => {
+        campaign = id;
+        return load();
+      }).catch((err) => {
+        $('#pr-meta').textContent = `no se pudo recargar la campaña: ${err}`;
+      });
+    },
     destroy() { viewHam.destroy(); viewGeo.destroy(); ro.disconnect(); },
   };
 }

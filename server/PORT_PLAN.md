@@ -244,3 +244,9 @@ La web llega a paridad cuando, sobre los datos de `data/raw`:
 - todo eso desde `http://geo-data:8000` a través de la VPN, sin instalar nada.
 
 Recién ahí se discute retirar `field_review_app.py`.
+# Nota de decisión posterior
+
+Desde el 2026-07-26, cualquier requisito de borrado físico de este documento
+queda reemplazado por cuarentena reversible mediante bandera. No se eliminan
+carpetas, capturas ni ZIP. La especificación vigente y su evidencia están en
+[`IMPLEMENTATION_AUDIT.md`](IMPLEMENTATION_AUDIT.md).

@@ -13,6 +13,9 @@ import math
 import os
 import re
 import shutil
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -50,6 +53,10 @@ DEFAULT_FILTER_SETTINGS_NAME = "filter_settings.json"
 DEFAULT_ALIGNMENT_OFFSETS_NAME = "alignment_offsets.json"
 DEFAULT_ALIGNMENT_SHOT_OFFSETS_NAME = "alignment_shot_offsets.json"
 DEFAULT_DISABLED_FOLDERS_NAME = "alignment_disabled_folders.json"
+# Clave reservada dentro del estado compartido de carpetas desactivadas.
+# A diferencia de un rechazo de Enfase (que aplica a una distancia/grupo), esta
+# bandera excluye la carpeta completa del pipeline sin tocar ningún archivo raw.
+GLOBAL_DISABLED_LABEL = "__all__"
 DEFAULT_DISPERSION_GROUPS_NAME = "dispersion_groups.json"
 DEFAULT_SESSION_NAME = "field_review_session.json"
 DEFAULT_MASW_STATE_NAME = "field_review_masw_state.json"
@@ -57,7 +64,12 @@ DEFAULT_MASW_ARRAYS_NAME = "field_review_masw_state.npz"
 
 # Todo lo que genera la app (anotaciones, sesion, estado MASW, export
 # Los resultados van a data/processed y nunca se mezclan con data/raw.
-_PROCESADOS_ROOT = _DATA_ROOT / "processed"
+_configured_processed_root = os.environ.get("TESIS_PROCESSED_ROOT")
+_PROCESADOS_ROOT = (
+    Path(_configured_processed_root).expanduser().resolve()
+    if _configured_processed_root
+    else _DATA_ROOT / "processed"
+)
 
 
 def _procesados_dir_for(raw_root: str | Path) -> Path:
@@ -162,6 +174,11 @@ class FilterSettings:
     high_hz: float = 0.0
     order: int = 4
     target_fs: float = 0.0
+    dc_enabled: bool = False
+    line_suppress_enabled: bool = False
+    line_f0_hz: float = 50.0
+    line_harmonics: int = 3
+    line_search_hz: float = 2.0
     notes: str = ""
 
 
@@ -179,6 +196,22 @@ class FieldDataset:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Escribe junto al destino y publica con un replace atómico."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(
+        path.suffix + f".{os.getpid()}.{datetime.now().timestamp():.6f}.tmp"
+    )
+    try:
+        with tmp.open("wb") as handle:
+            handle.write(text.encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def discover_dataset(raw_root: str | Path, include_duplicates: bool = False) -> FieldDataset:
@@ -436,7 +469,7 @@ def save_annotations(
             if shot.shot_id in annotations
         ],
     }
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
     return path
 
 
@@ -475,7 +508,7 @@ def save_average_arrivals(
             for label in sorted(arrivals, key=lambda value: arrivals[value].distance_m)
         ],
     }
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
     return path
 
 
@@ -496,6 +529,15 @@ def load_filter_settings(path: str | Path) -> FilterSettings:
             high_hz=float(item.get("high_hz", 0.0) or 0.0),
             order=int(item.get("order", 4) or 4),
             target_fs=float(item.get("target_fs", 0.0) or 0.0),
+            dc_enabled=bool(item.get("dc_enabled", False)),
+            line_suppress_enabled=bool(item.get("line_suppress_enabled", False)),
+            line_f0_hz=float(item.get("line_f0_hz", 50.0) or 50.0),
+            line_harmonics=max(
+                1, min(12, int(item.get("line_harmonics", 3) or 3))
+            ),
+            line_search_hz=max(
+                0.0, float(item.get("line_search_hz", 2.0) or 0.0)
+            ),
             notes=str(item.get("notes", "") or ""),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -510,7 +552,7 @@ def save_filter_settings(path: str | Path, settings: FilterSettings) -> Path:
         "updated_at": utc_now_iso(),
         "filter": asdict(settings),
     }
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
     return path
 
 
@@ -552,7 +594,7 @@ def save_alignment_offsets(path: str | Path, offsets: dict[str, dict[str, float]
         if abs(float(offset_s)) > 1e-12
     ]
     data = {"schema": SCHEMA, "updated_at": utc_now_iso(), "offsets": items}
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
     return path
 
 
@@ -605,7 +647,7 @@ def save_alignment_shot_offsets(path: str | Path, shot_offsets: dict[str, float]
         if abs(float(offset_s)) > 1e-12
     ]
     data = {"schema": SCHEMA, "updated_at": utc_now_iso(), "shot_offsets": items}
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
     return path
 
 
@@ -625,12 +667,109 @@ def default_disabled_folders_path(raw_root: str | Path) -> Path:
     return _procesados_dir_for(raw_root) / DEFAULT_DISABLED_FOLDERS_NAME
 
 
+_disabled_lock_guard = threading.Lock()
+_disabled_thread_locks: dict[str, threading.RLock] = {}
+_disabled_lock_local = threading.local()
+
+
+@contextmanager
+def disabled_folders_lock(path: str | Path, timeout_s: float = 30.0):
+    """Lock reentrante y entre procesos para el estado de carpetas.
+
+    Web y PyQt pueden estar abiertos sobre la misma campaña. El lock de
+    ``server.state`` sólo coordina hilos del servidor; este lockfile evita que
+    una escritura ciega de PyQt pise la bandera global aplicada desde la web.
+    """
+    path = Path(path)
+    key = str(path.resolve()).casefold()
+    with _disabled_lock_guard:
+        thread_lock = _disabled_thread_locks.setdefault(key, threading.RLock())
+    with thread_lock:
+        depths = getattr(_disabled_lock_local, "depths", None)
+        if depths is None:
+            depths = _disabled_lock_local.depths = {}
+        if depths.get(key, 0):
+            depths[key] += 1
+            try:
+                yield
+            finally:
+                depths[key] -= 1
+            return
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        deadline = time.monotonic() + max(0.1, float(timeout_s))
+        acquired = False
+        owner = (
+            f"pid={os.getpid()} token={os.urandom(16).hex()} "
+            f"at={utc_now_iso()}\n"
+        ).encode("utf-8")
+        while not acquired:
+            try:
+                fd = os.open(
+                    lock_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                    | getattr(os, "O_BINARY", 0),
+                )
+                try:
+                    os.write(fd, owner)
+                finally:
+                    os.close(fd)
+                acquired = True
+            except FileExistsError:
+                try:
+                    stale_stat = lock_path.stat()
+                    stale_owner = lock_path.read_bytes()
+                    stale = time.time() - stale_stat.st_mtime > 120.0
+                except OSError:
+                    stale = False
+                if stale:
+                    try:
+                        current_stat = lock_path.stat()
+                        current_owner = lock_path.read_bytes()
+                        unchanged = (
+                            current_stat.st_mtime_ns == stale_stat.st_mtime_ns
+                            and current_stat.st_size == stale_stat.st_size
+                            and current_owner == stale_owner
+                        )
+                        if unchanged:
+                            lock_path.unlink()
+                    except OSError:
+                        pass
+                    continue
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"no se pudo bloquear {path.name}; otra app lo está escribiendo"
+                    )
+                time.sleep(0.05)
+
+        depths[key] = 1
+        try:
+            yield
+        finally:
+            depths.pop(key, None)
+            try:
+                # Un proceso que rompió un lock realmente obsoleto puede haber
+                # creado otro entre tanto. Nunca se borra un lock cuyo token no
+                # sea exactamente el de esta adquisición.
+                if lock_path.read_bytes() == owner:
+                    lock_path.unlink()
+            except OSError:
+                pass
+
+
 def load_disabled_folders(path: str | Path) -> dict[str, list[str]]:
     """Carpetas desactivadas por (label de distancia, carpeta): sus señales
     pueden ser validas (trigger y forma coherentes, marcadas OK en Capturas)
     pero el usuario decidio en Enfase que esa tanda NO entre a promedios,
     waterfall, MASW ni al promedio del export (las muestras individuales se
-    exportan igual)."""
+    exportan igual).
+
+    La clave reservada ``GLOBAL_DISABLED_LABEL`` representa una desactivación
+    global y reversible de la carpeta. La usa el tab Borrado web como
+    cuarentena no destructiva y también la entiende PyQt en los cálculos
+    compartidos.
+    """
     path = Path(path)
     if not path.exists():
         return {}
@@ -650,16 +789,36 @@ def load_disabled_folders(path: str | Path) -> dict[str, list[str]]:
     return disabled
 
 
-def save_disabled_folders(path: str | Path, disabled: dict[str, list[str]]) -> Path:
+def save_disabled_folders(
+    path: str | Path,
+    disabled: dict[str, list[str]],
+    *,
+    replace_global: bool = False,
+) -> Path:
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    items = [
-        {"label": label, "folder": folder}
-        for label in sorted(disabled)
-        for folder in sorted(set(disabled[label]))
-    ]
-    data = {"schema": SCHEMA, "updated_at": utc_now_iso(), "disabled": items}
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    with disabled_folders_lock(path):
+        merged = {
+            str(label): list(folders)
+            for label, folders in (disabled or {}).items()
+        }
+        if not replace_global:
+            # PyQt conserva un snapshot en memoria. Releer esta única clave
+            # justo bajo el lock evita que un guardado de Enfase borre una
+            # cuarentena que la web aplicó mientras la ventana estaba abierta.
+            disk_global = load_disabled_folders(path).get(
+                GLOBAL_DISABLED_LABEL, []
+            )
+            if disk_global:
+                merged[GLOBAL_DISABLED_LABEL] = list(disk_global)
+            else:
+                merged.pop(GLOBAL_DISABLED_LABEL, None)
+        items = [
+            {"label": label, "folder": folder}
+            for label in sorted(merged)
+            for folder in sorted(set(merged[label]))
+        ]
+        data = {"schema": SCHEMA, "updated_at": utc_now_iso(), "disabled": items}
+        _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
     return path
 
 
@@ -730,7 +889,7 @@ def save_dispersion_groups(
         "group_count": group_count,
         "assignments": clean,
     }
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
     return path
 
 
@@ -749,7 +908,10 @@ def is_folder_disabled(
 ) -> bool:
     if not disabled:
         return False
-    return folder_name in disabled.get(format_distance_label(distance_m), ())
+    return (
+        folder_name in disabled.get(GLOBAL_DISABLED_LABEL, ())
+        or folder_name in disabled.get(format_distance_label(distance_m), ())
+    )
 
 
 def default_session_path(raw_root: str | Path) -> Path:
@@ -774,7 +936,7 @@ def save_session(path: str | Path, session: dict[str, Any]) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"schema": SCHEMA, "updated_at": utc_now_iso(), **session}
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
     return path
 
 
@@ -807,7 +969,7 @@ def save_masw_state(path: str | Path, state: dict[str, Any]) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"schema": SCHEMA, "updated_at": utc_now_iso(), **state}
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
     return path
 
 
@@ -837,7 +999,17 @@ def save_masw_arrays(path: str | Path, arrays: dict[str, np.ndarray] | None) -> 
             pass
         return None
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, **{k: np.asarray(v) for k, v in arrays.items()})
+    tmp = path.with_suffix(
+        path.suffix + f".{os.getpid()}.{datetime.now().timestamp():.6f}.tmp.npz"
+    )
+    try:
+        with tmp.open("wb") as handle:
+            np.savez_compressed(handle, **{k: np.asarray(v) for k, v in arrays.items()})
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
     return path
 
 
@@ -860,13 +1032,18 @@ def get_alignment_offset(
 
 def filter_settings_signature(settings: FilterSettings | None) -> tuple:
     if settings is None:
-        return (False, 0.0, 0.0, 0, 0.0)
+        return (False, 0.0, 0.0, 0, 0.0, False, False, 50.0, 3, 2.0)
     return (
         bool(settings.enabled),
         round(float(settings.low_hz), 6),
         round(float(settings.high_hz), 6),
         int(settings.order),
         round(float(settings.target_fs), 6),
+        bool(settings.dc_enabled),
+        bool(settings.line_suppress_enabled),
+        round(float(settings.line_f0_hz), 6),
+        int(settings.line_harmonics),
+        round(float(settings.line_search_hz), 6),
     )
 
 
@@ -920,6 +1097,46 @@ def apply_bandpass_filter(
         return x.astype(np.float32, copy=False)
     y = sosfiltfilt(sos, x)
     return y.astype(np.float32, copy=False)
+
+
+def apply_filter_chain(
+    x: np.ndarray, fs: float, settings: FilterSettings | None
+) -> np.ndarray:
+    """Cadena científica común a PyQt, web, promedios, Waterfall y MASW.
+
+    El supresor armónico no es un notch IIR. Estima la frecuencia de línea
+    alrededor del valor nominal y resta, sobre la captura completa, el modelo
+    de senos/cosenos ajustado por mínimos cuadrados que usa el master ESP.
+    """
+    y = np.asarray(x, dtype=np.float64)
+    if y.size == 0 or settings is None or not settings.enabled:
+        return y.astype(np.float32, copy=False)
+    finite = np.isfinite(y)
+    if not np.any(finite):
+        return y.astype(np.float32, copy=False)
+    work = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    if settings.dc_enabled:
+        work = work - float(np.mean(work[finite]))
+    work = np.asarray(
+        apply_bandpass_filter(
+            work, fs, settings.low_hz, settings.high_hz, settings.order
+        ),
+        dtype=np.float64,
+    )
+    if settings.line_suppress_enabled:
+        try:
+            from .signal_proc import harmonic_notch
+        except ImportError:  # pragma: no cover - ejecución como script
+            from signal_proc import harmonic_notch
+        work = harmonic_notch(
+            work,
+            float(fs),
+            float(settings.line_f0_hz),
+            max(1, min(12, int(settings.line_harmonics))),
+            max(0.0, float(settings.line_search_hz)),
+        )
+    work[~finite] = np.nan
+    return work.astype(np.float32, copy=False)
 
 
 def resample_signal(x: np.ndarray, fs: float, target_fs: float) -> np.ndarray:
@@ -1034,12 +1251,8 @@ def _prepare_shot_for_grouping(
     hammer_zero = _zero_by_pretrigger(hammer, trigger_idx, fs)
     geo_zero = _zero_by_pretrigger(geo, trigger_idx, fs)
     if filter_settings is not None and filter_settings.enabled:
-        hammer_zero = apply_bandpass_filter(
-            hammer_zero, fs, filter_settings.low_hz, filter_settings.high_hz, filter_settings.order
-        )
-        geo_zero = apply_bandpass_filter(
-            geo_zero, fs, filter_settings.low_hz, filter_settings.high_hz, filter_settings.order
-        )
+        hammer_zero = apply_filter_chain(hammer_zero, fs, filter_settings)
+        geo_zero = apply_filter_chain(geo_zero, fs, filter_settings)
     return {
         "shot": shot,
         "annotation": ann,

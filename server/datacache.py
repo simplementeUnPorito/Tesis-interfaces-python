@@ -62,18 +62,43 @@ def invalidate(raw_root: str | Path | None = None) -> None:
             _datasets.pop(str(Path(raw_root).resolve()), None)
 
 
-def get_dataset(raw_root: str | Path):
-    """``discover_dataset(raw_root)``, cacheado por TTL + firma del árbol."""
+def _without_globally_disabled(raw_root: str | Path, dataset):
+    """Vista del dataset que omite la cuarentena global, sin tocar el cache."""
+    disabled = frd.load_disabled_folders(
+        frd.default_disabled_folders_path(raw_root)
+    )
+    hidden = set(disabled.get(frd.GLOBAL_DISABLED_LABEL, ()))
+    if not hidden:
+        return dataset
+    return frd.FieldDataset(
+        raw_root=dataset.raw_root,
+        shots=[shot for shot in dataset.shots if shot.folder_name not in hidden],
+        duplicate_groups=dataset.duplicate_groups,
+        skipped_folders=dataset.skipped_folders,
+    )
+
+
+def get_dataset(raw_root: str | Path, *, include_pipeline_disabled: bool = False):
+    """``discover_dataset(raw_root)``, cacheado por TTL + firma del árbol.
+
+    Por defecto devuelve una vista sin las carpetas globalmente desactivadas.
+    El catálogo del tab Borrado pide explícitamente incluirlas para poder
+    restaurarlas. El dataset estructural cacheado siempre conserva todo.
+    """
     key = str(Path(raw_root).resolve())
     sig = tree_signature(raw_root)
     now = time.monotonic()
+    dataset = None
     with _lock:
         hit = _datasets.get(key)
         if hit is not None and (now - hit[0]) < TTL_S and hit[1] == sig:
-            return hit[2]
+            dataset = hit[2]
 
-    dataset = frd.discover_dataset(raw_root)
+    if dataset is None:
+        dataset = frd.discover_dataset(raw_root)
 
-    with _lock:
-        _datasets[key] = (time.monotonic(), sig, dataset)
-    return dataset
+        with _lock:
+            _datasets[key] = (time.monotonic(), sig, dataset)
+    if include_pipeline_disabled:
+        return dataset
+    return _without_globally_disabled(raw_root, dataset)

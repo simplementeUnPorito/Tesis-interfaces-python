@@ -17,6 +17,7 @@ from ..api import get_pipeline
 from ..pipeline import Pipeline
 from ..waterfall import (KFILTER_MODES, auto_polarity, build_waterfall,
                          flip_distance, save_view)
+from ..state import RevisionConflict
 
 router = APIRouter()
 
@@ -60,9 +61,18 @@ def waterfall_view(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
         raise HTTPException(400, f"kfilter_mode inválido: {modo}")
     patch = {k: body[k] for k in
              ("trim_enabled", "trim_start", "trim_end", "raw_amplitude",
-              "kfilter_mode", "hidden_distances") if k in body}
+              "wiggle", "kfilter_mode", "hidden_distances") if k in body}
     try:
-        save_view(raw_root, group_id, patch)
+        save_view(
+            raw_root,
+            group_id,
+            patch,
+            base_revision=str(body.get("base_revision", "")),
+        )
+    except RevisionConflict as exc:
+        raise HTTPException(
+            409, {"message": str(exc), "revision": exc.current}
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, f"valor inválido: {exc}") from exc
     return _json(build_waterfall(
@@ -75,7 +85,14 @@ def waterfall_view(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
 def waterfall_auto_polarity(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
     """«Auto polaridad»: las dos etapas de ``auto_align_polarity``. Persiste."""
     raw_root = _campaign_root(pipeline, str(body.get("campaign", "")))
-    reporte = auto_polarity(raw_root)
+    try:
+        reporte = auto_polarity(
+            raw_root, base_revision=str(body.get("base_revision", ""))
+        )
+    except RevisionConflict as exc:
+        raise HTTPException(
+            409, {"message": str(exc), "revision": exc.current}
+        ) from exc
     payload = build_waterfall(
         raw_root, group_id=int(body.get("group_id", 1) or 1),
         max_points=max(100, min(20000, int(body.get("max_points", 1400) or 1400))),
@@ -93,7 +110,15 @@ def waterfall_flip(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
     if body.get("distance_m") is None:
         raise HTTPException(400, "falta distance_m")
     try:
-        resultado = flip_distance(raw_root, float(body["distance_m"]))
+        resultado = flip_distance(
+            raw_root,
+            float(body["distance_m"]),
+            base_revision=str(body.get("base_revision", "")),
+        )
+    except RevisionConflict as exc:
+        raise HTTPException(
+            409, {"message": str(exc), "revision": exc.current}
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, f"distance_m inválida: {exc}") from exc
     payload = build_waterfall(

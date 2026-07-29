@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.log
+.git/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+geophone_scope/.mypy_cache/

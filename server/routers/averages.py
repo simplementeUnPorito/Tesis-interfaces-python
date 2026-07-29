@@ -12,6 +12,7 @@ from .. import campaigns
 from ..api import get_pipeline
 from ..averages import build_averages, save_arrival
 from ..pipeline import Pipeline
+from ..state import RevisionConflict
 
 router = APIRouter()
 
@@ -57,6 +58,11 @@ def averages_arrival(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
             arrival_s=None if body.get("arrival_s") is None else float(body["arrival_s"]),
             reviewed=None if body.get("reviewed") is None else bool(body["reviewed"]),
             notes=None if body.get("notes") is None else str(body["notes"]),
+            base_revision=str(body.get("base_revision", "")),
         )
+    except RevisionConflict as exc:
+        raise HTTPException(
+            409, {"message": str(exc), "revision": exc.current}
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, f"valor inválido: {exc}") from exc

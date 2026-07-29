@@ -118,8 +118,12 @@ export function mount(root) {
       const res = await fetch('/api/groups', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ campaign, ...patch }),
+        body: JSON.stringify({ campaign, base_revision: data.revision, ...patch }),
       });
+      if (res.status === 409) {
+        await load();
+        throw new Error('la campaña cambió en otra ventana; se recargaron los grupos');
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       data = await res.json();
       render();
@@ -178,8 +182,15 @@ export function mount(root) {
     save({ group_count: Math.min(20, Math.max(1, data.folders.length)), assign });
   });
 
-  load();
   return {
-    resume() { picker.reload(); load(); },
+    resume() {
+      picker.reload().then((id) => {
+        campaign = id;
+        seleccion.clear();
+        return load();
+      }).catch((err) => {
+        $('#ag-summary').textContent = `no se pudo recargar la campaña: ${err}`;
+      });
+    },
   };
 }

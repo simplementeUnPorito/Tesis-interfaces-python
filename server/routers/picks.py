@@ -10,6 +10,7 @@ from .. import campaigns
 from ..api import get_pipeline
 from ..pipeline import Pipeline
 from ..picks import UnknownShot, save_pick
+from ..state import RevisionConflict
 
 router = APIRouter()
 
@@ -59,6 +60,11 @@ def pick_route(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
             notes=None if body.get("notes") is None else str(body["notes"]),
             apply_distance_to_folder=bool(body.get("apply_distance_to_folder")),
             flip_folder=bool(body.get("flip_folder")),
+            base_revision=str(body.get("base_revision", "")),
         )
+    except RevisionConflict as exc:
+        raise HTTPException(
+            409, {"message": str(exc), "revision": exc.current}
+        ) from exc
     except UnknownShot as exc:
         raise HTTPException(404, f"shot_id desconocido: {exc}") from exc

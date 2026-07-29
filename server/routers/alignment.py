@@ -9,10 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
 from .. import campaigns
-from ..alignment import (load_alignment, reset_folder, reset_label, set_offset,
-                         set_rejected)
+from ..alignment import (auto_align_label, load_alignment, reset_folder,
+                         reset_label, set_offset, set_rejected, state_paths)
 from ..api import get_pipeline
 from ..pipeline import Pipeline
+from ..state import (RevisionConflict, locked,
+                     require_composite_revision)
 
 router = APIRouter()
 
@@ -60,31 +62,59 @@ def alignment_post(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
         raise HTTPException(400, "falta label")
 
     limpiados = 0
+    auto_result = None
     try:
-        if accion == "offset":
-            if not folder:
-                raise HTTPException(400, "falta folder")
-            limpiados = set_offset(root, label=label, folder=folder,
-                                   offset_ms=float(body.get("offset_ms", 0.0)),
-                                   group_id=group_id)
-        elif accion == "reject":
-            if not folder:
-                raise HTTPException(400, "falta folder")
-            set_rejected(root, label=label, folder=folder,
-                         rejected=bool(body.get("rejected")), group_id=group_id)
-        elif accion == "reset_folder":
-            if not folder:
-                raise HTTPException(400, "falta folder")
-            reset_folder(root, label=label, folder=folder)
-        elif accion == "reset_label":
-            limpiados = reset_label(root, label=label, group_id=group_id)
-        else:
-            raise HTTPException(400, f"acción desconocida: {accion!r}")
+        # Una acción puede tocar offsets, rechazos y offsets por señal. Se
+        # serializa como una unidad lógica y se compara una revisión conjunta.
+        with locked(root / ".server_alignment_state"):
+            require_composite_revision(
+                state_paths(root), str(body.get("base_revision", ""))
+            )
+            if accion == "offset":
+                if not folder:
+                    raise HTTPException(400, "falta folder")
+                limpiados = set_offset(root, label=label, folder=folder,
+                                       offset_ms=float(body.get("offset_ms", 0.0)),
+                                       group_id=group_id)
+            elif accion == "reject":
+                if not folder:
+                    raise HTTPException(400, "falta folder")
+                set_rejected(root, label=label, folder=folder,
+                             rejected=bool(body.get("rejected")), group_id=group_id)
+            elif accion == "reset_folder":
+                if not folder:
+                    raise HTTPException(400, "falta folder")
+                reset_folder(root, label=label, folder=folder)
+            elif accion == "reset_label":
+                limpiados = reset_label(root, label=label, group_id=group_id)
+            elif accion == "auto_align":
+                auto_result = auto_align_label(
+                    root,
+                    label=label,
+                    group_id=group_id,
+                    max_shift_ms=float(body.get("max_shift_ms", 100.0)),
+                    min_score=float(body.get("min_score", 0.6)),
+                    ambiguity_ratio=float(body.get("ambiguity_ratio", 0.9)),
+                    ambiguity_separation_ms=float(
+                        body.get("ambiguity_separation_ms", 8.0)
+                    ),
+                    window_start_s=float(body.get("window_start_s", -0.02)),
+                    window_end_s=float(body.get("window_end_s", 0.35)),
+                )
+                limpiados = int(auto_result.get("legacy_cleared", 0))
+            else:
+                raise HTTPException(400, f"acción desconocida: {accion!r}")
+    except RevisionConflict as exc:
+        raise HTTPException(
+            409, {"message": str(exc), "revision": exc.current}
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, f"valor inválido: {exc}") from exc
 
     payload = load_alignment(root, group_id=group_id, label=label,
                              max_points=int(body.get("max_points", 2000) or 2000))
     payload["legacy_cleared"] = int(limpiados)
+    if auto_result is not None:
+        payload["auto_align"] = auto_result
     return Response(content=json.dumps(payload, allow_nan=False, ensure_ascii=False),
                     media_type="application/json")

@@ -74,6 +74,23 @@ function savedTab() {
   return 'capturas';
 }
 
+async function initServerMeta() {
+  const badge = document.getElementById('server-meta');
+  try {
+    const response = await fetch('/api/meta', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const meta = await response.json();
+    badge.textContent = `v${meta.version} · ${meta.build} · pid ${meta.pid}`;
+    badge.title = `Inicio: ${meta.started_at}\nRaw: ${meta.roots?.raw || '—'}\nProcessed: ${meta.roots?.processed || '—'}\nServer: ${meta.roots?.server || '—'}`;
+    badge.classList.add('is-current');
+  } catch (_) {
+    badge.textContent = 'servidor anterior · reiniciar';
+    badge.title = 'El proceso activo no expone /api/meta. Detenelo y levantá de nuevo python -m server.';
+    badge.classList.add('is-stale');
+  }
+}
+
 initTheme();
 initTabs();
+initServerMeta();
 activateTab(savedTab());

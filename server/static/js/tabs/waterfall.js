@@ -36,6 +36,8 @@ export function mount(root) {
 
           <label class="control-check" title="Por defecto cada traza se normaliza a su propio pico para comparar formas. Con esto todas comparten la misma escala y se ve caer la amplitud con la distancia.">
             <input type="checkbox" id="wf-raw"> Amplitud real (ver atenuación)</label>
+          <label class="control-check" title="Rellena el lóbulo positivo respecto a la línea base de cada distancia. Es sólo vista.">
+            <input type="checkbox" id="wf-wiggle"> Wiggle / área variable positiva</label>
 
           <div class="field-row">
             <label for="wf-kfilter">Filtro K</label>
@@ -72,6 +74,11 @@ export function mount(root) {
             <button type="button" id="wf-flip">Invertir traza</button>
             <button type="button" id="wf-auto-pol" title="Corrige la polaridad en dos etapas. 1) Intra-punto: las capturas SIN validar se enfasan contra el consenso de las validadas de su distancia (las validadas no se tocan; el flip queda como propuesta que aceptás al revisarlas en Capturas). 2) Inter-punto: cada promedio se correlaciona con el del punto vecino ya alineado; si da en contrafase se invierte el punto COMPLETO.">Auto polaridad</button>
           </div>
+          <div class="toolbar">
+            <button type="button" id="wf-masw">Enviar a MASW</button>
+            <button type="button" id="wf-masw-auto">MASW automático</button>
+            <button type="button" id="wf-export" class="btn-quiet">Exportar</button>
+          </div>
           <p class="note">«Invertir traza» y «Auto polaridad» no son de vista: tocan
           <code>geo_flip</code> en las anotaciones, así que persisten y llegan a promedios,
           MASW y export.</p>
@@ -103,10 +110,19 @@ export function mount(root) {
   let campaign = '';
   let seleccion = null;         // distancia elegida en la lista
   let frame = null;
-  let pedido = 0;
+  let pedidoCarga = 0;
+  let campaignCargada = '';
+  let patchVistaPendiente = {};
+  let guardandoVista = false;
 
   const picker = mountCampaignPicker($('#wf-campaign'), {
-    onChange: (id) => { campaign = id; seleccion = null; load(); },
+    onChange: (id) => {
+      campaign = id;
+      campaignCargada = '';
+      patchVistaPendiente = {};
+      seleccion = null;
+      load();
+    },
   });
 
   // Rueda, arrastre y doble click, igual que el ViewBox del PlotWidget de la app.
@@ -121,6 +137,7 @@ export function mount(root) {
       `<option value="${i + 1}"${(i + 1) === data.group_id ? ' selected' : ''}>Grupo ${i + 1}</option>`).join('');
     const v = data.view || {};
     $('#wf-raw').checked = !!v.raw_amplitude;
+    $('#wf-wiggle').checked = !!v.wiggle;
     $('#wf-trim').checked = !!v.trim_enabled;
     $('#wf-trim-a').value = v.trim_start ?? 0;
     $('#wf-trim-b').value = v.trim_end ?? 1;
@@ -175,6 +192,7 @@ export function mount(root) {
     const spacing = Number(data.spacing) || 1;
     for (const t of data.traces) {
       const elegida = Number(t.distance_m) === seleccion;
+      if (data.view?.wiggle) areaVariable(t, t.distance_m, c.traza);
       drawMinMax(frame, t, { color: c.traza, lineWidth: elegida ? 1.6 : 1 });
       // Rótulo de la distancia al borde izquierdo, como el TextItem de la app.
       etiqueta(t.label, t.distance_m, c.traza, elegida);
@@ -188,6 +206,27 @@ export function mount(root) {
       drawMinMax(frame, data.hammer, { color: c.hammer, lineWidth: 1.5 });
       etiqueta(`hammer prom. (n=${data.hammer.n})`, data.hammer.base, c.hammer, false);
     }
+  }
+
+  function areaVariable(trace, base, color) {
+    const maxima = trace.max || [];
+    if (!maxima.length) return;
+    const { ctx } = frame;
+    const dt = Number(trace.bucket_dt) || 0;
+    const t0 = Number(trace.t0) || 0;
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.22;
+    for (let i = 0; i < maxima.length; i++) {
+      const y = Number(maxima[i]);
+      if (!Number.isFinite(y) || y <= base) continue;
+      const xa = frame.xOf(t0 + i * dt);
+      const xb = frame.xOf(t0 + (i + 1) * dt);
+      const y0 = frame.yOf(base);
+      const y1 = frame.yOf(y);
+      ctx.fillRect(xa, Math.min(y0, y1), Math.max(1, xb - xa), Math.abs(y1 - y0));
+    }
+    ctx.restore();
   }
 
   function etiqueta(texto, y, color, fuerte) {
@@ -223,40 +262,105 @@ export function mount(root) {
   }
 
   async function load() {
-    const mio = ++pedido;
+    if (!campaign) return;
+    const campaignPedida = campaign;
+    const mio = ++pedidoCarga;
     $('#wf-meta').textContent = 'armando el waterfall…';
     try {
-      const q = new URLSearchParams({ campaign, group_id: String(data.group_id || 1),
+      const q = new URLSearchParams({ campaign: campaignPedida,
+        group_id: String(data.group_id || 1),
         max_points: String(maxPoints()) });
-      const r = await fetch(`/api/waterfall?${q}`, { cache: 'no-store' }).then((x) => x.json());
-      if (mio !== pedido) return;
-      data = r;
+      const response = await fetch(`/api/waterfall?${q}`, { cache: 'no-store' });
+      const out = await response.json();
+      if (!response.ok) throw new Error(out.detail || `HTTP ${response.status}`);
+      if (mio !== pedidoCarga || campaignPedida !== campaign) return;
+      data = out;
+      campaignCargada = campaignPedida;
       render();
     } catch (err) {
-      if (mio === pedido) $('#wf-meta').textContent = `no se pudo armar: ${err}`;
+      if (mio === pedidoCarga && campaignPedida === campaign) {
+        $('#wf-meta').textContent = `no se pudo armar: ${err}`;
+      }
     }
   }
 
   // Los ajustes de vista se guardan (comparten archivo con la app) y el
-  // servidor devuelve el waterfall ya redibujado con ellos.
-  async function guardarVista(patch) {
-    const mio = ++pedido;
+  // servidor devuelve el waterfall ya redibujado con ellos. Los cambios se
+  // coalescen y se envían EN SERIE: así cada POST usa la revisión que devolvió
+  // el anterior y dos clicks rápidos no producen un 409 artificial.
+  function guardarVista(patch) {
+    if (!campaign || campaignCargada !== campaign) {
+      $('#wf-status').textContent = 'esperá a que termine de cargar la campaña';
+      return;
+    }
+    // Los controles de vista deben responder en el mismo click. El servidor
+    // sigue siendo autoritativo y persiste el cambio, pero no esperamos a que
+    // reconstruya todo el waterfall para mostrar wiggle/recorte/escala.
+    data = { ...data, view: { ...(data.view || {}), ...patch } };
+    patchVistaPendiente = { ...patchVistaPendiente, ...patch };
+    render();
     $('#wf-status').textContent = 'aplicando…';
+    void vaciarColaVista();
+  }
+
+  async function vaciarColaVista() {
+    if (guardandoVista) return;
+    guardandoVista = true;
     try {
-      const r = await fetch('/api/waterfall/view', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ campaign, group_id: data.group_id || 1,
-                               max_points: maxPoints(), ...patch }),
-      });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const nuevo = await r.json();
-      if (mio !== pedido) return;
-      data = nuevo;
-      $('#wf-status').textContent = 'guardado';
-      render();
-    } catch (err) {
-      if (mio === pedido) $('#wf-status').textContent = `no se pudo aplicar: ${err}`;
+      while (Object.keys(patchVistaPendiente).length &&
+             campaign && campaignCargada === campaign) {
+        const patch = patchVistaPendiente;
+        patchVistaPendiente = {};
+        const campaignGuardada = campaign;
+        const groupId = data.group_id || 1;
+        try {
+          const response = await fetch('/api/waterfall/view', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              campaign: campaignGuardada,
+              group_id: groupId,
+              max_points: maxPoints(),
+              base_revision: data.revision || '',
+              ...patch,
+            }),
+          });
+          const out = await response.json();
+          if (response.status === 409) {
+            throw new Error('el estado cambió desde PyQt; se recargó');
+          }
+          if (!response.ok) throw new Error(out.detail || `HTTP ${response.status}`);
+          // El usuario pudo cambiar de campaña mientras el POST estaba en vuelo.
+          // El cambio ya quedó correctamente guardado en su campaña original,
+          // pero jamás debe reemplazar la vista de la campaña nueva.
+          if (campaignGuardada !== campaign || campaignCargada !== campaign) continue;
+          data = out;
+          if (Object.keys(patchVistaPendiente).length) {
+            data = {
+              ...data,
+              view: { ...(data.view || {}), ...patchVistaPendiente },
+            };
+          }
+          $('#wf-status').textContent = Object.keys(patchVistaPendiente).length
+            ? 'aplicando…' : 'guardado';
+          render();
+        } catch (err) {
+          if (campaignGuardada === campaign) {
+            patchVistaPendiente = {};
+            await load();
+            // Este mensaje va DESPUÉS de load(): no depende de un token que la
+            // propia recarga invalida, como ocurría en el camino 409 anterior.
+            $('#wf-status').textContent = `no se pudo aplicar: ${err}`;
+          }
+          break;
+        }
+      }
+    } finally {
+      guardandoVista = false;
+      if (Object.keys(patchVistaPendiente).length &&
+          campaign && campaignCargada === campaign) {
+        void vaciarColaVista();
+      }
     }
   }
 
@@ -268,6 +372,8 @@ export function mount(root) {
   });
   $('#wf-raw').addEventListener('change', (ev) =>
     guardarVista({ raw_amplitude: ev.target.checked }));
+  $('#wf-wiggle').addEventListener('change', (ev) =>
+    guardarVista({ wiggle: ev.target.checked }));
   $('#wf-kfilter').addEventListener('change', (ev) =>
     guardarVista({ kfilter_mode: ev.target.value }));
   $('#wf-trim').addEventListener('change', (ev) =>
@@ -307,8 +413,13 @@ export function mount(root) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ campaign, group_id: data.group_id || 1,
-                               distance_m: seleccion, max_points: maxPoints() }),
+                               distance_m: seleccion, max_points: maxPoints(),
+                               base_revision: data.annotation_revision }),
       });
+      if (r.status === 409) {
+        await load();
+        throw new Error('las anotaciones cambiaron; se recargó el waterfall');
+      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       data = await r.json();
       $('#wf-status').textContent =
@@ -330,8 +441,13 @@ export function mount(root) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ campaign, group_id: data.group_id || 1,
-                               max_points: maxPoints() }),
+                               max_points: maxPoints(),
+                               base_revision: data.annotation_revision }),
       });
+      if (r.status === 409) {
+        await load();
+        throw new Error('las anotaciones cambiaron; se recargó el waterfall');
+      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       data = await r.json();
       const rep = data.auto_polarity || {};
@@ -367,6 +483,67 @@ export function mount(root) {
     }
   });
 
+  function abrirMasw(auto = false) {
+    try {
+      localStorage.setItem('geo-masw-request', JSON.stringify({
+        campaign, group_id: data.group_id || 1, auto, at: Date.now(),
+      }));
+    } catch (_) { /* modo privado */ }
+    document.querySelector('.tab-btn[data-tab="masw"]')?.click();
+  }
+  $('#wf-masw').addEventListener('click', () => abrirMasw(false));
+  $('#wf-masw-auto').addEventListener('click', () => abrirMasw(true));
+  let exportPoll = null;
+  async function esperarExport(jobId) {
+    try {
+      const r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' });
+      const job = await r.json();
+      if (!r.ok) throw new Error(job.detail || `HTTP ${r.status}`);
+      if (job.state === 'listo') {
+        const links = (job.result?.artifacts || []).map((a) =>
+          `<a class="artifact-link" href="/api/artifacts/${encodeURIComponent(a.id)}">${a.name}</a>`
+        ).join(' ');
+        $('#wf-status').innerHTML = links || 'exportación terminada sin artefactos';
+        $('#wf-export').disabled = false;
+        exportPoll = null;
+        return;
+      }
+      if (job.state === 'error' || job.state === 'cancelado') {
+        $('#wf-status').textContent = job.error || `exportación ${job.state}`;
+        $('#wf-export').disabled = false;
+        exportPoll = null;
+        return;
+      }
+      $('#wf-status').textContent =
+        `exportando ${Math.round(Number(job.progress || 0) * 100)} %…`;
+      exportPoll = setTimeout(() => esperarExport(jobId), 450);
+    } catch (err) {
+      $('#wf-status').textContent = `no se pudo consultar la exportación: ${err}`;
+      $('#wf-export').disabled = false;
+      exportPoll = null;
+    }
+  }
+
+  $('#wf-export').addEventListener('click', async () => {
+    $('#wf-status').textContent = 'preparando exportación…';
+    $('#wf-export').disabled = true;
+    try {
+      const r = await fetch('/api/exports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaign, group_id: data.group_id || 1,
+          kind: 'waterfall' }),
+      });
+      const out = await r.json();
+      if (!r.ok) throw new Error(out.detail || `HTTP ${r.status}`);
+      $('#wf-status').textContent = `exportación encolada: ${out.id}`;
+      esperarExport(out.id);
+    } catch (err) {
+      $('#wf-status').textContent = `no se pudo exportar: ${err}`;
+      $('#wf-export').disabled = false;
+    }
+  });
+
   // Cursor: tiempo y distancia bajo el mouse (el crosshair de `_on_mouse_moved`
   // :3618). Va en el rótulo, no como líneas, para no ensuciar el dibujo.
   elPlot.addEventListener('pointermove', (ev) => {
@@ -386,10 +563,23 @@ export function mount(root) {
   const mo = new MutationObserver(() => dibujar());
   mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-  load();
-
   return {
-    resume() { picker.reload(); load(); },
-    destroy() { view.destroy(); ro.disconnect(); mo.disconnect(); },
+    resume() {
+      picker.reload().then((id) => {
+        campaign = id;
+        campaignCargada = '';
+        patchVistaPendiente = {};
+        seleccion = null;
+        return load();
+      }).catch((err) => {
+        $('#wf-meta').textContent = `no se pudo recargar la campaña: ${err}`;
+      });
+    },
+    destroy() {
+      view.destroy();
+      ro.disconnect();
+      mo.disconnect();
+      if (exportPoll) clearTimeout(exportPoll);
+    },
   };
 }

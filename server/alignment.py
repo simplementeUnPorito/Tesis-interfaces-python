@@ -18,8 +18,8 @@ Persistencia, en los mismos archivos que la app:
   rechazadas: sus señales pueden ser válidas pero el usuario decidió que esa
   tanda no entre a promedios/waterfall/MASW/export.
 
-Lo que NO está portado todavía, y por qué, en DUDAS_LUNES.md #16:
-el auto-enfase de dos etapas y la auto-polaridad (`auto_align_polarity`).
+La auto-polaridad de dos etapas se expone desde Waterfall y reutiliza
+``frd.auto_align_polarity``; no mantiene una implementación web paralela.
 """
 
 from __future__ import annotations
@@ -30,7 +30,9 @@ import numpy as np
 
 from ._gs import frd
 from .datacache import get_dataset
+from .groups import group_disabled_key
 from .signal_view import _round6, decimate_minmax
+from .state import composite_revision
 
 
 def offsets_path(raw_root: str | Path) -> Path:
@@ -64,12 +66,40 @@ def disabled_path(raw_root: str | Path) -> Path:
     return frd.default_disabled_folders_path(raw_root)
 
 
+def state_paths(raw_root: str | Path) -> tuple[Path, Path, Path]:
+    raw_root = Path(raw_root)
+    return (
+        offsets_path(raw_root),
+        shot_offsets_path(raw_root),
+        disabled_path(raw_root),
+    )
+
+
 def _group_key(label: str, group_id: int, group_count: int) -> str:
     """Clave de rechazo. Con un solo grupo es el label pelado; con varios, la
     app le agrega el grupo (`_group_disabled_key`)."""
     if group_count <= 1:
         return label
-    return f"{label}#g{group_id}"
+    return group_disabled_key(label, group_id)
+
+
+def _legacy_group_key(label: str, group_id: int) -> str:
+    """Clave emitida brevemente por el primer port web.
+
+    PyQt siempre usó ``::grupoN``. La lectura retrocompatible evita perder un
+    rechazo hecho con esa versión web, pero toda escritura nueva usa la clave
+    compartida autoritativa.
+    """
+    return f"{label}#g{int(group_id)}"
+
+
+def _all_group_keys(label: str, group_count: int) -> set[str]:
+    keys = {label}
+    if group_count > 1:
+        for group_id in range(1, group_count + 1):
+            keys.add(group_disabled_key(label, group_id))
+            keys.add(_legacy_group_key(label, group_id))
+    return keys
 
 
 def _folder_average(pairs, raw_root: Path) -> tuple[np.ndarray, np.ndarray] | None:
@@ -154,10 +184,14 @@ def load_alignment(raw_root: str | Path, *, group_id: int = 1,
         return {"group_id": group_id, "group_count": group_count, "labels": [],
                 "label": None, "folders": [],
                 "offsets_path": str(offsets_path(raw_root)),
-                "disabled_path": str(disabled_path(raw_root))}
+                "disabled_path": str(disabled_path(raw_root)),
+                "revision": composite_revision(state_paths(raw_root))}
 
     activo = label if label in por_label else labels[0]
-    claves_rechazo = {_group_key(activo, group_id, group_count)}
+    claves_rechazo = {
+        _group_key(activo, group_id, group_count),
+        _legacy_group_key(activo, group_id),
+    }
     if group_count > 1 and group_id == 1:
         claves_rechazo.add(activo)
 
@@ -203,6 +237,206 @@ def load_alignment(raw_root: str | Path, *, group_id: int = 1,
         "folders": folders,
         "offsets_path": str(offsets_path(raw_root)),
         "disabled_path": str(disabled_path(raw_root)),
+        "revision": composite_revision(state_paths(raw_root)),
+    }
+
+
+def _alignment_score(
+    reference_t: np.ndarray,
+    reference: np.ndarray,
+    target_t: np.ndarray,
+    target: np.ndarray,
+    offset_s: float,
+    *,
+    window_start_s: float,
+    window_end_s: float,
+) -> float | None:
+    """Correlación normalizada al aplicar ``t_mostrado=t_original+offset``."""
+    window = (
+        (reference_t >= float(window_start_s))
+        & (reference_t <= float(window_end_s))
+        & np.isfinite(reference)
+    )
+    times = reference_t[window]
+    x = reference[window]
+    if times.size < 32:
+        return None
+    # En el tiempo mostrado ``t``, una traza desplazada O toma el valor que
+    # originalmente estaba en ``t-O``.
+    y = np.interp(times - float(offset_s), target_t, target,
+                  left=np.nan, right=np.nan)
+    finite = np.isfinite(x) & np.isfinite(y)
+    if int(np.count_nonzero(finite)) < 32:
+        return None
+    x = x[finite] - float(np.mean(x[finite]))
+    y = y[finite] - float(np.mean(y[finite]))
+    denominator = float(np.linalg.norm(x) * np.linalg.norm(y))
+    if denominator <= np.finfo(np.float64).eps:
+        return None
+    return float(np.dot(x, y) / denominator)
+
+
+def auto_align_label(
+    raw_root: str | Path,
+    *,
+    label: str,
+    group_id: int = 1,
+    max_shift_ms: float = 100.0,
+    min_score: float = 0.6,
+    ambiguity_ratio: float = 0.9,
+    ambiguity_separation_ms: float = 8.0,
+    window_start_s: float = -0.02,
+    window_end_s: float = 0.35,
+) -> dict:
+    """Estima offsets rígidos por carpeta sin modificar ninguna señal.
+
+    La carpeta aceptada de mayor pico a pico es la referencia. Sólo se guarda
+    un offset cuando la correlación *con signo* supera ``min_score`` y no hay
+    otro máximo separado casi igual; los casos débiles o cíclicamente ambiguos
+    quedan intactos para ajuste manual.
+    """
+    raw_root = Path(raw_root)
+    max_shift_s = float(np.clip(abs(max_shift_ms), 1.0, 250.0)) / 1000.0
+    min_score = float(np.clip(min_score, 0.0, 1.0))
+    ambiguity_ratio = float(np.clip(ambiguity_ratio, 0.5, 1.0))
+    separation_s = float(np.clip(
+        abs(ambiguity_separation_ms), 1.0, 100.0
+    )) / 1000.0
+    if not np.isfinite(window_start_s) or not np.isfinite(window_end_s):
+        raise ValueError("ventana de autoenfase inválida")
+    if float(window_end_s) <= float(window_start_s):
+        raise ValueError("window_end_s debe ser mayor que window_start_s")
+
+    group_count, _assign = frd.load_dispersion_groups(
+        frd.default_dispersion_groups_path(raw_root)
+    )
+    group_count = max(1, int(group_count or 1))
+    disabled = frd.load_disabled_folders(disabled_path(raw_root))
+    rejection_keys = {
+        _group_key(label, group_id, group_count),
+        _legacy_group_key(label, group_id),
+    }
+    if group_count > 1 and group_id == 1:
+        rejection_keys.add(label)
+
+    pairs_by_folder = _pairs_by_label(raw_root, group_id).get(label, {})
+    candidates = []
+    for folder, pairs in pairs_by_folder.items():
+        if any(folder in disabled.get(key, ()) for key in rejection_keys):
+            continue
+        average = _folder_average(pairs, raw_root)
+        if average is None:
+            continue
+        grid, mean = average
+        finite = mean[np.isfinite(mean)]
+        p2p = float(finite.max() - finite.min()) if finite.size else 0.0
+        if p2p > 0.0:
+            candidates.append((folder, pairs, grid, mean, p2p))
+    candidates.sort(key=lambda item: -item[4])
+    if not candidates:
+        return {
+            "reference": None,
+            "applied": [],
+            "skipped": [],
+            "legacy_cleared": 0,
+        }
+
+    reference_folder, _reference_pairs, reference_t, reference, _p2p = candidates[0]
+    reference_dt = float(np.median(np.diff(reference_t)))
+    if not np.isfinite(reference_dt) or reference_dt <= 0:
+        raise ValueError("la referencia no tiene una grilla temporal válida")
+    offsets_to_try = np.arange(
+        -max_shift_s,
+        max_shift_s + reference_dt * 0.5,
+        reference_dt,
+        dtype=np.float64,
+    )
+
+    applied = [{
+        "folder": reference_folder,
+        "offset_ms": 0.0,
+        "score": 1.0,
+        "reference": True,
+    }]
+    skipped = []
+    chosen: dict[str, float] = {reference_folder: 0.0}
+    for folder, _pairs, target_t, target, _target_p2p in candidates[1:]:
+        scored = [
+            (
+                float(offset),
+                _alignment_score(
+                    reference_t,
+                    reference,
+                    target_t,
+                    target,
+                    float(offset),
+                    window_start_s=float(window_start_s),
+                    window_end_s=float(window_end_s),
+                ),
+            )
+            for offset in offsets_to_try
+        ]
+        usable = [(offset, score) for offset, score in scored if score is not None]
+        if not usable:
+            ref_peak = int(np.nanargmax(np.abs(reference)))
+            target_peak = int(np.nanargmax(np.abs(target)))
+            skipped.append({
+                "folder": folder,
+                "reason": "sin_solapamiento",
+                "reference_peak_s": _round6(float(reference_t[ref_peak])),
+                "target_peak_s": _round6(float(target_t[target_peak])),
+            })
+            continue
+        best_offset, best_score = max(usable, key=lambda item: item[1])
+        alternatives = [
+            score for offset, score in usable
+            if abs(offset - best_offset) >= separation_s
+        ]
+        second_score = max(alternatives) if alternatives else -1.0
+        if best_score < min_score:
+            skipped.append({
+                "folder": folder,
+                "reason": "correlacion_baja",
+                "score": _round6(best_score),
+            })
+            continue
+        if second_score >= best_score * ambiguity_ratio:
+            skipped.append({
+                "folder": folder,
+                "reason": "maximo_ambiguo",
+                "score": _round6(best_score),
+                "second_score": _round6(second_score),
+            })
+            continue
+        chosen[folder] = float(best_offset)
+        applied.append({
+            "folder": folder,
+            "offset_ms": _round6(best_offset * 1000.0),
+            "score": _round6(best_score),
+            "reference": False,
+        })
+
+    offset_state = frd.load_alignment_offsets(offsets_path(raw_root))
+    label_offsets = offset_state.setdefault(label, {})
+    for folder, value in chosen.items():
+        label_offsets[folder] = float(value)
+    frd.save_alignment_offsets(offsets_path(raw_root), offset_state)
+
+    shot_state = frd.load_alignment_shot_offsets(shot_offsets_path(raw_root))
+    cleared = 0
+    for folder in chosen:
+        for shot, _annotation in pairs_by_folder.get(folder, ()):
+            if shot_state.pop(shot.shot_id, None) is not None:
+                cleared += 1
+    if cleared:
+        frd.save_alignment_shot_offsets(shot_offsets_path(raw_root), shot_state)
+    return {
+        "reference": reference_folder,
+        "applied": applied,
+        "skipped": skipped,
+        "legacy_cleared": cleared,
+        "max_shift_ms": _round6(max_shift_s * 1000.0),
+        "min_score": _round6(min_score),
     }
 
 
@@ -275,9 +509,7 @@ def set_rejected(raw_root: str | Path, *, label: str, folder: str,
         _limpiar_shot_offsets(
             raw_root, _pairs_by_label(raw_root, group_id).get(label, {}).get(folder, []))
     else:
-        claves = {label} | {_group_key(label, gid, group_count)
-                            for gid in range(1, group_count + 1)}
-        for clave in claves:
+        for clave in _all_group_keys(label, group_count):
             entrada = disabled.get(clave)
             if entrada and folder in entrada:
                 entrada.remove(folder)

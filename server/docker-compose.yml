@@ -1,0 +1,18 @@
+services:
+  geophone-server:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      TESIS_HOST: 0.0.0.0
+      TESIS_PORT: "8000"
+      TESIS_DATA_ROOT: /data
+      TESIS_RAW_ROOT: /data/raw
+      TESIS_SERVER_DATA_ROOT: /data/server
+    volumes:
+      - ../../../../data/raw:/data/raw
+      - ../../../../data/processed:/data/processed
+      - ../../../../data/server:/data/server
+    restart: unless-stopped

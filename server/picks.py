@@ -17,15 +17,11 @@ Dos reglas que no son obvias y que vienen de cómo es el equipo:
 
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 
 from ._gs import frd
 from .datacache import get_dataset
-
-# save_annotations reescribe el archivo entero: dos escrituras simultáneas
-# (dos pestañas abiertas, o el autoguardado de la app) se pisarían.
-_write_lock = threading.Lock()
+from .state import locked, require_revision, revision
 
 
 class UnknownShot(Exception):
@@ -58,6 +54,7 @@ def save_pick(
     notes: str | None = None,
     apply_distance_to_folder: bool = False,
     flip_folder: bool = False,
+    base_revision: str = "",
 ) -> dict:
     """Guarda la marca de un disparo. Devuelve un resumen de lo que cambió."""
     raw_root = Path(raw_root)
@@ -69,7 +66,8 @@ def save_pick(
     path = frd.default_annotations_path(raw_root)
     tocados: list[str] = []
 
-    with _write_lock:
+    with locked(path):
+        require_revision(path, base_revision)
         anns = frd.load_annotations(path)
 
         def marca(target) -> "frd.PickAnnotation":
@@ -134,6 +132,7 @@ def save_pick(
         "path": str(path),
         "shot_id": shot.shot_id,
         "touched": len(set(tocados)),
+        "revision": revision(path),
         "annotation": {
             "trigger_s": guardada.trigger_s,
             "arrival_s": guardada.arrival_s,

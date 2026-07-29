@@ -46,6 +46,42 @@
   --chrome-h: 120px;
 }
 
+.masw-plot {
+  min-height: 520px;
+}
+
+.deletion-table-wrap {
+  max-height: calc(100vh - 230px);
+}
+
+.group-row td {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-2);
+  font-weight: 700;
+}
+
+.status-chip {
+  display: inline-block;
+  margin: 1px 2px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: .72rem;
+  white-space: nowrap;
+}
+
+progress {
+  width: 100%;
+  height: .8rem;
+}
+
+.artifact-link {
+  display: inline-block;
+  margin: .25rem .5rem .25rem 0;
+}
+
 :root[data-theme="light"] { color-scheme: light }
 
 :root[data-theme="dark"] {
@@ -168,6 +204,20 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.server-meta {
+  align-self: center;
+  max-width: 220px;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--fg-muted);
+  font: 600 .68rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server-meta.is-current { color: var(--ok-fg); border-color: var(--ok-fg) }
+.server-meta.is-stale { color: var(--bad-fg); border-color: var(--bad-fg) }
 
 .theme-toggle {
   align-self: center;
@@ -234,6 +284,7 @@ code {
 }
 .subtab-btn.active { color: var(--fg); font-weight: 600; border-bottom-color: var(--accent) }
 .subtab-panel { display: block }
+.subtab-panel[hidden] { display: none }
 
 /* ── Split: datos y controles a la izquierda, gráficos a la derecha ──────── */
 /* QSplitter(Horizontal) de field_review_app.py:484, setSizes([480, 900]).    */

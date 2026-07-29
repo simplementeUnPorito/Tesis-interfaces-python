@@ -18,6 +18,7 @@ Orden de la cadena (el mismo que en la app, y no es indistinto): primero
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,7 @@ import numpy as np
 from ._gs import frd
 from .datacache import get_dataset
 from .signal_view import _round6, decimate_minmax
+from .state import locked, require_revision, revision
 
 
 class UnknownShot(Exception):
@@ -43,24 +45,56 @@ def load_settings(raw_root: str | Path) -> dict:
         "high_hz": float(s.high_hz),
         "order": int(s.order),
         "target_fs": float(s.target_fs),
+        "dc_enabled": bool(s.dc_enabled),
+        "line_suppress_enabled": bool(s.line_suppress_enabled),
+        "line_f0_hz": float(s.line_f0_hz),
+        "line_harmonics": int(s.line_harmonics),
+        "line_search_hz": float(s.line_search_hz),
         "notes": str(s.notes or ""),
         "path": str(settings_path(raw_root)),
+        "revision": revision(settings_path(raw_root)),
     }
 
 
-def save_settings(raw_root: str | Path, patch: dict) -> dict:
+def save_settings(
+    raw_root: str | Path, patch: dict, base_revision: str = ""
+) -> dict:
     """Guarda sólo lo que venga en ``patch``; el resto queda como estaba."""
     path = settings_path(raw_root)
-    actual = frd.load_filter_settings(path)
-    nuevo = frd.FilterSettings(
-        enabled=bool(patch.get("enabled", actual.enabled)),
-        low_hz=float(patch.get("low_hz", actual.low_hz) or 0.0),
-        high_hz=float(patch.get("high_hz", actual.high_hz) or 0.0),
-        order=int(patch.get("order", actual.order) or 4),
-        target_fs=float(patch.get("target_fs", actual.target_fs) or 0.0),
-        notes=str(patch.get("notes", actual.notes) or ""),
-    )
-    frd.save_filter_settings(path, nuevo)
+    with locked(path):
+        require_revision(path, base_revision)
+        actual = frd.load_filter_settings(path)
+        nuevo = frd.FilterSettings(
+            enabled=bool(patch.get("enabled", actual.enabled)),
+            low_hz=float(patch.get("low_hz", actual.low_hz) or 0.0),
+            high_hz=float(patch.get("high_hz", actual.high_hz) or 0.0),
+            order=max(1, min(10, int(patch.get("order", actual.order) or 4))),
+            target_fs=float(patch.get("target_fs", actual.target_fs) or 0.0),
+            dc_enabled=bool(patch.get("dc_enabled", actual.dc_enabled)),
+            line_suppress_enabled=bool(
+                patch.get("line_suppress_enabled", actual.line_suppress_enabled)
+            ),
+            line_f0_hz=float(
+                patch.get("line_f0_hz", actual.line_f0_hz) or 50.0
+            ),
+            line_harmonics=max(
+                1,
+                min(
+                    12,
+                    int(
+                        patch.get("line_harmonics", actual.line_harmonics) or 3
+                    ),
+                ),
+            ),
+            line_search_hz=max(
+                0.0,
+                float(
+                    patch.get("line_search_hz", actual.line_search_hz) or 0.0
+                ),
+            ),
+            notes=str(patch.get("notes", actual.notes) or ""),
+        )
+        frd.save_filter_settings(path, nuevo)
     return load_settings(raw_root)
 
 
@@ -139,6 +173,12 @@ def build_preview(
     high_hz: float | None = None,
     order: int | None = None,
     target_fs: float | None = None,
+    dc_enabled: bool | None = None,
+    line_suppress_enabled: bool | None = None,
+    line_f0_hz: float | None = None,
+    line_harmonics: int | None = None,
+    line_search_hz: float | None = None,
+    include_envelope: bool = False,
 ) -> dict:
     """Original vs filtrada del geófono, en tiempo y en espectro.
 
@@ -151,6 +191,40 @@ def build_preview(
     high = guardado.high_hz if high_hz is None else float(high_hz)
     orden = guardado.order if order is None else int(order)
     fs_comun = guardado.target_fs if target_fs is None else float(target_fs)
+    preview_settings = replace(
+        guardado,
+        enabled=True,
+        low_hz=low,
+        high_hz=high,
+        order=orden,
+        target_fs=fs_comun,
+        dc_enabled=(
+            guardado.dc_enabled if dc_enabled is None else bool(dc_enabled)
+        ),
+        line_suppress_enabled=(
+            guardado.line_suppress_enabled
+            if line_suppress_enabled is None
+            else bool(line_suppress_enabled)
+        ),
+        line_f0_hz=(
+            guardado.line_f0_hz if line_f0_hz is None else float(line_f0_hz)
+        ),
+        line_harmonics=max(
+            1,
+            min(
+                12,
+                guardado.line_harmonics
+                if line_harmonics is None
+                else int(line_harmonics),
+            ),
+        ),
+        line_search_hz=max(
+            0.0,
+            guardado.line_search_hz
+            if line_search_hz is None
+            else float(line_search_hz),
+        ),
+    )
 
     dataset = get_dataset(raw_root)
     shot = next((s for s in dataset.shots if s.shot_id == shot_id), None)
@@ -178,7 +252,13 @@ def build_preview(
         work = np.asarray(frd.resample_signal(geo, fs, fs_comun), dtype=np.float64)
         work_fs = fs_comun
     filtrada = np.asarray(
-        frd.apply_bandpass_filter(work, work_fs, low, high, orden), dtype=np.float64)
+        frd.apply_filter_chain(work, work_fs, preview_settings), dtype=np.float64
+    )
+    envelope = None
+    if include_envelope and filtrada.size:
+        from scipy.signal import hilbert
+
+        envelope = np.abs(hilbert(np.nan_to_num(filtrada, nan=0.0)))
 
     return {
         "shot_id": shot_id,
@@ -190,11 +270,26 @@ def build_preview(
         "fs": _round6(fs),
         "work_fs": _round6(work_fs),
         "resampled": abs(work_fs - fs) > 1e-6,
-        "applied": {"low_hz": low, "high_hz": high, "order": orden, "target_fs": fs_comun},
+        "applied": {
+            "low_hz": low,
+            "high_hz": high,
+            "order": orden,
+            "target_fs": fs_comun,
+            "dc_enabled": preview_settings.dc_enabled,
+            "line_suppress_enabled": preview_settings.line_suppress_enabled,
+            "line_f0_hz": preview_settings.line_f0_hz,
+            "line_harmonics": preview_settings.line_harmonics,
+            "line_search_hz": preview_settings.line_search_hz,
+        },
         "enabled": bool(guardado.enabled),
         "time": {
             "original": _trace(geo, t0=-trigger_s, fs=fs, max_points=max_points),
             "filtered": _trace(filtrada, t0=-trigger_s, fs=work_fs, max_points=max_points),
+            "envelope": (
+                _trace(envelope, t0=-trigger_s, fs=work_fs, max_points=max_points)
+                if envelope is not None
+                else None
+            ),
         },
         "spectrum": {
             "original": _spectrum(geo, fs, max_points),

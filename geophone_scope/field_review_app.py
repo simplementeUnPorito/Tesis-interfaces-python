@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import re
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -47,11 +48,13 @@ try:
         FieldDataset,
         FieldShot,
         FilterSettings,
+        GLOBAL_DISABLED_LABEL,
         PickAnnotation,
         alignment_offsets_signature,
         alignment_shot_offsets_signature,
         annotations_signature,
         apply_bandpass_filter,
+        apply_filter_chain,
         auto_align_polarity,
         auto_pick_shot,
         build_waterfall_matrix,
@@ -107,11 +110,13 @@ except ImportError:  # pragma: no cover - script execution from this folder
         FieldDataset,
         FieldShot,
         FilterSettings,
+        GLOBAL_DISABLED_LABEL,
         PickAnnotation,
         alignment_offsets_signature,
         alignment_shot_offsets_signature,
         annotations_signature,
         apply_bandpass_filter,
+        apply_filter_chain,
         auto_align_polarity,
         auto_pick_shot,
         build_waterfall_matrix,
@@ -235,8 +240,19 @@ def _project_disabled_for_group(
     group_count = max(1, int(group_count or 1))
     projected: dict[str, list[str]] = {}
     for key, folders in disabled.items():
-        if "::grupo" in key:
+        if key == GLOBAL_DISABLED_LABEL:
+            projected.setdefault(key, []).extend(folders)
+        elif "::grupo" in key:
             label, _, suffix = key.partition("::grupo")
+            try:
+                gid = int(suffix)
+            except ValueError:
+                continue
+            if gid == group_id:
+                projected.setdefault(label, []).extend(folders)
+        elif "#g" in key:
+            # Compatibilidad con la primera versión web, igual que el servidor.
+            label, _, suffix = key.rpartition("#g")
             try:
                 gid = int(suffix)
             except ValueError:
@@ -1964,10 +1980,9 @@ class FilterPanel(QWidget):
         if target_fs > 0 and abs(target_fs - fs) > 1e-6:
             work = np.asarray(resample_signal(geo, fs, target_fs), dtype=np.float64)
             work_fs = target_fs
+        preview_settings = replace(self.settings, enabled=True)
         filtered = np.asarray(
-            apply_bandpass_filter(
-                work, work_fs, self.settings.low_hz, self.settings.high_hz, self.settings.order
-            ),
+            apply_filter_chain(work, work_fs, preview_settings),
             dtype=np.float64,
         )
 

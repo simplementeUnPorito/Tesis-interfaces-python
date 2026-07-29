@@ -45,8 +45,22 @@ def project_disabled_for_group(disabled: dict[str, list[str]] | None,
     group_count = max(1, int(group_count or 1))
     proyectado: dict[str, list[str]] = {}
     for key, folders in disabled.items():
-        if "::grupo" in key:
+        if key == frd.GLOBAL_DISABLED_LABEL:
+            # La desactivación global no pertenece a un grupo: debe excluir la
+            # carpeta de todos los promedios, waterfall, MASW y exportaciones.
+            proyectado.setdefault(key, []).extend(folders)
+        elif "::grupo" in key:
             label, _, suffix = key.partition("::grupo")
+            try:
+                gid = int(suffix)
+            except ValueError:
+                continue
+            if gid == group_id:
+                proyectado.setdefault(label, []).extend(folders)
+        elif "#g" in key:
+            # Compatibilidad con la primera versión del port web. PyQt y las
+            # escrituras actuales usan siempre ``::grupoN``.
+            label, _, suffix = key.rpartition("#g")
             try:
                 gid = int(suffix)
             except ValueError:

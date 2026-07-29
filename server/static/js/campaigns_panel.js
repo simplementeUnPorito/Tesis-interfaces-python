@@ -25,6 +25,7 @@ export function mountCampaigns(host, { onChange } = {}) {
   const elSummary = host.querySelector('#camp-summary');
   const elStatus = host.querySelector('#camp-status');
   let items = [];
+  let revision = 'missing';
 
   function render() {
     const usadas = items.filter((c) => c.enabled).length;
@@ -48,6 +49,7 @@ export function mountCampaigns(host, { onChange } = {}) {
     try {
       const r = await fetch('/api/campaigns', { cache: 'no-store' }).then((x) => x.json());
       items = r.campaigns || [];
+      revision = r.revision || 'missing';
       render();
     } catch (_) {
       elStatus.textContent = 'no se pudo leer la lista de campañas';
@@ -60,10 +62,15 @@ export function mountCampaigns(host, { onChange } = {}) {
       const res = await fetch('/api/campaigns', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, ...patch }),
+        body: JSON.stringify({ id, ...patch, base_revision: revision }),
       });
+      if (res.status === 409) {
+        await load();
+        throw new Error('la configuración cambió; se recargó la versión actual');
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const out = await res.json();
+      revision = out.revision || revision;
       const i = items.findIndex((c) => c.id === id);
       if (i >= 0 && out.campaign) items[i] = out.campaign;
       render();

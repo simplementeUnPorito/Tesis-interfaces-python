@@ -12,6 +12,7 @@ from .. import campaigns
 from ..api import get_pipeline
 from ..filters import UnknownShot, build_preview, load_settings, save_settings
 from ..pipeline import Pipeline
+from ..state import RevisionConflict
 
 router = APIRouter()
 
@@ -35,9 +36,23 @@ def filter_post(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
     """Guarda los ajustes. Sólo pisa lo que venga en el cuerpo."""
     root = _campaign_root(pipeline, str(body.get("campaign", "")))
     patch = {k: v for k, v in body.items()
-             if k in ("enabled", "low_hz", "high_hz", "order", "target_fs", "notes")}
+             if k in (
+                 "enabled", "low_hz", "high_hz", "order", "target_fs",
+                 "dc_enabled", "line_suppress_enabled", "line_f0_hz",
+                 "line_harmonics", "line_search_hz", "notes",
+             )}
     try:
-        return save_settings(root, patch)
+        return save_settings(
+            root, patch, base_revision=str(body.get("base_revision", ""))
+        )
+    except RevisionConflict as exc:
+        raise HTTPException(
+            409,
+            {
+                "message": str(exc),
+                "revision": exc.current,
+            },
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, f"ajuste inválido: {exc}") from exc
 
@@ -51,6 +66,12 @@ def filter_preview(
     high_hz: float | None = Query(None),
     order: int | None = Query(None),
     target_fs: float | None = Query(None),
+    dc_enabled: bool | None = Query(None),
+    line_suppress_enabled: bool | None = Query(None),
+    line_f0_hz: float | None = Query(None),
+    line_harmonics: int | None = Query(None),
+    line_search_hz: float | None = Query(None),
+    include_envelope: bool = Query(False),
     pipeline: Pipeline = Depends(get_pipeline),
 ):
     """Original vs filtrada del geófono, en tiempo y espectro.
@@ -66,6 +87,12 @@ def filter_preview(
             _campaign_root(pipeline, campaign),
             shot_id=shot_id, max_points=max_points,
             low_hz=low_hz, high_hz=high_hz, order=order, target_fs=target_fs,
+            dc_enabled=dc_enabled,
+            line_suppress_enabled=line_suppress_enabled,
+            line_f0_hz=line_f0_hz,
+            line_harmonics=line_harmonics,
+            line_search_hz=line_search_hz,
+            include_envelope=include_envelope,
         )
     except UnknownShot as exc:
         raise HTTPException(404, f"shot_id desconocido: {exc}") from exc

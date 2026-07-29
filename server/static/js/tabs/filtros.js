@@ -53,7 +53,24 @@ export function mount(root) {
             <input type="number" id="f-order" step="1" min="1" max="10" class="num-input">
             <label for="f-fs">fs común</label>
             <input type="number" id="f-fs" step="10" min="0" max="20000" class="num-input">
+
+            <label class="control-check span-4"><input type="checkbox" id="f-dc">
+              Remover componente continua antes del filtro</label>
+            <label class="control-check span-4"><input type="checkbox" id="f-line">
+              Supresor armónico adaptativo de línea</label>
+
+            <label for="f-line-f0">Línea nominal</label>
+            <input type="number" id="f-line-f0" step="1" min="1" max="200" class="num-input">
+            <label for="f-line-harm">Armónicos</label>
+            <input type="number" id="f-line-harm" step="1" min="1" max="12" class="num-input">
+            <label for="f-line-search">Búsqueda ±Hz</label>
+            <input type="number" id="f-line-search" step="0.1" min="0" max="10" class="num-input">
+            <label class="control-check"><input type="checkbox" id="f-envelope">
+              Ver Hilbert</label>
           </div>
+          <p class="note">El supresor no es un notch IIR: estima la frecuencia real de
+          línea y resta el modelo armónico ajustado sobre la captura completa.
+          Hilbert es exclusivamente visual.</p>
           <p class="note" id="f-hint-values"></p>
 
           <div class="toolbar">
@@ -93,7 +110,8 @@ export function mount(root) {
             </figure>
             <figure class="plot-box">
               <figcaption class="plot-title"><span class="lg lg-filt"></span>Geófono filtrado
-                <span class="legend" id="f-band"></span></figcaption>
+                <span class="legend" id="f-band"></span>
+                <span class="legend" id="f-env-label"></span></figcaption>
               <canvas class="plot" id="f-filt"></canvas>
             </figure>
             <figure class="plot-box">
@@ -142,6 +160,12 @@ export function mount(root) {
       high_hz: Number($('#f-high').value) || 0,
       order: Math.max(1, Math.min(10, Number($('#f-order').value) || 4)),
       target_fs: Number($('#f-fs').value) || 0,
+      dc_enabled: $('#f-dc').checked,
+      line_suppress_enabled: $('#f-line').checked,
+      line_f0_hz: Number($('#f-line-f0').value) || 50,
+      line_harmonics: Math.max(1, Math.min(12, Number($('#f-line-harm').value) || 3)),
+      line_search_hz: Math.max(0, Number($('#f-line-search').value) || 0),
+      include_envelope: $('#f-envelope').checked,
       enabled: $('#f-enabled').checked,
     };
   }
@@ -153,13 +177,21 @@ export function mount(root) {
         : (!p.high_hz ? `pasa-altos ≥ ${p.low_hz} Hz`
           : `pasa-banda ${p.low_hz}–${p.high_hz} Hz`));
     const fs = p.target_fs ? `${p.target_fs} Hz` : 'auto (la mínima del grupo)';
-    $('#f-hint-values').textContent = `${banda}, orden ${p.order} · fs común: ${fs}`;
+    const extra = [
+      p.dc_enabled ? 'sin DC' : '',
+      p.line_suppress_enabled
+        ? `línea ${p.line_f0_hz}±${p.line_search_hz} Hz × ${p.line_harmonics}`
+        : '',
+    ].filter(Boolean).join(' · ');
+    $('#f-hint-values').textContent =
+      `${banda}, orden ${p.order} · fs común: ${fs}${extra ? ` · ${extra}` : ''}`;
   }
 
   function render() {
     const c = {
       orig: cssVar('--sig-overlay', 'rgba(120,120,120,.5)'),
       filt: cssVar('--sig-geo', '#0066cc'),
+      env: cssVar('--sig-ok-avg', '#d62728'),
     };
     const vacio = (canvas, opts) => createFrame(canvas, {
       xMin: 0, xMax: 1, yMin: -1, yMax: 1,
@@ -177,7 +209,7 @@ export function mount(root) {
     // eje vertical: superpuestas se tapaban entre sí y no se podía ver qué
     // cambió. Compartir la escala es lo que permite comparar de un vistazo.
     const t = preview.time;
-    const trazas = [t.original, t.filtered].filter(Boolean);
+    const trazas = [t.original, t.filtered, t.envelope].filter(Boolean);
     if (trazas.length) {
       const lo = Math.min(...trazas.map((x) => x.y_min ?? 0));
       const hi = Math.max(...trazas.map((x) => x.y_max ?? 0));
@@ -190,6 +222,9 @@ export function mount(root) {
       if (t.original) drawMinMax(frames.orig, t.original, { color: c.orig, lineWidth: 1 });
       frames.filt = createFrame(elFilt, eje);
       if (t.filtered) drawMinMax(frames.filt, t.filtered, { color: c.filt, lineWidth: 1 });
+      if (t.envelope) {
+        drawMinMax(frames.filt, t.envelope, { color: c.env, lineWidth: 1, alpha: 0.8 });
+      }
     }
 
     const s = preview.spectrum;
@@ -216,6 +251,7 @@ export function mount(root) {
     $('#f-band').textContent = (!a.low_hz && !a.high_hz) ? 'sin filtrar'
       : (!a.low_hz ? `≤ ${a.high_hz} Hz` : (!a.high_hz ? `≥ ${a.low_hz} Hz`
         : `${a.low_hz}–${a.high_hz} Hz`)) + `, orden ${a.order}`;
+    $('#f-env-label').textContent = t.envelope ? ' · envolvente Hilbert' : '';
 
     const estado = preview.enabled ? 'ACTIVO en promedios/export' : 'sólo vista previa (no aplicado)';
     const resamp = preview.resampled
@@ -232,10 +268,13 @@ export function mount(root) {
   function marcarSucio() {
     if (!settings) return;
     const p = params();
-    const sucio = ['low_hz', 'high_hz', 'order', 'target_fs'].some(
+    const sucio = ['low_hz', 'high_hz', 'order', 'target_fs', 'line_f0_hz',
+      'line_harmonics', 'line_search_hz'].some(
       (k) => Number(p[k]) !== Number(settings[k])) || p.enabled !== !!settings.enabled;
-    $('#f-dirty').hidden = !sucio;
-    $('#f-save').classList.toggle('is-primary', sucio);
+    const flagsSucias = p.dc_enabled !== !!settings.dc_enabled
+      || p.line_suppress_enabled !== !!settings.line_suppress_enabled;
+    $('#f-dirty').hidden = !(sucio || flagsSucias);
+    $('#f-save').classList.toggle('is-primary', sucio || flagsSucias);
   }
 
   async function loadSettings() {
@@ -249,6 +288,11 @@ export function mount(root) {
       $('#f-high').value = settings.high_hz || 0;
       $('#f-order').value = settings.order || 4;
       $('#f-fs').value = settings.target_fs || 0;
+      $('#f-dc').checked = !!settings.dc_enabled;
+      $('#f-line').checked = !!settings.line_suppress_enabled;
+      $('#f-line-f0').value = settings.line_f0_hz || 50;
+      $('#f-line-harm').value = settings.line_harmonics || 3;
+      $('#f-line-search').value = settings.line_search_hz ?? 2;
       elSaved.textContent = `guardado en ${settings.path}`;
       renderHint();
       marcarSucio();
@@ -262,8 +306,12 @@ export function mount(root) {
       const res = await fetch('/api/filter', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ campaign, ...params() }),
+        body: JSON.stringify({ campaign, base_revision: settings?.revision || '', ...params() }),
       });
+      if (res.status === 409) {
+        await loadSettings();
+        throw new Error('el archivo cambió desde PyQt; se recargaron sus valores');
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       settings = await res.json();
       elSaved.textContent = 'guardado y aplicado';
@@ -320,6 +368,12 @@ export function mount(root) {
       max_points: String(Math.max(200, Math.round(elOrig.clientWidth || 800))),
       low_hz: String(p.low_hz), high_hz: String(p.high_hz),
       order: String(p.order), target_fs: String(p.target_fs),
+      dc_enabled: String(p.dc_enabled),
+      line_suppress_enabled: String(p.line_suppress_enabled),
+      line_f0_hz: String(p.line_f0_hz),
+      line_harmonics: String(p.line_harmonics),
+      line_search_hz: String(p.line_search_hz),
+      include_envelope: String(p.include_envelope),
     });
     $('#f-preview').disabled = true;
     elMeta.textContent = 'calculando…';
@@ -348,7 +402,9 @@ export function mount(root) {
   // usan promedios, waterfall, MASW y export, así que es un acto aparte y
   // explícito. (Antes guardaba en cada tecleo y era muy fácil pisar sin querer
   // los ajustes de una campaña.)
-  for (const id of ['#f-enabled', '#f-low', '#f-high', '#f-order', '#f-fs']) {
+  for (const id of ['#f-enabled', '#f-low', '#f-high', '#f-order', '#f-fs',
+    '#f-dc', '#f-line', '#f-line-f0', '#f-line-harm', '#f-line-search',
+    '#f-envelope']) {
     $(id).addEventListener('change', () => { renderHint(); marcarSucio(); refreshPreview(); });
   }
   $('#f-preview').addEventListener('click', refreshPreview);

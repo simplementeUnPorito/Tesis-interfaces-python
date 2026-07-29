@@ -12,6 +12,7 @@
   <h1>Servidor de datos</h1>
   <p class="sub">Las capturas llegan de la SPA del maestro, se descomprimen y se preprocesan
   solas. Acá se ve qué está listo para validar.</p>
+  <span id="server-meta" class="server-meta" title="Identidad del proceso activo">comprobando servidor…</span>
   <button id="btn-theme" class="theme-toggle" type="button" aria-label="Cambiar tema">🌓</button>
 </header>
 
@@ -46,22 +47,8 @@
       <button class="subtab-btn" data-subtab="perfil">3. Perfil Vs</button>
     </nav>
     <section id="subpanel-dispersion" class="subtab-panel"></section>
-    <section id="subpanel-inversion" class="subtab-panel" hidden>
-      <div class="pending">
-        <span class="eyebrow">Pendiente · PORT_PLAN §3.5</span>
-        <h2>2. Inversion</h2>
-        <p>Falta: correr los backends de <code>masw_backends.py</code> como trabajos del
-        Pipeline (tardan minutos: no van en el request) y mostrar progreso.</p>
-      </div>
-    </section>
-    <section id="subpanel-perfil" class="subtab-panel" hidden>
-      <div class="pending">
-        <span class="eyebrow">Pendiente · PORT_PLAN §3.5</span>
-        <h2>3. Perfil Vs</h2>
-        <p>Falta: el perfil Vs resultante de la inversión, con curva editable, igual que en
-        la app de escritorio.</p>
-      </div>
-    </section>
+    <section id="subpanel-inversion" class="subtab-panel" hidden></section>
+    <section id="subpanel-perfil" class="subtab-panel" hidden></section>
   </section>
 
   <section id="panel-borrado" class="tab-panel" hidden></section>

@@ -1,0 +1,11 @@
+{
+    "schema_version": 2,
+    "commit": "10d9fb8f77ecf4b42273a4f2aaac847bba5768c9",
+    "indexed_at": "2026-07-27T03:04:28Z",
+    "project": "TesisPythonFinal",
+    "nodes": 2739,
+    "edges": 12381,
+    "original_size": 12845056,
+    "compressed_size": 2854743,
+    "compression_level": 3
+}

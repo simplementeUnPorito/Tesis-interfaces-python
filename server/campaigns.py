@@ -25,17 +25,14 @@ Lo que el usuario configura (nombre visible y si se usa o no) se guarda en
 from __future__ import annotations
 
 import json
-import os
-import threading
 from pathlib import Path
+
+from .state import atomic_write_json, locked, require_revision, revision
 
 STATE_FILE = "campaigns.json"
 
 # id de la campaña que es la propia raw_root (layout plano).
 ROOT_ID = "."
-
-_lock = threading.Lock()
-
 
 def _is_folder(path: Path) -> bool:
     """Una *carpeta* de datos: tiene un ``captures/`` con al menos un directorio."""
@@ -106,36 +103,37 @@ def load_config(data_root: str | Path) -> dict:
 
 def save_config(data_root: str | Path, config: dict) -> Path:
     path = _state_path(data_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    blob = json.dumps({"campaigns": config}, indent=2, ensure_ascii=False)
-    with _lock:
-        tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-        try:
-            tmp.write_text(blob, encoding="utf-8")
-            tmp.replace(path)
-        finally:
-            tmp.unlink(missing_ok=True)
+    atomic_write_json(path, {"campaigns": config})
     return path
 
 
 def update_campaign(data_root: str | Path, campaign_id: str, *,
-                    name: str | None = None, enabled: bool | None = None) -> dict:
+                    name: str | None = None, enabled: bool | None = None,
+                    base_revision: str = "") -> dict:
     """Renombra y/o habilita una campaña. Devuelve su entrada ya actualizada."""
-    config = load_config(data_root)
-    entry = dict(config.get(campaign_id, {}))
-    if name is not None:
-        clean = " ".join(str(name).split())[:120]
-        # Un nombre vacío vuelve al nombre del directorio, no deja la campaña
-        # sin etiqueta.
-        if clean:
-            entry["name"] = clean
-        else:
-            entry.pop("name", None)
-    if enabled is not None:
-        entry["enabled"] = bool(enabled)
-    config[campaign_id] = entry
-    save_config(data_root, config)
-    return entry
+    path = _state_path(data_root)
+    with locked(path):
+        require_revision(path, base_revision)
+        config = load_config(data_root)
+        entry = dict(config.get(campaign_id, {}))
+        if name is not None:
+            clean = " ".join(str(name).split())[:120]
+            # Un nombre vacío vuelve al nombre del directorio, no deja la
+            # campaña sin etiqueta.
+            if clean:
+                entry["name"] = clean
+            else:
+                entry.pop("name", None)
+        if enabled is not None:
+            entry["enabled"] = bool(enabled)
+        config[campaign_id] = entry
+        save_config(data_root, config)
+        return entry
+
+
+def config_revision(data_root: str | Path) -> str:
+    """Revisión optimista del estado compartido de campañas."""
+    return revision(_state_path(data_root))
 
 
 def display_name(campaign_id: str, config: dict) -> str:

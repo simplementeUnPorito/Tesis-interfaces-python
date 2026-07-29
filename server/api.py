@@ -8,12 +8,16 @@ No define un ``app`` a nivel de módulo a propósito: ``main()`` construye un so
 
 from __future__ import annotations
 
+import os
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .analysis_jobs import AnalysisJobs
 from .pipeline import Pipeline
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -23,11 +27,15 @@ def get_pipeline(request: Request) -> Pipeline:
     return request.app.state.pipeline
 
 
+def get_analysis_jobs(request: Request) -> AnalysisJobs:
+    return request.app.state.analysis_jobs
+
+
 # Importados después de get_pipeline: los routers hacen `from ..api import
 # get_pipeline` y, al estar este módulo en medio de su propia importación,
 # necesitan encontrarlo ya definido.
-from .routers import (admin, alignment, averages, dataset, filters,  # noqa: E402
-                      grouping, ingest, masw, picks, waterfall)
+from .routers import (admin, alignment, averages, dataset, deletion, filters,  # noqa: E402
+                      grouping, ingest, jobs, masw, picks, waterfall)
 
 
 class _TitleCaseHeaders:
@@ -61,9 +69,12 @@ class _TitleCaseHeaders:
         await self.app(scope, receive, send_wrapper)
 
 
-def create_app(pipeline: Pipeline) -> FastAPI:
-    app = FastAPI(title="Servidor de datos Geophone", version="1")
+def create_app(pipeline: Pipeline, *, read_only: bool = False) -> FastAPI:
+    app = FastAPI(title="Servidor de datos Geophone", version="2")
     app.state.pipeline = pipeline
+    app.state.analysis_jobs = AnalysisJobs(pipeline.data_root)
+    app.state.started_at = datetime.now(timezone.utc)
+    app.state.read_only = bool(read_only)
 
     from fastapi.middleware.cors import CORSMiddleware
 
@@ -78,7 +89,18 @@ def create_app(pipeline: Pipeline) -> FastAPI:
 
     @app.middleware("http")
     async def no_store(request: Request, call_next):
-        response = await call_next(request)
+        if app.state.read_only and request.method.upper() == "POST":
+            response = JSONResponse(
+                {
+                    "detail": (
+                        "servidor en modo sólo lectura; el POST fue rechazado "
+                        "sin modificar datos"
+                    )
+                },
+                status_code=405,
+            )
+        else:
+            response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -99,6 +121,53 @@ def create_app(pipeline: Pipeline) -> FastAPI:
     app.include_router(averages.router)
     app.include_router(waterfall.router)
     app.include_router(masw.router)
+    app.include_router(deletion.router)
+    app.include_router(jobs.router)
+
+    @app.get("/api/meta")
+    def meta() -> dict:
+        python_root = Path(__file__).resolve().parents[1]
+        build = os.environ.get("TESIS_BUILD_VERSION", "").strip()
+        if not build:
+            try:
+                build = subprocess.run(
+                    ["git", "rev-parse", "--short=12", "HEAD"],
+                    cwd=python_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=True,
+                ).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                build = "unknown"
+        now = datetime.now(timezone.utc)
+        return {
+            "version": app.version,
+            "build": build,
+            "git": build,
+            "started_at": app.state.started_at.isoformat(timespec="seconds"),
+            "uptime_s": round((now - app.state.started_at).total_seconds(), 3),
+            "data_root": str(pipeline.data_root),
+            "raw_root": str(pipeline.raw_root),
+            "roots": {
+                "server": str(pipeline.data_root),
+                "raw": str(pipeline.raw_root),
+                "processed": str(Path(
+                    os.environ.get(
+                        "TESIS_PROCESSED_ROOT",
+                        Path(
+                            os.environ.get(
+                                "TESIS_DATA_ROOT",
+                                Path(__file__).resolve().parents[4] / "data",
+                            )
+                        )
+                        / "processed",
+                    )
+                ).resolve()),
+            },
+            "pid": os.getpid(),
+            "read_only": app.state.read_only,
+        }
 
     # Escanear el volumen tarda ~30 s en una campaña de ~950 capturas. Se hace
     # en un hilo al arrancar para que el primer pedido de la web no lo pague:

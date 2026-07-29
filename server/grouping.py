@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ._gs import frd
 from .datacache import get_dataset
+from .state import locked, require_revision, revision
 
 MAX_GROUPS = 20
 
@@ -35,7 +36,12 @@ def load_groups(raw_root: str | Path) -> dict:
         dataset = get_dataset(raw_root)
         anns = frd.load_annotations(frd.default_annotations_path(raw_root))
     except FileNotFoundError:
-        return {"group_count": group_count, "folders": [], "path": str(path)}
+        return {
+            "group_count": group_count,
+            "folders": [],
+            "path": str(path),
+            "revision": revision(path),
+        }
 
     por_carpeta: dict[str, dict] = {}
     for shot in dataset.shots:
@@ -77,24 +83,33 @@ def load_groups(raw_root: str | Path) -> dict:
             "mtime": info["mtime"],
         })
 
-    return {"group_count": group_count, "folders": folders, "path": str(path)}
+    return {
+        "group_count": group_count,
+        "folders": folders,
+        "path": str(path),
+        "revision": revision(path),
+    }
 
 
 def save_groups(raw_root: str | Path, *, group_count: int | None = None,
-                assign: dict[str, int] | None = None) -> dict:
+                assign: dict[str, int] | None = None,
+                base_revision: str = "") -> dict:
     """Guarda cantidad de grupos y/o asignaciones. Sólo pisa lo que venga."""
     raw_root = Path(raw_root)
     path = groups_path(raw_root)
-    actual_count, assignments = frd.load_dispersion_groups(path)
-    nuevo_count = max(1, min(MAX_GROUPS, int(group_count if group_count is not None
-                                             else (actual_count or 1))))
-    if assign:
-        for carpeta, grupo in assign.items():
-            assignments[str(carpeta)] = max(1, min(nuevo_count, int(grupo)))
-    # Clampeo global: si bajó la cantidad, nadie queda apuntando a un grupo
-    # inexistente (la app hace lo mismo en `_clamp_assignments`).
-    for carpeta, grupo in list(assignments.items()):
-        assignments[carpeta] = max(1, min(nuevo_count, int(grupo)))
+    with locked(path):
+        require_revision(path, base_revision)
+        actual_count, assignments = frd.load_dispersion_groups(path)
+        nuevo_count = max(1, min(MAX_GROUPS, int(
+            group_count if group_count is not None else (actual_count or 1)
+        )))
+        if assign:
+            for carpeta, grupo in assign.items():
+                assignments[str(carpeta)] = max(1, min(nuevo_count, int(grupo)))
+        # Clampeo global: si bajó la cantidad, nadie queda apuntando a un grupo
+        # inexistente (la app hace lo mismo en `_clamp_assignments`).
+        for carpeta, grupo in list(assignments.items()):
+            assignments[carpeta] = max(1, min(nuevo_count, int(grupo)))
 
-    frd.save_dispersion_groups(path, nuevo_count, assignments)
+        frd.save_dispersion_groups(path, nuevo_count, assignments)
     return load_groups(raw_root)

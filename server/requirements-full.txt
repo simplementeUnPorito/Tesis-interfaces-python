@@ -1,0 +1,10 @@
+-r requirements-core.txt
+
+# Backends y exportadores científicos opcionales en Windows, incluidos en Docker.
+disba==0.7.0
+evodcinv==2.2.2
+pandas==3.0.5
+seaborn==0.13.2
+swprepost==2.0.0
+torch==2.13.0
+tqdm==4.69.1

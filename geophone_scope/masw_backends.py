@@ -29,6 +29,7 @@ Todas las inversiones in-proc devuelven un dict NORMALIZADO, igual que
 from __future__ import annotations
 
 import csv
+import os
 import shutil
 import subprocess
 import sys
@@ -124,6 +125,15 @@ def backend_status(key: str) -> str:
     if key == "geopsy":
         return "export" + (" + launch" if (_which("dinver") or _which("geopsy")) else "")
     return "?"
+
+
+def backend_can_launch(key: str) -> bool:
+    """True sólo si el backend puede abrir su herramienta en esta máquina."""
+    return bool(
+        key == "geopsy"
+        and os.name == "nt"
+        and (_which("dinver") or _which("geopsy"))
+    )
 
 
 # --------------------------------------------------------------------------

@@ -44,6 +44,7 @@ export function mount(root) {
     overlayMax: Number(saved.overlayMax) || 12,
     folderAvg: saved.folderAvg !== false,
     loaded: false,
+    annotationRevisions: {},
     summary: { total: 0, duplicate_folder_count: 0, reviewed_count: 0 },
   };
 
@@ -329,6 +330,7 @@ export function mount(root) {
       ]);
       renderJobs(root, jobs.jobs || []);
       state.rows = caps.rows || [];
+      state.annotationRevisions = caps.annotation_revisions || {};
       state.loaded = true;
       state.summary = {
         total: caps.total || 0,
@@ -403,10 +405,20 @@ export function mount(root) {
       const res = await fetch('/api/pick', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ shot_id: row.shot_id, campaign: row.campaign || '', ...patch }),
+        body: JSON.stringify({
+          shot_id: row.shot_id,
+          campaign: row.campaign || '',
+          base_revision: state.annotationRevisions[row.campaign || ''] || 'missing',
+          ...patch,
+        }),
       });
+      if (res.status === 409) {
+        await tick();
+        throw new Error('las anotaciones cambiaron en PyQt u otra ventana; se recargaron');
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const out = await res.json();
+      state.annotationRevisions[row.campaign || ''] = out.revision;
       // Actualizar la fila en memoria para que la tabla no parpadee al valor
       // viejo hasta el próximo tick.
       Object.assign(row, {

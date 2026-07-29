@@ -25,6 +25,7 @@ from ._gs import frd
 from .datacache import get_dataset
 from .groups import filtered_dataset, load_grouping, project_disabled_for_group
 from .signal_view import _round6, decimate_minmax
+from .state import locked, require_revision, revision
 
 
 def arrivals_path(raw_root: str | Path) -> Path:
@@ -110,26 +111,30 @@ def build_averages(raw_root: str | Path, *, max_points: int = 2000,
         "group_id": group_id,
         "group_count": max(1, group_count),
         "path": str(arrivals_path(raw_root)),
+        "revision": revision(arrivals_path(raw_root)),
     }
 
 
 def save_arrival(raw_root: str | Path, *, label: str, distance_m: float,
                  arrival_s: float | None = None, reviewed: bool | None = None,
-                 notes: str | None = None) -> dict:
+                 notes: str | None = None, base_revision: str = "") -> dict:
     """Anota el primer arribo del promedio de un label. Sólo pisa lo que venga."""
     raw_root = Path(raw_root)
     path = arrivals_path(raw_root)
-    arrivals = frd.load_average_arrivals(path)
-    marca = arrivals.get(label) or frd.AverageArrivalAnnotation(
-        label=label, distance_m=float(distance_m))
-    if arrival_s is not None:
-        marca.arrival_s = float(arrival_s)
-    if reviewed is not None:
-        marca.reviewed = bool(reviewed)
-    if notes is not None:
-        marca.notes = str(notes)
-    marca.distance_m = float(distance_m)
-    arrivals[label] = marca
-    frd.save_average_arrivals(path, arrivals)
+    with locked(path):
+        require_revision(path, base_revision)
+        arrivals = frd.load_average_arrivals(path)
+        marca = arrivals.get(label) or frd.AverageArrivalAnnotation(
+            label=label, distance_m=float(distance_m))
+        if arrival_s is not None:
+            marca.arrival_s = float(arrival_s)
+        if reviewed is not None:
+            marca.reviewed = bool(reviewed)
+        if notes is not None:
+            marca.notes = str(notes)
+        marca.distance_m = float(distance_m)
+        arrivals[label] = marca
+        frd.save_average_arrivals(path, arrivals)
     return {"label": label, "arrival_s": marca.arrival_s,
-            "reviewed": marca.reviewed, "notes": marca.notes, "path": str(path)}
+            "reviewed": marca.reviewed, "notes": marca.notes, "path": str(path),
+            "revision": revision(path)}

@@ -21,6 +21,7 @@ from . import campaigns
 from ._gs import frd
 from .catalog import scan_catalog
 from .datacache import get_dataset, tree_signature
+from .state import revision
 
 
 def _estado(reviewed: bool, accepted: bool) -> str:
@@ -41,7 +42,7 @@ def _estado(reviewed: bool, accepted: bool) -> str:
 # que la app PyQt puede tocar por detrás mientras la web está abierta).
 _SCAN_TTL_S = 60.0
 _scan_lock = threading.Lock()
-_scan_cache: dict[str, tuple[float, tuple, dict, dict, int]] = {}
+_scan_cache: dict[tuple[str, bool], tuple[float, tuple, dict, dict, int]] = {}
 
 
 def invalidate_scan(raw_root: str | Path | None = None) -> None:
@@ -50,17 +51,23 @@ def invalidate_scan(raw_root: str | Path | None = None) -> None:
         if raw_root is None:
             _scan_cache.clear()
         else:
-            _scan_cache.pop(str(Path(raw_root)), None)
+            root_key = str(Path(raw_root))
+            for key in [item for item in _scan_cache if item[0] == root_key]:
+                _scan_cache.pop(key, None)
 
 
-def _scan(raw_root: Path) -> tuple[dict, dict, int]:
+def _scan(raw_root: Path, *, include_pipeline_disabled: bool = False) -> tuple[dict, dict, int]:
     """``(catálogo, {(carpeta, captura): [disparos]}, carpetas duplicadas)``.
 
     Es una LISTA de disparos por captura: con N geófonos en el tendido, un
     mismo golpe da N disparos (uno por receptor, cada uno a su distancia).
     """
-    key = str(raw_root)
-    sig = tree_signature(raw_root)
+    key = (str(raw_root), bool(include_pipeline_disabled))
+    sig = (
+        tree_signature(raw_root),
+        revision(frd.default_disabled_folders_path(raw_root))
+        if not include_pipeline_disabled else "all",
+    )
     now = time.monotonic()
     with _scan_lock:
         hit = _scan_cache.get(key)
@@ -71,7 +78,10 @@ def _scan(raw_root: Path) -> tuple[dict, dict, int]:
     shots_por_captura: dict[tuple[str, str], list] = {}
     duplicate_folder_count = 0
     try:
-        dataset = get_dataset(raw_root)
+        dataset = get_dataset(
+            raw_root,
+            include_pipeline_disabled=include_pipeline_disabled,
+        )
         duplicate_folder_count = int(dataset.duplicate_folder_count)
         for shot in dataset.shots:
             shots_por_captura.setdefault((shot.folder_name, shot.capture_name), []).append(shot)
@@ -84,7 +94,8 @@ def _scan(raw_root: Path) -> tuple[dict, dict, int]:
 
 
 def build_capture_rows(raw_root: str | Path, *, campaign_id: str = "",
-                       campaign_name: str = "", skip_folders: set[str] | None = None) -> dict:
+                       campaign_name: str = "", skip_folders: set[str] | None = None,
+                       include_pipeline_disabled: bool = False) -> dict:
     """Una fila por captura, con el pick encima cuando la captura es un disparo.
 
     ``raw_root`` acá es la raíz de **una campaña**: sus ``shot_id`` y sus
@@ -93,7 +104,14 @@ def build_capture_rows(raw_root: str | Path, *, campaign_id: str = "",
     """
     raw_root = Path(raw_root)
     skip_folders = skip_folders or set()
-    cat, shots_por_captura, duplicate_folder_count = _scan(raw_root)
+    cat, shots_por_captura, duplicate_folder_count = _scan(
+        raw_root,
+        include_pipeline_disabled=include_pipeline_disabled,
+    )
+    disabled = frd.load_disabled_folders(
+        frd.default_disabled_folders_path(raw_root)
+    )
+    globally_disabled = set(disabled.get(frd.GLOBAL_DISABLED_LABEL, ()))
     try:
         anns = frd.load_annotations(frd.default_annotations_path(raw_root))
     except FileNotFoundError:
@@ -101,7 +119,10 @@ def build_capture_rows(raw_root: str | Path, *, campaign_id: str = "",
 
     rows: list[dict] = []
     for folder in cat["folders"]:
-        if folder["folder"] in skip_folders:
+        folder_disabled = folder["folder"] in globally_disabled
+        if folder["folder"] in skip_folders or (
+            folder_disabled and not include_pipeline_disabled
+        ):
             continue
         for capture in folder["captures"]:
             key = (folder["folder"], capture["capture"])
@@ -135,6 +156,7 @@ def build_capture_rows(raw_root: str | Path, *, campaign_id: str = "",
                     "trigger_s": None,
                     "reviewed": False,
                     "accepted": True,
+                    "pipeline_disabled": folder_disabled,
                     "notes": "",
                     "geo_flip": False,
                     "source": None,
@@ -213,7 +235,8 @@ def build_capture_rows(raw_root: str | Path, *, campaign_id: str = "",
     }
 
 
-def build_all_campaigns(raw_root: str | Path, data_root: str | Path) -> dict:
+def build_all_campaigns(raw_root: str | Path, data_root: str | Path, *,
+                        include_pipeline_disabled: bool = False) -> dict:
     """Filas de **todas las campañas habilitadas**, unidas en una sola tabla.
 
     Cada campaña se escanea con su propia raíz, así que sus ``shot_id`` y sus
@@ -228,6 +251,7 @@ def build_all_campaigns(raw_root: str | Path, data_root: str | Path) -> dict:
     total_reviewed = 0
     total_dups = 0
     usadas: list[dict] = []
+    annotation_revisions: dict[str, str] = {}
 
     for cid in todas:
         enabled = campaigns.is_enabled(cid, config)
@@ -240,6 +264,10 @@ def build_all_campaigns(raw_root: str | Path, data_root: str | Path) -> dict:
             campaigns.campaign_path(raw_root, cid),
             campaign_id=cid,
             campaign_name=name,
+            include_pipeline_disabled=include_pipeline_disabled,
+        )
+        annotation_revisions[cid] = revision(
+            frd.default_annotations_path(campaigns.campaign_path(raw_root, cid))
         )
         rows.extend(part["rows"])
         total_shots += part["shot_count"]
@@ -256,6 +284,7 @@ def build_all_campaigns(raw_root: str | Path, data_root: str | Path) -> dict:
         "reviewed_count": total_reviewed,
         "duplicate_folder_count": total_dups,
         "campaigns": usadas,
+        "annotation_revisions": annotation_revisions,
     }
 
 

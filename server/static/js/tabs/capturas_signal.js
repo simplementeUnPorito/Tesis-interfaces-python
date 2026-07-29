@@ -54,7 +54,7 @@ export function mountViewer(host, opts = {}) {
     <div class="viewer-tools">
       <div class="control-group" role="group" aria-label="Origen de la señal">
         <label><input type="radio" name="vm-kind" value="raw" checked> raw</label>
-        <label title="El filt_f32le.bin que grabó el nodo, no el pasa-banda de §3.2 (todavía no está portado)">
+    <label title="El filt_f32le.bin que grabó el nodo; es distinto de la cadena configurable del tab Filtros">
           <input type="radio" name="vm-kind" value="filt"> filt</label>
       </div>
       <label class="control-check"><input type="checkbox" id="vm-flip"> Invertir geo</label>
