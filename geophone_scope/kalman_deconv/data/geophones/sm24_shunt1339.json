@@ -1,0 +1,12 @@
+{
+  "schema": "kalman_deconv_geophone_v1",
+  "id": "sm24_shunt1339",
+  "name": "SM-24 con shunt de 1339 ohm (zeta = 0,60)",
+  "f_n_hz": 10.0,
+  "zeta": 0.6,
+  "g0_v_s_per_m": 28.8,
+  "form": "acceleration",
+  "gain_override": null,
+  "provenance": "docs/Primera Presentacion/latex/secciones/02b_geofono.tex",
+  "notes": "Condicion de calibracion del fabricante. El shunt acopla amortiguamiento y sensibilidad; si haces barridos de zeta, revisa si tambien corresponde mover g0."
+}

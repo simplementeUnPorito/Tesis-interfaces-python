@@ -1,0 +1,12 @@
+{
+  "schema": "kalman_deconv_geophone_v1",
+  "id": "jf20dx_ma2023",
+  "name": "JF-20DX de Ma et al. 2023 (caso de control)",
+  "f_n_hz": 10.0,
+  "zeta": 0.3,
+  "g0_v_s_per_m": 27.3,
+  "form": "acceleration",
+  "gain_override": null,
+  "provenance": "Ma et al. 2023, Sensors 23:3082, DOI 10.3390/s23063082",
+  "notes": "Solo para reproducir el paper y validar el constructor de modelos. Bobina 395 ohm, masa movil 11 g. NO es el geofono del proyecto."
+}

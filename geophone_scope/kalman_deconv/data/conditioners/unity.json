@@ -1,0 +1,26 @@
+{
+  "schema": "kalman_deconv_conditioner_v1",
+  "id": "unity",
+  "name": "Passthrough (aisla el efecto del geofono solo)",
+  "kind": "unity",
+  "zeros": [],
+  "poles": [],
+  "gain": 1.0,
+  "zeta0": 0.25,
+  "zeta1": 937.39633,
+  "w0_rad_s": 64.117378,
+  "k_dc": -3.9705882,
+  "antialias_hz": 392.975168,
+  "valid_band_hz": [
+    1e-06,
+    1000000000.0
+  ],
+  "id_error_floor": [
+    0.0,
+    0.0
+  ],
+  "includes_geophone": false,
+  "provenance": "sintetico",
+  "source_sha256": "",
+  "notes": ""
+}

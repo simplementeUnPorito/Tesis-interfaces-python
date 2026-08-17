@@ -1,0 +1,104 @@
+{
+  "schema": "kalman_deconv_conditioner_v1",
+  "id": "lp_pga_medido",
+  "name": "AFE medido CH4/CH1 (PGA -> ADC), tfest 11/8",
+  "kind": "zpk",
+  "zeros": [
+    [
+      -5324.089616270175,
+      0.0
+    ],
+    [
+      -14.757111391486802,
+      1621.7643027723548
+    ],
+    [
+      -14.757111391486802,
+      -1621.7643027723548
+    ],
+    [
+      -753.7820977049523,
+      0.0
+    ],
+    [
+      -5.415324483710567,
+      0.0
+    ],
+    [
+      -0.11636647829186711,
+      1.632993508696421
+    ],
+    [
+      -0.11636647829186711,
+      -1.632993508696421
+    ],
+    [
+      0.06052287726883815,
+      0.0
+    ]
+  ],
+  "poles": [
+    [
+      -4661.434441009378,
+      16496.251199851376
+    ],
+    [
+      -4661.434441009378,
+      -16496.251199851376
+    ],
+    [
+      -1669.4133130112214,
+      0.0
+    ],
+    [
+      -1245.896086932914,
+      1337.9937086752257
+    ],
+    [
+      -1245.896086932914,
+      -1337.9937086752257
+    ],
+    [
+      -14.513602517708641,
+      1622.1452574518662
+    ],
+    [
+      -14.513602517708641,
+      -1622.1452574518662
+    ],
+    [
+      -0.11965593637136483,
+      1.6304586892919881
+    ],
+    [
+      -0.11965593637136483,
+      -1.6304586892919881
+    ],
+    [
+      -0.004252098017479139,
+      0.3086397568841536
+    ],
+    [
+      -0.004252098017479139,
+      -0.3086397568841536
+    ]
+  ],
+  "gain": 55955215380.0,
+  "zeta0": 0.25,
+  "zeta1": 937.39633,
+  "w0_rad_s": 64.117378,
+  "k_dc": -3.9705882,
+  "antialias_hz": 392.975168,
+  "valid_band_hz": [
+    0.211,
+    1112.0
+  ],
+  "id_error_floor": [
+    0.1998,
+    1.161
+  ],
+  "includes_geophone": false,
+  "provenance": "informe_identificacion.txt, tanda calibrada 2026-07-21, src/calculos_modelados/matlab/AnalisisCircuito/resultados_tanda_calibrada (seccion LP_PGA)",
+  "source_sha256": "1540db88313cc1fa73ab7e4c9e37f1a643309ab9efcec7aa5baba29439ae71c4",
+  "notes": "La etapa mejor identificada: coherencia mediana 0,9946, RMS 0,1998 dB y 1,161 grados. Estado declarado: 'confiable en banda util; dinamica subsonica no observable'. Tiene 1 cero RHP en +0,0605 rad/s (0,0096 Hz) y dos cuasi-cancelaciones (258 Hz y 0,26 Hz); el par de polos en 2728 Hz esta sobre Nyquist en TODAS las fs disponibles."
+}

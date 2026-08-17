@@ -1,0 +1,12 @@
+{
+  "schema": "kalman_deconv_geophone_v1",
+  "id": "sm24_nominal",
+  "name": "SM-24 nominal (10 Hz, circuito abierto)",
+  "f_n_hz": 10.0,
+  "zeta": 0.25,
+  "g0_v_s_per_m": 28.8,
+  "form": "acceleration",
+  "gain_override": null,
+  "provenance": "docs/Primera Presentacion/latex/secciones/02b_geofono.tex",
+  "notes": "El proyecto NO tiene geofonos de 4,5 Hz; el repo lo desmiente en dos lugares. Bobina 375 ohm a 25 C, masa movil 11 g, frecuencia espuria > 240 Hz."
+}

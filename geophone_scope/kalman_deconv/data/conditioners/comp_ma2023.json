@@ -1,0 +1,26 @@
+{
+  "schema": "kalman_deconv_conditioner_v1",
+  "id": "comp_ma2023",
+  "name": "Compensador de Ma et al. 2023 (gamma1 = 10)",
+  "kind": "compensator",
+  "zeros": [],
+  "poles": [],
+  "gain": 1.0,
+  "zeta0": 0.3,
+  "zeta1": 10.0,
+  "w0_rad_s": 62.83185307179586,
+  "k_dc": 1.0,
+  "antialias_hz": null,
+  "valid_band_hz": [
+    0.1,
+    200.0
+  ],
+  "id_error_floor": [
+    0.0,
+    0.0
+  ],
+  "includes_geophone": false,
+  "provenance": "Ma et al. 2023, Sensors 23:3082",
+  "source_sha256": "",
+  "notes": "Caso de validacion externa: con el JF-20DX debe reproducir el -3 dB en 0,8-0,9 Hz y la planitud en 1-100 Hz que reporta el paper."
+}
