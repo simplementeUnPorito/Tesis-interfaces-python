@@ -1,0 +1,152 @@
+{
+  "pipeline": [
+    "measured_acceleration",
+    "existing_sos_preprocessing",
+    "masw_phase_shift",
+    "kalman_rts_ridge_in_frequency",
+    "rayleigh_curve_inversion"
+  ],
+  "uses_temporal_kalman": false,
+  "uses_temporal_rts": false,
+  "uses_frequency_kalman_rts": true,
+  "reference_used_for_tracking_or_inversion": false,
+  "sample_rate_hz": 1020.0000000000036,
+  "channels": 21,
+  "curve": {
+    "points_tracker": 49,
+    "points_inversion": 25,
+    "frequency_range_hz": [
+      8.000000000000028,
+      21.714285714285793
+    ],
+    "c_rayleigh_range_m_s": [
+      86.18335825101597,
+      86.85714285714317
+    ],
+    "wavelength_range_m": [
+      4.0,
+      10.842795400250099
+    ],
+    "approx_reliable_depth_m": 5.421397700125049,
+    "against_external_reference": {
+      "rmse_m_s": 8.723850284290465,
+      "mae_m_s": 6.469195289844126,
+      "bias_m_s": 2.9866280236939464,
+      "coverage_fraction": 0.6287878787878788,
+      "evaluated_reference_points": 83,
+      "pick_points": 49
+    }
+  },
+  "monotonic_model": {
+    "misfit_percent": 0.3930833098783404,
+    "fit": {
+      "points": 25,
+      "rmse_m_s": 0.46339123001869126,
+      "mae_m_s": 0.3402280762667499,
+      "bias_m_s": 0.30226136300384954,
+      "coverage_fraction": 1.0
+    },
+    "beta_m_s": [
+      91.00968931345638,
+      91.38405125068539,
+      92.18430257251829,
+      93.19283039040111,
+      95.30574528505157
+    ],
+    "thickness_m": [
+      0.7107988714859217,
+      0.9203962739623724,
+      1.9253431960433782,
+      2.2720904658076133
+    ]
+  },
+  "recommended_model": "monotonic_four_layers_plus_halfspace",
+  "recommended_model_reason": "fit already below 1 m/s RMSE; reversals add complexity for marginal gain",
+  "recommended_against_external_reference": {
+    "rmse_m_s": 8.755621004550232,
+    "mae_m_s": 6.5358653127894,
+    "bias_m_s": 3.301654929921262,
+    "coverage_fraction": 0.6287878787878788,
+    "evaluated_reference_points": 83,
+    "pick_points": 25
+  },
+  "best_two_reversal_model": {
+    "misfit_percent": 0.1851491485804463,
+    "fit": {
+      "points": 25,
+      "rmse_m_s": 0.18594873431348558,
+      "mae_m_s": 0.16007357600130148,
+      "bias_m_s": 0.02226136300384951,
+      "coverage_fraction": 1.0
+    },
+    "beta_m_s": [
+      98.03976288082374,
+      92.70587253065614,
+      88.09487109099494,
+      90.58879927944966,
+      95.5204090397859
+    ],
+    "thickness_m": [
+      0.6006064056670928,
+      1.1396441062171492,
+      1.3417615012743571,
+      2.521228491361103
+    ]
+  },
+  "two_reversal_seed_sensitivity": [
+    {
+      "seed": 2909,
+      "misfit_percent": 0.1851491485804463,
+      "rmse_m_s": 0.18594873431348558,
+      "beta_m_s": [
+        98.03976288082374,
+        92.70587253065614,
+        88.09487109099494,
+        90.58879927944966,
+        95.5204090397859
+      ],
+      "thickness_m": [
+        0.6006064056670928,
+        1.1396441062171492,
+        1.3417615012743571,
+        2.521228491361103
+      ]
+    },
+    {
+      "seed": 2910,
+      "misfit_percent": 0.1851491485804463,
+      "rmse_m_s": 0.18594873431348558,
+      "beta_m_s": [
+        93.25902989221947,
+        95.67003110075936,
+        88.9710547522593,
+        92.52985526209221,
+        93.07355296524119
+      ],
+      "thickness_m": [
+        0.38244840408677344,
+        0.8988633308490832,
+        1.385743273413843,
+        2.174101822608922
+      ]
+    },
+    {
+      "seed": 2911,
+      "misfit_percent": 0.1851491485804463,
+      "rmse_m_s": 0.18594873431348558,
+      "beta_m_s": [
+        107.67493324602798,
+        87.55037606435612,
+        90.70979403628073,
+        91.39228586968675,
+        92.82141424433402
+      ],
+      "thickness_m": [
+        0.7136208333991125,
+        1.8352095188755846,
+        1.9316496949578412,
+        1.3437550473936568
+      ]
+    }
+  ]
+}

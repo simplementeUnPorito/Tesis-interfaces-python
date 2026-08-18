@@ -1,0 +1,56 @@
+{
+  "direction": "50 Hz hacia frecuencia decreciente",
+  "tracker_config": {
+    "f_min_hz": 1.0,
+    "f_max_hz": 50.0,
+    "direction": "descending",
+    "seed_c_min_m_s": 50.0,
+    "seed_c_max_m_s": 160.0,
+    "gate_m_s": 20.0,
+    "process_density": 0.0001,
+    "prediction_sigma_m_s": 10.0,
+    "min_peak_sigma_m_s": 1.0,
+    "max_peak_sigma_m_s": 20.0,
+    "min_relative_amplitude": 0.2,
+    "min_wavelength_dx": 2.0,
+    "max_wavelength_aperture": 1.0,
+    "enforce_physical_mask": false,
+    "enforce_normal_dispersion": false,
+    "max_upward_step_m_s": 0.0,
+    "clip_smoothed_to_physical_mask": false
+  },
+  "sample_rate_hz": 1020.0000000000036,
+  "frequency_resolution_hz": 0.28571428571428675,
+  "geometry": {
+    "dx_m": 2.0,
+    "aperture_m": 40.0,
+    "physical_mask": "2*dx*f <= c <= aperture*f"
+  },
+  "SOS": {
+    "rmse_m_s": 9.95335683959708,
+    "mae_m_s": 5.6365960830764115,
+    "bias_m_s": 3.115317535106112,
+    "coverage_fraction": 1.0,
+    "evaluated_reference_points": 132,
+    "pick_points": 171,
+    "physically_valid_pick_fraction": 0.38011695906432746,
+    "actual_frequency_min_hz": 1.142857142857147,
+    "actual_frequency_max_hz": 49.71428571428589,
+    "valid_frequency_min_hz": 2.571428571428581,
+    "valid_frequency_max_hz": 20.857142857142932
+  },
+  "RTS": {
+    "rmse_m_s": 124.01130676092882,
+    "mae_m_s": 74.7679048732395,
+    "bias_m_s": 74.27884970103601,
+    "coverage_fraction": 1.0,
+    "evaluated_reference_points": 132,
+    "pick_points": 171,
+    "physically_valid_pick_fraction": 0.2573099415204678,
+    "actual_frequency_min_hz": 1.142857142857147,
+    "actual_frequency_max_hz": 49.71428571428589,
+    "valid_frequency_min_hz": 8.571428571428603,
+    "valid_frequency_max_hz": 20.857142857142932
+  },
+  "reference_used_for_tracking": false
+}

@@ -1,0 +1,62 @@
+{
+  "pipeline": [
+    "aceleracion_medida",
+    "sos_previo_sosfiltfilt_0_80_hz",
+    "kalman_1_forward_ground_particle_velocity",
+    "sos_posterior_sosfiltfilt_0_80_hz",
+    "masw_phase_shift",
+    "vs_aparente_cR_over_0p92",
+    "kalman_2_ventana_valida"
+  ],
+  "uses_time_domain_rts_reconstruction": false,
+  "contains_estimated_picking_curve": false,
+  "contains_external_reference_curve": true,
+  "reference_used_for_kalman_tuning_or_mask": false,
+  "first_kalman": {
+    "q_scale": 98127.91113767028,
+    "innovation_nll": -21744.97095452995,
+    "optimizer_success": true,
+    "optimizer_evaluations": 16,
+    "output": "ground_particle_velocity_m_s",
+    "uses_forward_kalman": true,
+    "uses_rts": false,
+    "reference_channel_distance_m": 30.0,
+    "reference_r_var": 2.8099758504742714e-07,
+    "q_over_r": 349212649358.2076,
+    "mean_nis_all_channels": 3.7878815737451923,
+    "minimum_covariance_eigenvalue": 4.526090057790192e-10,
+    "post_sos_filter": "Butterworth order 10, lowpass 80 Hz, sosfiltfilt",
+    "velocity_rms_model_units": 50.69366844018212,
+    "velocity_peak_model_units": 1588.146861672172,
+    "absolute_amplitude_validated_against_external_truth": false,
+    "masw_uses_multichannel_phase": true
+  },
+  "sample_rate_hz": 1020.0000000000036,
+  "frequency_resolution_hz": 0.2857142857142865,
+  "requested_frequency_range_hz": [
+    1.0,
+    50.0
+  ],
+  "actual_frequency_range_hz": [
+    1.142857142857147,
+    49.71428571428589
+  ],
+  "rayleigh_to_vs_apparent_factor": 0.92,
+  "geometry": {
+    "dx_m": 2.0,
+    "aperture_m": 40.0,
+    "mask": "2*dx*f <= cR <= L*f"
+  },
+  "mask_grid_fraction": {
+    "physical": 0.6750940796099009,
+    "kalman_gate": 0.11839013444992139,
+    "energetic_candidates": 0.10823130333386335,
+    "combined": 0.03369198424056112
+  },
+  "combined_nonempty_frequency_range_hz": [
+    7.142857142857169,
+    24.00000000000009
+  ],
+  "nonempty_frequency_rows": 60,
+  "total_frequency_rows": 171
+}

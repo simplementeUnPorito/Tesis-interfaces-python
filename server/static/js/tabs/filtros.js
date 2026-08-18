@@ -84,6 +84,67 @@ export function mount(root) {
             siendo lo otro hasta que le des «Guardar y aplicar».</p>
         </div>
 
+        <div class="card" id="k-card">
+          <details class="foot-details" id="k-details">
+            <summary>Deconvolución Kalman <span class="legend">opcional</span></summary>
+            <p class="note">Estima el <strong>movimiento del suelo</strong> invirtiendo el modelo
+            físico geófono × acondicionador, en vez de solo filtrar. Es una vista previa aparte:
+            <strong>no cambia</strong> lo que usan promedios, waterfall, MASW ni export.</p>
+            <p class="warn-note" id="k-unavailable" hidden></p>
+
+            <div class="mark-grid">
+              <label class="control-check span-4"><input type="checkbox" id="k-enabled">
+                Mostrar el brazo Kalman en la vista previa</label>
+
+              <label for="k-geo">Geófono</label>
+              <select id="k-geo" class="span-3"></select>
+              <label for="k-cond">Acondicionador</label>
+              <select id="k-cond" class="span-3"></select>
+              <label for="k-estimate">Magnitud</label>
+              <select id="k-estimate" class="span-3"></select>
+              <label for="k-input">Prior de entrada</label>
+              <select id="k-input" class="span-3"></select>
+
+              <label for="k-band-low" id="k-band-lo-label">Banda del prior</label>
+              <input type="number" id="k-band-low" step="1" min="0.01" max="500" class="num-input">
+              <label for="k-band-high" id="k-band-hi-label">a</label>
+              <input type="number" id="k-band-high" step="1" min="0.02" max="500" class="num-input">
+
+              <label for="k-leak" id="k-leak-label">Fuga del prior</label>
+              <input type="number" id="k-leak" step="0.1" min="0.001" max="100" class="num-input">
+              <label for="k-disc">Discretización</label>
+              <select id="k-disc"></select>
+
+              <label for="k-q-source">Origen de Q</label>
+              <select id="k-q-source"></select>
+              <label for="k-q">q fijo</label>
+              <input type="number" id="k-q" step="1e-5" min="0" class="num-input">
+              <label for="k-r-source">Origen de R</label>
+              <select id="k-r-source"></select>
+              <label for="k-r">R fijo</label>
+              <input type="number" id="k-r" step="1e-6" min="0" class="num-input">
+
+              <label class="control-check span-4"><input type="checkbox" id="k-post">
+                Pasa-banda posterior sobre la salida del Kalman</label>
+              <label for="k-post-low">Pasa-banda</label>
+              <input type="number" id="k-post-low" step="0.5" min="0" max="500" class="num-input">
+              <label for="k-post-high">a</label>
+              <input type="number" id="k-post-high" step="5" min="0" max="1000" class="num-input">
+            </div>
+            <p class="note" id="k-help"></p>
+
+            <div class="toolbar">
+              <button type="button" id="k-save">Guardar preferencias</button>
+              <button type="button" id="k-revert" class="btn-quiet">Volver a lo guardado</button>
+            </div>
+            <p class="note" id="k-saved"></p>
+            <p class="note" id="k-diag"></p>
+            <p class="note">Las preferencias son de la campaña y sólo afectan a esta vista previa
+            y al overlay opcional de MASW. Contexto y límites del método en
+            <code>geophone_scope/HANDOFF_KALMAN.md</code>.</p>
+          </details>
+        </div>
+
         <div class="card">
           <details class="foot-details" open>
             <summary>Cómo se combinan fs distintas</summary>
@@ -114,6 +175,11 @@ export function mount(root) {
                 <span class="legend" id="f-env-label"></span></figcaption>
               <canvas class="plot" id="f-filt"></canvas>
             </figure>
+            <figure class="plot-box" id="k-plot-box" hidden>
+              <figcaption class="plot-title"><span class="lg lg-kalman"></span>Kalman
+                <span class="legend" id="k-plot-label"></span></figcaption>
+              <canvas class="plot" id="k-plot"></canvas>
+            </figure>
             <figure class="plot-box">
               <figcaption class="plot-title">Espectro, log-log
                 <span class="legend">
@@ -138,8 +204,13 @@ export function mount(root) {
   let settings = null;
   let preview = null;
   let campaign = '';
+  // Kalman: todo opcional. Mientras `kEnabled()` sea false no se pide nada al
+  // servidor y la vista previa es exactamente la de siempre.
+  let kCatalog = null;
+  let kSettings = null;
+  let kPreview = null;
   let abortReq = null;
-  const frames = { orig: null, filt: null, spec: null };
+  const frames = { orig: null, filt: null, spec: null, kalman: null };
 
   // Rueda para acercar sobre el cursor, arrastre para mover, doble click para
   // reencuadrar. En el espectro los ejes son logarítmicos y el zoom lo respeta.
@@ -153,6 +224,228 @@ export function mount(root) {
     getFrame: () => frames.spec,
     onChange: () => render(),
   });
+
+  // ------------------------------------------------------------------ //
+  // Deconvolucion Kalman: bloque enteramente opcional.
+  // ------------------------------------------------------------------ //
+
+  const kEl = (id) => root.querySelector(id);
+  const kEnabled = () => !!kEl('#k-enabled')?.checked;
+
+  function kFillSelect(sel, items, value) {
+    if (!sel) return;
+    sel.innerHTML = (items || []).map((it) =>
+      `<option value="${it.id}">${it.name || it.id}</option>`).join('');
+    if (value !== undefined && value !== null) sel.value = value;
+  }
+
+  function kParams() {
+    return {
+      geophone: kEl('#k-geo').value,
+      conditioner: kEl('#k-cond').value,
+      estimate: kEl('#k-estimate').value,
+      input_model: kEl('#k-input').value,
+      band_low_hz: Number(kEl('#k-band-low').value) || 10,
+      band_high_hz: Number(kEl('#k-band-high').value) || 50,
+      leak_hz: Number(kEl('#k-leak').value) || 0.7,
+      disc_method: kEl('#k-disc').value,
+      q_source: kEl('#k-q-source').value,
+      q_scale: Number(kEl('#k-q').value) || 0,
+      r_source: kEl('#k-r-source').value,
+      r_var: Number(kEl('#k-r').value) || 0,
+      post_band_enabled: kEl('#k-post').checked,
+      post_low_hz: Number(kEl('#k-post-low').value) || 0,
+      post_high_hz: Number(kEl('#k-post-high').value) || 80,
+    };
+  }
+
+  // Muestra solo los controles que el prior elegido usa: una banda para
+  // `ou_band`, una fuga para `leaky_rw`. Un numero que no se aplica confunde.
+  function kSyncControls() {
+    const kind = kEl('#k-input')?.value;
+    const model = (kCatalog?.input_models || []).find((m) => m.id === kind);
+    const showBand = !!model?.needs_band;
+    const showLeak = !!model?.needs_leak;
+    const pairs = [['#k-band-lo-label', showBand], ['#k-band-low', showBand],
+      ['#k-band-hi-label', showBand], ['#k-band-high', showBand],
+      ['#k-leak-label', showLeak], ['#k-leak', showLeak]];
+    for (const [id, on] of pairs) {
+      const el = kEl(id);
+      if (el) el.hidden = !on;
+    }
+    const qManual = kEl('#k-q-source')?.value === 'manual';
+    const rManual = kEl('#k-r-source')?.value === 'manual';
+    if (kEl('#k-q')) kEl('#k-q').disabled = !qManual;
+    if (kEl('#k-r')) kEl('#k-r').disabled = !rManual;
+    const post = kEl('#k-post')?.checked;
+    for (const id of ['#k-post-low', '#k-post-high']) {
+      const el = kEl(id);
+      if (el) el.disabled = !post;
+    }
+    const help = kEl('#k-help');
+    if (help) {
+      help.textContent = model?.help || '';
+      help.className = model?.warn ? 'warn-note' : 'note';
+    }
+    const box = kEl('#k-plot-box');
+    if (box) box.hidden = !kEnabled();
+  }
+
+  async function kLoad() {
+    try {
+      if (!kCatalog) {
+        kCatalog = await fetch('/api/kalman/catalog', { cache: 'no-store' })
+          .then((r) => r.json());
+      }
+    } catch (err) {
+      kCatalog = { available: false, reason: String(err) };
+    }
+    if (!kCatalog.available) {
+      // No disponible no es un error del usuario: se deshabilita y se explica.
+      kEl('#k-unavailable').hidden = false;
+      kEl('#k-unavailable').textContent =
+        `No disponible en este entorno: ${kCatalog.reason || 'falta el paquete kalman_deconv'}. ` +
+        'El resto de la pestana funciona igual.';
+      kEl('#k-details').querySelectorAll('input, select, button')
+        .forEach((el) => { el.disabled = true; });
+      return;
+    }
+    try {
+      kSettings = await fetch(
+        `/api/kalman/settings?campaign=${encodeURIComponent(campaign)}`,
+        { cache: 'no-store' }).then((r) => r.json());
+    } catch (_) {
+      kSettings = { ...(kCatalog.defaults || {}), revision: 'missing' };
+    }
+    kFillSelect(kEl('#k-geo'), kCatalog.geophones, kSettings.geophone);
+    kFillSelect(kEl('#k-cond'), kCatalog.conditioners, kSettings.conditioner);
+    kFillSelect(kEl('#k-estimate'), kCatalog.magnitudes, kSettings.estimate);
+    kFillSelect(kEl('#k-input'), kCatalog.input_models, kSettings.input_model);
+    kFillSelect(kEl('#k-disc'), kCatalog.discretizations, kSettings.disc_method);
+    kFillSelect(kEl('#k-q-source'), kCatalog.q_sources, kSettings.q_source);
+    kFillSelect(kEl('#k-r-source'), kCatalog.r_sources, kSettings.r_source);
+    kEl('#k-enabled').checked = !!kSettings.enabled;
+    kEl('#k-band-low').value = kSettings.band_low_hz ?? 10;
+    kEl('#k-band-high').value = kSettings.band_high_hz ?? 50;
+    kEl('#k-leak').value = kSettings.leak_hz ?? 0.7;
+    kEl('#k-q').value = kSettings.q_scale ?? 0;
+    kEl('#k-r').value = kSettings.r_var ?? 0;
+    kEl('#k-post').checked = kSettings.post_band_enabled !== false;
+    kEl('#k-post-low').value = kSettings.post_low_hz ?? 1;
+    kEl('#k-post-high').value = kSettings.post_high_hz ?? 80;
+    kEl('#k-saved').textContent = kSettings.path ? `preferencias en ${kSettings.path}` : '';
+    // Si quedo prendido de una sesion anterior, se abre solo: si no, el
+    // usuario veria el grafico Kalman sin encontrar de donde salio.
+    if (kSettings.enabled) kEl('#k-details').open = true;
+    kSyncControls();
+  }
+
+  async function kSave() {
+    if (!kCatalog?.available) return;
+    try {
+      const res = await fetch('/api/kalman/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaign, base_revision: kSettings?.revision || '',
+          enabled: kEnabled(), ...kParams() }),
+      });
+      if (res.status === 409) {
+        await kLoad();
+        throw new Error('cambio el archivo; se recargo');
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      kSettings = await res.json();
+      kEl('#k-saved').textContent = 'preferencias guardadas';
+    } catch (err) {
+      kEl('#k-saved').textContent = `no se pudo guardar: ${err}`;
+    }
+  }
+
+  let kPedido = 0;
+
+  async function kRefresh(row) {
+    if (!kEnabled() || !kCatalog?.available || !row?.shot_id) {
+      kPreview = null;
+      return;
+    }
+    const mio = ++kPedido;
+    const p = kParams();
+    const q = new URLSearchParams({
+      shot_id: row.shot_id,
+      campaign: row.campaign || '',
+      max_points: String(Math.max(200, Math.round(elOrig.clientWidth || 800))),
+    });
+    for (const [key, value] of Object.entries(p)) q.set(key, String(value));
+    kEl('#k-diag').textContent = 'estimando...';
+    try {
+      const res = await fetch(`/api/kalman/preview?${q}`, { cache: 'no-store' });
+      if (mio !== kPedido) return;
+      if (!res.ok) {
+        const detalle = await res.text();
+        kEl('#k-diag').textContent =
+          `no se pudo estimar (HTTP ${res.status}): ${detalle.slice(0, 200)}`;
+        kPreview = null;
+        render();
+        return;
+      }
+      kPreview = await res.json();
+      if (mio !== kPedido) return;
+      const d = kPreview.diagnostics;
+      const pl = kPreview.plant;
+      const railed = d.railed_at_bound
+        ? ' <strong>(pegado al borde: el modelo no ajusta)</strong>' : '';
+      kEl('#k-diag').innerHTML =
+        `planta ${pl.n_zeros}c/${pl.n_poles}p, ${pl.n_states} estados` +
+        ` +${pl.n_states_augmented - pl.n_states} de entrada` +
+        ` &middot; log10 q = ${fmt(d.log10_q_scale, 2)}${railed}` +
+        ` &middot; NIS ${fmt(d.mean_nis, 2)}` +
+        ` (pre ${fmt(d.mean_nis_pre_arrival, 3)} / evento ${fmt(d.mean_nis_event, 2)})` +
+        ` &middot; min eig P = ${d.min_cov_eigenvalue}` +
+        `<br>energia 10-50 Hz: medida ${fmt(d.frac_10_50_hz_measured, 3)}` +
+        ` &rarr; Kalman ${fmt(d.frac_10_50_hz_post, 3)}` +
+        ` &middot; deriva &lt;1 Hz: ${fmt(d.frac_below_1_hz, 4)}` +
+        ` &rarr; ${fmt(d.frac_below_1_hz_post, 4)} tras el pasa-banda`;
+      render();
+    } catch (err) {
+      if (mio === kPedido) kEl('#k-diag').textContent = `error: ${err}`;
+    }
+  }
+
+  function kRenderPlot() {
+    const box = kEl('#k-plot-box');
+    if (!box) return;
+    box.hidden = !kEnabled();
+    if (box.hidden) return;
+    const canvas = kEl('#k-plot');
+    const color = cssVar('--sig-ok-avg', '#d62728');
+    if (!kPreview) {
+      frames.kalman = createFrame(canvas, { xMin: 0, xMax: 1, yMin: -1, yMax: 1,
+        xLabel: 'tiempo relativo al hammer [s]', yLabel: 'suelo' });
+      kEl('#k-plot-label').textContent = '';
+      return;
+    }
+    const t = kPreview.time;
+    const traza = t.kalman_post || t.kalman;
+    if (!traza) return;
+    const lo = traza.y_min ?? -1;
+    const hi = traza.y_max ?? 1;
+    const pad = Math.max((hi - lo) * 0.05, 1e-12);
+    // Comparte el eje de tiempo con los otros dos marcos: si no, no se puede
+    // comparar el arribo contra la senal medida.
+    const eje = viewTiempo.apply({
+      xMin: -0.08,
+      xMax: Math.min((traza.t0 || 0) + traza.samples / (traza.fs || 1), 1.1),
+      yMin: lo - pad, yMax: hi + pad,
+      xLabel: 'tiempo relativo al hammer [s]',
+      yLabel: `suelo [${kPreview.units || ''}]`,
+    });
+    frames.kalman = createFrame(canvas, eje);
+    drawMinMax(frames.kalman, traza, { color, lineWidth: 1 });
+    const a = kPreview.applied;
+    kEl('#k-plot-label').textContent =
+      `${kPreview.estimate} - ${a.input_model}` +
+      (a.post_band_enabled ? ` - pasa-banda ${a.post_low_hz}-${a.post_high_hz} Hz` : '');
+  }
 
   function params() {
     return {
@@ -202,6 +495,7 @@ export function mount(root) {
       frames.filt = vacio(elFilt);
       frames.spec = vacio(elSpec, { xMin: 1, xMax: 1000, yMin: 1e-3, yMax: 1,
         xLog: true, yLog: true, xLabel: 'frecuencia [Hz]', yLabel: '|FFT|' });
+      kRenderPlot();
       return;
     }
 
@@ -261,6 +555,11 @@ export function mount(root) {
       `<span class="meta-num">${fmt(preview.distance_m)} m</span>` +
       `<span class="meta-num">${fmt(preview.fs, 0)} Hz</span>` +
       `<span class="meta-num">guardado: filtro ${estado}${resamp}</span>`;
+
+    // El brazo Kalman se dibuja al final y solo si esta prendido: con la
+    // funcionalidad apagada esta llamada devuelve enseguida y la pestana se
+    // comporta exactamente como antes de existir.
+    kRenderPlot();
   }
 
   // ¿Los valores del formulario difieren de lo guardado? Mientras difieran, lo
@@ -391,6 +690,8 @@ export function mount(root) {
       preview = await res.json();
       if (mio !== pedido) return;
       render();
+      // Independiente del pasa-banda: si esta apagado no cuesta nada.
+      kRefresh(row);
     } catch (err) {
       if (err.name !== 'AbortError' && mio === pedido) elMeta.textContent = `error: ${err}`;
     } finally {
@@ -407,6 +708,25 @@ export function mount(root) {
     '#f-envelope']) {
     $(id).addEventListener('change', () => { renderHint(); marcarSucio(); refreshPreview(); });
   }
+  // Los controles Kalman no tocan el pasa-banda: solo re-estiman su propio
+  // brazo. Prender o apagar el maestro tampoco guarda nada por si solo.
+  for (const id of ['#k-enabled', '#k-geo', '#k-cond', '#k-estimate', '#k-input',
+    '#k-band-low', '#k-band-high', '#k-leak', '#k-disc', '#k-q-source', '#k-q',
+    '#k-r-source', '#k-r', '#k-post', '#k-post-low', '#k-post-high']) {
+    const el = $(id);
+    if (el) {
+      el.addEventListener('change', () => {
+        kSyncControls();
+        render();
+        resolverFila().then((row) => kRefresh(row));
+      });
+    }
+  }
+  $('#k-save')?.addEventListener('click', kSave);
+  $('#k-revert')?.addEventListener('click', () => {
+    kLoad().then(() => { render(); resolverFila().then((row) => kRefresh(row)); });
+  });
+
   $('#f-preview').addEventListener('click', refreshPreview);
   $('#f-save').addEventListener('click', async () => {
     await saveSettings();
@@ -423,10 +743,11 @@ export function mount(root) {
   mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
   loadSettings().then(refreshPreview);
+  kLoad();
 
   return {
     // Al volver a la pestaña puede haber cambiado la captura elegida en Capturas.
-    resume() { filaCache = null; loadSettings().then(refreshPreview); },
+    resume() { filaCache = null; kLoad(); loadSettings().then(refreshPreview); },
     destroy() { viewTiempo.destroy(); viewSpec.destroy(); ro.disconnect(); mo.disconnect(); },
   };
 }

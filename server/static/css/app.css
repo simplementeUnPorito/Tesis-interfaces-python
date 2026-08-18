@@ -637,6 +637,7 @@ details.card > summary h2 { display: inline; margin: 0 }
 .lg-ok { background: var(--sig-ok-avg) }
 .lg-orig { background: var(--sig-overlay) }
 .lg-filt { background: var(--sig-geo) }
+.lg-kalman { background: var(--sig-ok-avg) }
 
 /* Resalta el botón que falta apretar para que un cambio tenga efecto. */
 button.is-primary {

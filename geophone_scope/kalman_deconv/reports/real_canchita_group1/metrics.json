@@ -1,0 +1,258 @@
+{
+  "campaign": "Canchita grupo 1",
+  "raw_root": "C:\\Github\\Tesis\\data\\raw\\Canchita",
+  "reference_csv": "C:\\Github\\Tesis\\data\\Moldeo Hidro\\grupo1_curva_dispersion_hidro_guiada.csv",
+  "sample_rate_hz": 1020.0000000000036,
+  "measurement_interpretation": "aceleracion medida por la cadena Ma et al.; almacenada en V segun metadata.json",
+  "stored_signal_units": "V",
+  "channels": 21,
+  "distance_range_m": [
+    10.0,
+    50.0
+  ],
+  "time_window_s": [
+    -0.49901960784314014,
+    2.999999999999985
+  ],
+  "sos_filter": {
+    "type": "Butterworth SOS sosfiltfilt",
+    "order": 10,
+    "band_hz": [
+      0,
+      80
+    ]
+  },
+  "rts_diagnostics": {
+    "q_scale": 3.3880470867573327,
+    "log10_q": 0.5299494374841642,
+    "innovation_nll": -20047.09059403787,
+    "optimizer_success": true,
+    "optimizer_evaluations": 9,
+    "reference_channel_index": 10,
+    "reference_r_var": 5.485561145618362e-07,
+    "regularization_q_over_r": 6176299.920498678,
+    "minimum_covariance_eigenvalue": 2.15277512411859e-14,
+    "channels": [
+      {
+        "distance_index": 0,
+        "r_var": 7.838358476341836e-07,
+        "q_scale": 4.841205283427022,
+        "mean_nis": 4.45649574899798,
+        "min_cov_eigenvalue": 2.483895777753955e-12
+      },
+      {
+        "distance_index": 1,
+        "r_var": 7.725720309670207e-07,
+        "q_scale": 4.771636573441112,
+        "mean_nis": 5.486038863648862,
+        "min_cov_eigenvalue": 2.4482121616187903e-12
+      },
+      {
+        "distance_index": 2,
+        "r_var": 4.916500724172934e-07,
+        "q_scale": 3.0365783031840983,
+        "mean_nis": 7.542048597190018,
+        "min_cov_eigenvalue": 1.55822259079739e-12
+      },
+      {
+        "distance_index": 3,
+        "r_var": 4.807493745099109e-07,
+        "q_scale": 2.9692523235653523,
+        "mean_nis": 6.706398152544777,
+        "min_cov_eigenvalue": 1.5233807760246873e-12
+      },
+      {
+        "distance_index": 4,
+        "r_var": 7.218151896395799e-07,
+        "q_scale": 4.458147098385676,
+        "mean_nis": 1.6364799986845107,
+        "min_cov_eigenvalue": 2.2873602817930453e-12
+      },
+      {
+        "distance_index": 5,
+        "r_var": 7.220777792577517e-07,
+        "q_scale": 4.459768930623514,
+        "mean_nis": 0.99410426720309,
+        "min_cov_eigenvalue": 2.2884731470705355e-12
+      },
+      {
+        "distance_index": 6,
+        "r_var": 1.0089796271388188e-06,
+        "q_scale": 6.231760790882273,
+        "mean_nis": 0.6239124370902199,
+        "min_cov_eigenvalue": 3.197709745508581e-12
+      },
+      {
+        "distance_index": 7,
+        "r_var": 5.967693084342254e-07,
+        "q_scale": 3.6858262322383575,
+        "mean_nis": 0.9276187458796841,
+        "min_cov_eigenvalue": 1.8910837702341502e-12
+      },
+      {
+        "distance_index": 8,
+        "r_var": 6.778472316222839e-07,
+        "q_scale": 4.186587802778961,
+        "mean_nis": 0.5689260109916741,
+        "min_cov_eigenvalue": 2.148192080037166e-12
+      },
+      {
+        "distance_index": 9,
+        "r_var": 7.744981034586599e-07,
+        "q_scale": 4.783532574818098,
+        "mean_nis": 0.5286027039274456,
+        "min_cov_eigenvalue": 2.454559459489932e-12
+      },
+      {
+        "distance_index": 10,
+        "r_var": 5.485561145618362e-07,
+        "q_scale": 3.3880470867573327,
+        "mean_nis": 0.5574627130279484,
+        "min_cov_eigenvalue": 1.7386140438666116e-12
+      },
+      {
+        "distance_index": 11,
+        "r_var": 5.134118721930321e-07,
+        "q_scale": 3.170985705408902,
+        "mean_nis": 0.7730224164667538,
+        "min_cov_eigenvalue": 1.6265716977104697e-12
+      },
+      {
+        "distance_index": 12,
+        "r_var": 1.2928307543595374e-06,
+        "q_scale": 7.984910485369057,
+        "mean_nis": 0.4115886131536432,
+        "min_cov_eigenvalue": 4.096762265455671e-12
+      },
+      {
+        "distance_index": 13,
+        "r_var": 7.792523043554204e-07,
+        "q_scale": 4.812895945438795,
+        "mean_nis": 0.43497514533735165,
+        "min_cov_eigenvalue": 2.4692625012734653e-12
+      },
+      {
+        "distance_index": 14,
+        "r_var": 5.935900244125556e-07,
+        "q_scale": 3.6661900205880755,
+        "mean_nis": 0.5491773425582344,
+        "min_cov_eigenvalue": 1.8811973836914304e-12
+      },
+      {
+        "distance_index": 15,
+        "r_var": 6.925319279251498e-07,
+        "q_scale": 4.277284891386899,
+        "mean_nis": 0.3673798671594841,
+        "min_cov_eigenvalue": 2.194286603056781e-12
+      },
+      {
+        "distance_index": 16,
+        "r_var": 9.946713090069874e-07,
+        "q_scale": 6.143388326742172,
+        "mean_nis": 0.27928998331980465,
+        "min_cov_eigenvalue": 3.152438258677066e-12
+      },
+      {
+        "distance_index": 17,
+        "r_var": 6.272681368782698e-07,
+        "q_scale": 3.874196143932612,
+        "mean_nis": 0.4365024539681832,
+        "min_cov_eigenvalue": 1.987726205215436e-12
+      },
+      {
+        "distance_index": 18,
+        "r_var": 6.900233297904876e-07,
+        "q_scale": 4.261791036927222,
+        "mean_nis": 0.3935830412022753,
+        "min_cov_eigenvalue": 2.186442482628224e-12
+      },
+      {
+        "distance_index": 19,
+        "r_var": 6.793537664643126e-09,
+        "q_scale": 0.04195892613804012,
+        "mean_nis": 33.74541028717407,
+        "min_cov_eigenvalue": 2.15277512411859e-14
+      },
+      {
+        "distance_index": 20,
+        "r_var": 1.2290779435248953e-07,
+        "q_scale": 0.759115400487949,
+        "mean_nis": 1.2592998865016953,
+        "min_cov_eigenvalue": 3.8951974452561117e-13
+      }
+    ]
+  },
+  "spectral_metrics_representative_30m": {
+    "Aceleracion medida (salida Ma, V)": {
+      "fraction_1_10_hz": 0.004131380089370097,
+      "fraction_10_50_hz": 0.9912673792699401,
+      "fraction_50_80_hz": 0.001337880084985933,
+      "fraction_80_200_hz": 0.0015647391254227415,
+      "centroid_1_200_hz": 23.02190318476052
+    },
+    "SOS filtfilt": {
+      "fraction_1_10_hz": 0.004138020441606563,
+      "fraction_10_50_hz": 0.9928604987419676,
+      "fraction_50_80_hz": 0.0012964578859566483,
+      "fraction_80_200_hz": 7.707705353877375e-06,
+      "centroid_1_200_hz": 22.82765259037721
+    },
+    "RTS": {
+      "fraction_1_10_hz": 0.0035455795245993003,
+      "fraction_10_50_hz": 0.9860003638143726,
+      "fraction_50_80_hz": 0.006896713396737842,
+      "fraction_80_200_hz": 0.0029217833639196564,
+      "centroid_1_200_hz": 26.383967662101476
+    }
+  },
+  "picking_metrics": {
+    "SOS / auto actual": {
+      "rmse_m_s": 138.1523585368893,
+      "mae_m_s": 121.79620491816759,
+      "bias_m_s": 121.30629978381207,
+      "coverage_fraction": 1.0,
+      "evaluated_reference_points": 132,
+      "pick_points": 7
+    },
+    "SOS / Kalman+RTS": {
+      "rmse_m_s": 16.24502786710024,
+      "mae_m_s": 12.902472521620252,
+      "bias_m_s": 10.774707147357208,
+      "coverage_fraction": 0.9924242424242424,
+      "evaluated_reference_points": 131,
+      "pick_points": 77
+    },
+    "RTS / auto actual": {
+      "rmse_m_s": 148.20758826233978,
+      "mae_m_s": 140.01437013177014,
+      "bias_m_s": 139.96349426264993,
+      "coverage_fraction": 0.8636363636363636,
+      "evaluated_reference_points": 114,
+      "pick_points": 6
+    },
+    "RTS / Kalman+RTS": {
+      "rmse_m_s": 16.446655128408935,
+      "mae_m_s": 13.081245649887704,
+      "bias_m_s": 10.826974555768563,
+      "coverage_fraction": 0.9924242424242424,
+      "evaluated_reference_points": 131,
+      "pick_points": 77
+    }
+  },
+  "tracker_config": {
+    "f_min_hz": 8.0,
+    "f_max_hz": 30.0,
+    "seed_c_max_m_s": 160.0,
+    "gate_m_s": 20.0,
+    "process_density": 2e-10,
+    "prediction_sigma_m_s": 10.0,
+    "min_peak_sigma_m_s": 1.0,
+    "max_peak_sigma_m_s": 20.0,
+    "min_relative_amplitude": 0.2,
+    "min_wavelength_dx": 2.0,
+    "max_wavelength_aperture": 1.0,
+    "enforce_normal_dispersion": false,
+    "max_upward_step_m_s": 0.0
+  },
+  "reference_used_for_tracking_or_tuning": false
+}

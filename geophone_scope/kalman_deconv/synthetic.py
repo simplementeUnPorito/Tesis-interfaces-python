@@ -124,7 +124,10 @@ def _oracle_q_scale(truth: np.ndarray, model: InputModel, fs: float) -> float:
     if model.kind in ("random_walk", "leaky_rw"):
         a = 1.0 if model.kind == "random_walk" else np.exp(-2.0 * np.pi * model.leak_hz / fs)
         innovations = truth[1:] - a * truth[:-1]
-        return max(float(np.var(innovations) * fs), 1e-16)
+        # El factor 2 compensa que el pulso determinista concentra la varianza
+        # en una ventana corta; sin el, el prior queda demasiado rigido justo en
+        # los flancos del Ricker. Es un valor oraculo exclusivo del banco.
+        return max(float(2.0 * np.var(innovations) * fs), 1e-16)
     return max(float(np.var(np.diff(truth, n=2)) * fs**3), 1e-16)
 
 

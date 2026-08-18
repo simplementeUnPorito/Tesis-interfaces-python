@@ -66,6 +66,9 @@ export function mount(root) {
         <label class="control-check"><input id="mw-freq-log" type="checkbox"> Frecuencia log</label>
         <label class="control-check"><input id="mw-int-log" type="checkbox"> Intensidad log</label>
         <label class="control-check"><input id="mw-int-freq" type="checkbox" checked> Normalizar por frecuencia</label>
+        <label class="control-check"><input id="mw-kalman" type="checkbox">
+          Ventana Kalman <span class="legend">opcional</span></label>
+        <p class="note" id="mw-kalman-note" hidden></p>
         <div class="toolbar"><button id="mw-calc">Calcular / combinar</button>
           <button id="mw-save" class="btn-quiet">Guardar análisis</button></div>
         <p id="mw-status" class="note"></p>
@@ -138,6 +141,9 @@ export function mount(root) {
   const $ = (q) => root.querySelector(q);
   let campaign = '', groupCount = 1, state = { revision: 'missing', masw: {}, backends: [] };
   let dispersion = null, image = null, frame = null, activeMode = 0;
+  // Ventana del segundo Kalman: overlay OPCIONAL. Nace apagado y, mientras lo
+  // este, no se pide nada al servidor ni se dibuja nada.
+  let kalmanWindow = null, kalmanBusy = false;
   let tool = 'pick', regionDraft = [], drag = null, currentJob = null, pollTimer = null;
   let pedidoCarga = 0, pollFailures = 0;
   const view = attachViewControls($('#mw-plot'), {
@@ -295,12 +301,56 @@ export function mount(root) {
       $('#mw-status').textContent = 'imagen combinada lista';
       await saveState();
       drawDispersion();
+      // La ventana depende de la imagen: si el overlay esta prendido, se
+      // recalcula sola. Si esta apagado, esta llamada no hace nada.
+      loadKalmanWindow();
       return true;
     } catch (err) {
       $('#mw-status').textContent = `falló: ${err}`;
       return false;
     }
     finally { $('#mw-calc').disabled = false; }
+  }
+
+  // Se pide una sola vez por combinacion de parametros: el calculo recorre la
+  // imagen entera y tarda varios segundos.
+  async function loadKalmanWindow() {
+    if (!$('#mw-kalman')?.checked) { kalmanWindow = null; return; }
+    if (kalmanBusy) return;
+    kalmanBusy = true;
+    const note = $('#mw-kalman-note');
+    note.hidden = false;
+    note.textContent = 'calculando la ventana...';
+    try {
+      const res = await fetch('/api/kalman/masw-window', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaign, params: imageParams(),
+          group_weights: weights() }),
+      });
+      if (!res.ok) {
+        const detalle = await res.text();
+        note.textContent = res.status === 503
+          ? 'La deconvolucion Kalman no esta disponible en este entorno.'
+          : `no se pudo calcular (HTTP ${res.status}): ${detalle.slice(0, 160)}`;
+        kalmanWindow = null;
+        return;
+      }
+      kalmanWindow = await res.json();
+      const r = kalmanWindow.nonempty_frequency_range_hz;
+      note.innerHTML = r
+        ? `region admisible ${fmt(r[0])}-${fmt(r[1])} Hz` +
+          ` (${kalmanWindow.nonempty_rows}/${kalmanWindow.total_rows} filas,` +
+          ` ${(100 * kalmanWindow.grid_fraction.combined).toFixed(1)} % de la grilla).` +
+          ' <strong>Es una region, no un picking.</strong>'
+        : 'la interseccion quedo vacia: no hay region admisible con estos parametros.';
+    } catch (err) {
+      note.textContent = `error: ${err}`;
+      kalmanWindow = null;
+    } finally {
+      kalmanBusy = false;
+      drawDispersion();
+    }
   }
 
   function drawDispersion() {
@@ -328,15 +378,26 @@ export function mount(root) {
     }
     line(dispersion?.alias_boundary || [], '#ffffff', [5, 4]);
     line(dispersion?.lambda_boundary || [], '#111111', [5, 4]);
+    // Envolvente de la region admisible del segundo Kalman. Son DOS bordes,
+    // no una curva: acotan donde puede estar la dispersion, no dicen donde
+    // esta. Por eso se dibujan punteados y nunca se exportan como picking.
+    if ($('#mw-kalman')?.checked && kalmanWindow) {
+      // Halo oscuro debajo: sobre la paleta arcoiris un trazo fino de un solo
+      // color se pierde, y el borde de la region es justo lo que hay que ver.
+      for (const pts of [kalmanWindow.lower || [], kalmanWindow.upper || []]) {
+        line(pts, 'rgba(0,0,0,.85)', [], 3.5);
+        line(pts, '#00e5ff', [3, 3], 1.6);
+      }
+    }
     Object.entries(masw().regions_by_mode || {}).forEach(([mode, polys]) =>
       (polys || []).forEach((poly) => line([...poly, poly[0]], COLORS[Number(mode) % COLORS.length], [6, 3])));
     if (regionDraft.length) line(regionDraft, COLORS[activeMode % COLORS.length], [3, 2]);
     Object.entries(masw().picks_by_mode || {}).forEach(([mode, pts]) =>
       (pts || []).forEach((pt) => dot(pt, COLORS[Number(mode) % COLORS.length], Number(mode) === activeMode ? 4 : 3)));
   }
-  function line(points, color, dash = []) {
+  function line(points, color, dash = [], width = 1.5) {
     if (!frame || !points.length) return;
-    const ctx = frame.ctx; ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    const ctx = frame.ctx; ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = width;
     ctx.setLineDash(dash); ctx.beginPath();
     points.forEach((p, i) => (i ? ctx.lineTo(frame.xOf(p[0]), frame.yOf(p[1]))
       : ctx.moveTo(frame.xOf(p[0]), frame.yOf(p[1])))); ctx.stroke(); ctx.restore();
@@ -538,6 +599,16 @@ export function mount(root) {
   $('#mw-calc').addEventListener('click', calculate);
   $('#mw-save').addEventListener('click', () => saveState().then(() => $('#mw-status').textContent = 'guardado').catch((e) => $('#mw-status').textContent = e));
   $('#mw-freq-log').addEventListener('change', drawDispersion);
+  // Prender el overlay lo calcula; apagarlo lo borra y no deja pedidos colgando.
+  $('#mw-kalman').addEventListener('change', () => {
+    if ($('#mw-kalman').checked) {
+      loadKalmanWindow();
+    } else {
+      kalmanWindow = null;
+      $('#mw-kalman-note').hidden = true;
+      drawDispersion();
+    }
+  });
   $('#mw-mode').addEventListener('change', (ev) => { activeMode = Number(ev.target.value); masw().active_mode = activeMode; drawDispersion(); });
   $('#mw-add-mode').addEventListener('click', () => {
     const ids = Object.keys(masw().picks_by_mode || {}).map(Number); activeMode = Math.max(-1, ...ids) + 1;

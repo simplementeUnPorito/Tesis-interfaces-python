@@ -94,10 +94,10 @@ Entorno: `.venv/Scripts/python.exe` del repo. Para probar GUI sin pantalla,
 |---|---|---|---|---|
 | S0 | Investigación, verificación del modelo, bibliografía, documentos | ✅ hecho | 2026-08-17 | sin commitear |
 | S1 | `models.py`, `library.py`, `plant.py`, `reduce.py`, catálogos JSON | ✅ 13/13 | 2026-08-17 | sin commitear |
-| S2 | `discretize.py`, `kf.py`, `synthetic.py` — KF+RTS y recuperación sintética | ⬜ | | |
+| S2 | `discretize.py`, `kf.py`, `synthetic.py` — KF+RTS y recuperación sintética | 🔄 12/15 | 2026-08-17 | sin commitear |
 | S3 | `estimate.py`, `metrics.py` — Q/R, anti-invención, comparación de brazos | ⬜ | | |
 | S4 | Capturas reales de `Canchita_grupo1_procesado`, reporte | ⬜ | | |
-| S5 | Integración web: tab Filtros | ⬜ | | |
+| S5 | Integración web: tab Filtros + overlay MASW, **todo opcional** | ✅ 6/6 | 2026-08-18 | sin commitear |
 | S6 | `masw_ridge_kalman.py` — tracker de cresta, PWS, ridge/Hessiano | ⬜ | | |
 | S6b | Benchmarks obligatorios: HLRT, sparse-L1, E-DBSCAN | ⬜ | | |
 | S7 | Inversión y comparación contra `Moldeo Hidro` | ⬜ | | |
@@ -110,13 +110,30 @@ Entorno: `.venv/Scripts/python.exe` del repo. Para probar GUI sin pantalla,
    `H_a(s) = −G·s/(s² + 2ζ₀ω₀s + ω₀²)`, **entrada = aceleración del suelo**.
    Es la de Ma et al. (2023) y la misma que usa el `informe_identificacion.txt`.
    La forma en `s²` es la de entrada en velocidad y **no se usa**.
-2. **La magnitud nativa estimada es aceleración.** `v̂_ground` se obtiene con un
-   **estado integrador dentro del modelo de entrada**, no integrando después:
-   así la incertidumbre sale de la covarianza en vez de quedar escondida.
+2. **La magnitud nativa estimada es aceleración.** `v̂_ground` se obtiene
+   cambiando la **magnitud de entrada de la planta**, no integrando después: así
+   la incertidumbre sale de la covarianza en vez de quedar escondida.
+   Como `a = s·v`, la planta correcta es **`H_v(s) = s·H_a(s)`**, o sea un
+   **cero** en el origen. ⚠ **Corregido el 2026-08-17**: esta fila decía
+   «un estado integrador dentro del modelo de entrada», y el código hacía algo
+   distinto y además al revés (agregaba **polos** en el origen, construyendo
+   `H_a/s`). Ver `kalman_deconv/reports/velocity_model_fix_2026-08-17/`.
+   Cada cero extra en el origen **empeora la observabilidad en DC**: el margen
+   PBH cae de 2,1e−2 a 4,0e−5, así que hay que re-correr el TEST 2, no heredarlo.
    Para MASW también sirve quedarse en aceleración (el *phase-shift* usa fase),
-   siempre que **todos los canales usen la misma magnitud**.
-3. **Modelo de entrada por defecto: `leaky_rw`**, no *random walk* puro.
-   Razón en §5.2 — no es un detalle de tuning, es lo que evita drift inventado.
+   siempre que **todos los canales usen la misma magnitud** — y medido, en
+   aceleración la imagen sale igual o mejor.
+3. **Modelo de entrada por defecto: `ou_band` centrado en 10–50 Hz.**
+   ⚠ **Cambiado el 2026-08-17**; antes era `leaky_rw` con fuga de 0,7 Hz.
+   Los dos evitan el drift del *random walk* puro (§6, Obstrucción 2), pero
+   `leaky_rw` es **plano hasta DC**: no le dice al estimador que el suelo no se
+   mueve en continua. Con la planta de velocidad eso dejaba el **38,7 %** de la
+   energía de `v̂_ground` por debajo de 1 Hz. `ou_band` codifica la banda útil
+   **como física del prior**, no como post-filtrado, y lo baja a **0,98 %**.
+   Medido: RMSE sintético 0,751 → **0,275**; máscara conjunta del MASW
+   6,86–23,71 Hz → **6,86–46,57 Hz**. No se paga con observabilidad (rango
+   completo 9/9, mismo σ mínimo). `leaky_rw` queda disponible para comparar.
+   Detalle y tablas en el informe de `velocity_model_fix_2026-08-17/` §10b.
 4. **KF sobre la señal cruda; Butterworth después, solo para visualizar.**
    El notch armónico va **antes**. Conmutable, con *warning* si se elige `pre`.
    Razones en §5.4.
@@ -489,9 +506,23 @@ ADC crudo.
 
 ---
 
-## 11. Integración web (fase posterior, S5)
+## 11. Integración web (S5) — HECHA, y es opcional
 
-**No hacer todavía.** Notas para cuando llegue:
+**Estado: implementada el 2026-08-18.** Detalle en la bitácora. Lo esencial:
+
+- `server/kalman.py` + `server/routers/kalman.py`, registrado en `api.py`.
+- Endpoints: `GET /api/kalman/catalog`, `GET|POST /api/kalman/settings`,
+  `GET /api/kalman/preview`, `POST /api/kalman/masw-window`.
+- Front: sección plegable **«Deconvolución Kalman (opcional)»** en el tab
+  Filtros, y checkbox **«Ventana Kalman»** en MASW. Los dos **apagados por
+  defecto**.
+- ⚠ **Import blando**: si `kalman_deconv` no se puede importar, `AVAILABLE` queda
+  en `False`, el catálogo responde `available: false` y la interfaz muestra la
+  sección deshabilitada con el motivo. **Ningún tab existente se entera.**
+- Los ajustes viven en `<campaña>/kalman_settings.json`, **aparte** del de
+  filtros: no se pisa nada de lo que ya existía.
+
+Notas originales del plan, que se cumplieron:
 
 - La app activa es la web en `server/`. Receta de un tab nuevo: botón en
   `static/index.html`, `<section id="panel-<data-tab>">`, módulo
@@ -726,3 +757,379 @@ sirve o hay que pasar a Dual KF.
 encontrar `i = 0` y «fallar» sin motivo. Hay que correr TEST 1 sobre las matrices
 **continuas**, o usar un umbral **relativo** con la escala `Tʳ` como firma
 esperada.
+
+### 2026-08-17 — S2 parcial — Codex
+
+Se implementaron `discretize.py`, `kf.py`, `synthetic.py`, los subcomandos de
+S2 y `report_s2.py`. Informe y cinco figuras en
+`kalman_deconv/reports/s2_2026-08-17/`, con espectros de 0,01 Hz a 1 kHz y la
+banda solicitada 0,1–300 Hz marcada aparte de la banda empírica 10–50 Hz.
+
+**TEST 1 — parámetros de Markov continuos:**
+
+```
+comp_nominal:   grado z/p=2, detectado=2; CB norm=6.79e-13, CAB norm=3.46e-01  PASS
+lp_pga_medido:  grado z/p=4, detectado=4; CB=3.13e-12, CAB=3.16e-12,
+                CA²B=1.04e-12, CA³B=9.66e-03                         PASS
+```
+
+**TEST 2 — PBH equilibrado en z=1, fs=2604:**
+
+```
+comp_nominal  random_walk  rango 4/5, sigma_min=9.745e-13  NO OBSERVABLE (esperado)
+comp_nominal  leaky_rw     rango 5/5, sigma_min=2.990e-01  OBSERVABLE
+lp_pga_medido random_walk  rango 7/8, sigma_min=3.908e-16  NO OBSERVABLE (esperado)
+lp_pga_medido leaky_rw     rango 8/8, sigma_min=2.111e-02  OBSERVABLE
+```
+
+Conclusión: la formulación aumentada sirve con `leaky_rw`; no hay evidencia para
+migrar todavía a Dual KF.
+
+**TEST 3 — ceros de muestreo de `lp_pga_medido`:**
+
+```
+fs=1020: max |z_sampling|=1.045683, 1 inestable
+fs=2604: max |z_sampling|=1.732197, 1 inestable
+fs=2929: max |z_sampling|=1.891480, 1 inestable
+```
+
+Resultado estructural nuevo: **1020 Hz es la mejor fs de las tres para la
+inversión**, aunque sigue siendo no mínima. Es recomendación provisoria hasta
+probar datos reales.
+
+**Discretización y guarda:**
+
+```
+--fs 1020 --no-residualize -> ValueError esperado:
+  |lambda|max=17142.2 > 0.8*pi*fs=2563.54                         PASS
+
+LP_PGA, ZOH, comparación directa H(z)/H(s):
+fs=1020, banda 0.1-204 Hz:  0.6845 dB, 35.538 deg                FALLA gate 0.3/2
+fs=2604, banda 0.1-300 Hz:  0.1993 dB, 20.736 deg                FALLA fase
+fs=2929, banda 0.1-300 Hz:  0.1555 dB, 18.430 deg                FALLA fase
+
+Quitando sinc + T/2 del retenedor ZOH:
+fs=1020: 0.1053 dB, 0.462 deg; fs=2604: 0.0088 dB, 0.007 deg;
+fs=2929: 0.0051 dB, 0.007 deg.
+```
+
+El gate original mezcla la fidelidad de la discretización con el retardo físico
+del retenedor. No se marcó 2.1: hay que reformularlo explícitamente, no alinear
+fase en silencio.
+
+**Hallazgo que corrige otra premisa del handoff:** `leaky_rw` con fuga 0,7 Hz
+acota DC, pero **no es plano en 10–50 Hz**; su magnitud cae **13,954 dB**. Es un
+prior rojo. La fila 2.4 queda abierta y S3 debe justificar Q o comparar un prior
+alternativo. La discretización de Q sí conserva la densidad continua:
+
+```
+q_scale=1: Qd*fs = 0.995700 (1020), 0.998313 (2604), 0.998500 (2929)  PASS
+```
+
+**Banco sintético principal, LP_PGA, fs=2604, SNR=20 dB:**
+
+```
+KF:  RMSE=27.212 %, lag=+9, amplitud=0.7523, fase=+1.560 deg
+RTS: RMSE= 7.905 %, lag= 0, amplitud=0.9832, fase=-0.109 deg
+mejora RTS vs KF=70.980 %
+min eig P_KF=2.460e-13; min eig P_RTS=2.460e-13
+P0=stationary_lyapunov; salida finita con 5 % NaN
+planta completa simulada / reducida estimada: RMSE RTS=7.907 %
+```
+
+El inverso causal directo diverge: al duplicar N la norma crece `1.486e59`;
+KF+RTS permanece acotado.
+
+**Compromiso Q/R que queda para S3:** con `q=0.190863` se logra RMSE 7,905 %,
+pero NIS=5785 queda fuera de [3989, 4347]. Con `q=0.668022`, el NIS=4244 pasa
+pero RMSE sube a 11,14 %. El ajuste oráculo simple pasa NIS a 2604/2929, pero a
+1020 queda bajo: 1476 frente a [1522, 1746]. Por eso 2.9 no se cierra aún para
+las tres fs.
+
+### 2026-08-17 — RTS sobre aceleraciones reales y picking MASW — Codex
+
+Se ejecutó la cadena sobre `data/raw/Canchita`, grupo 1. Son mediciones de
+**aceleración** adquiridas con la cadena de Ma et al.; los archivos conservan la
+salida eléctrica en voltios (`metadata.json: signal_units = V`). Se reconstruyó
+exactamente la misma agrupación una vez sin el filtro digital y otra con el
+Butterworth SOS de orden 10, `sosfiltfilt`, 0–80 Hz.
+
+Comando reproducible:
+
+```text
+python -m geophone_scope.kalman_deconv.report_real_rts_picking
+```
+
+Salida resumida:
+
+```text
+21 trazas reales, offsets 10–50 m, fs=1020 Hz, ventana -0.5–3.0 s
+q ML (traza 30 m)=3.3880471; NIS medio=0.557463
+min eig(P) global > 0; salida RTS finita en los 21 canales
+
+PSD normalizada, traza 30 m:
+                         1–10 Hz   10–50 Hz  50–80 Hz  80–200 Hz  centroide
+medida Ma (V)             0.0041     0.9913    0.0013     0.0016     23.02 Hz
+SOS filtfilt              0.0041     0.9929    0.0013     0.0000     22.83 Hz
+RTS                       0.0035     0.9860    0.0069     0.0029     26.38 Hz
+```
+
+La comparación espectral es de forma (cada PSD integra uno entre 1 y 200 Hz),
+porque medida/SOS están almacenadas como salida del circuito en V y RTS estima
+la aceleración de entrada en m/s². El RTS desplaza el centroide +3,56 Hz frente
+al SOS y conserva 98,60 % de la energía normalizada en 10–50 Hz; SOS conserva
+99,29 % y elimina casi toda la energía sobre 80 Hz.
+
+Se agregó `masw_ridge_kalman.py`: estado `[p, dp/df]`, `p=1/c`, selección
+predictiva dentro de una compuerta, actualización Joseph, RTS hacia atrás en
+frecuencia y sigma(f) desde el ancho del pico. La referencia hidro no entra al
+tracker ni al ajuste; se usa solo al final para evaluar 132 puntos.
+
+```text
+Brazo                    RMSE m/s   MAE m/s   sesgo m/s  cobertura
+SOS / auto actual         138.152    121.796    121.306    100.0 %
+SOS / Kalman+RTS           16.245     12.902     10.775     99.2 %
+RTS / auto actual         148.208    140.014    139.963     86.4 %
+RTS / Kalman+RTS           16.447     13.081     10.827     99.2 %
+```
+
+Conclusión medida: el **picker Kalman sí mejora** el RMSE 88,2 % sobre la
+imagen SOS y elimina el salto del argmax al modo de 230–245 m/s. En cambio,
+deconvolucionar primero con RTS **no mejora el picking**: 16,45 vs 16,25 m/s,
+un deterioro de 1,2 %. La ganancia observada viene del tracker, no del
+preprocesamiento RTS.
+
+Regresión de gating y rechazo de modo espurio:
+
+```text
+python -m unittest geophone_scope.test_masw_ridge_kalman -v
+test_physical_gates_are_respected ... ok
+test_tracker_rejects_spurious_high_velocity_mode ... ok
+Ran 2 tests in 0.064s — OK
+```
+
+Esto cierra 6.5, 6.6 y 7.1. La fila 6.4 queda en curso porque la implementación
+actual usa ancho y amplitud relativa del pico para R(f), pero aún falta separar
+explícitamente energía, coherencia y SNR como pide el criterio completo. S4.1
+también queda abierta: la corrida real cubre 21 canales pero una sola fs; el
+criterio exige dos fs.
+
+Informe y figuras:
+`kalman_deconv/reports/real_canchita_group1/INFORME_RTS_REAL_Y_PICKING.md`.
+
+### 2026-08-17 — doble Kalman sin RTS y mascara con referencia — Codex
+
+Se agrego una corrida experimental solicitada con la cadena:
+
+```text
+Amedida -> SOS previo -> Kalman temporal forward (v_ground)
+        -> SOS posterior -> MASW -> Vs_app=cR/0.92
+        -> segundo Kalman (solo ventana valida)
+```
+
+La salida del primer Kalman se genero con `PlantSpec(estimate="velocity")` y
+`leaky_rw`; no se ejecuto `rts_backward`. La curva hidro guiada se superpone en
+las cuatro vistas de mascara, pero no entra al ajuste de q, al MASW ni al
+segundo Kalman. Resultado reproducible:
+
+```text
+python -m geophone_scope.kalman_deconv.report_vs_apparent_masks
+q Kalman 1 = 98127.9111; NIS medio 21 canales = 3.7879
+P min = 4.5261e-10; optimizer_success = true
+MASW = 1.1429-49.7143 Hz
+mascara conjunta no vacia = 7.1429-24.0000 Hz (60/171 filas)
+RTS = false; referencia usada para tuning = false
+```
+
+Distincion que no debe perderse: `v_ground(t,x)` es velocidad de particula y
+puede entrar al MASW; `Vs_app(f)` es velocidad de propagacion y solo existe
+despues de la operacion multicanal. No hay verdad sincronizada de velocidad de
+particula en el repositorio, por lo que la amplitud absoluta del primer Kalman
+no queda validada; esta corrida usa su fase relativa entre canales.
+
+### 2026-08-17 — correccion de la planta de velocidad — Claude (Opus 5)
+
+⚠ **La corrida de arriba estaba fisicamente mal y sus numeros son el baseline
+defectuoso, no un resultado.** `plant.py::_integrator_chain()` agregaba **polos**
+en el origen, construyendo `H_a(s)/s` en vez de `H_v(s) = s·H_a(s)`: el
+estimador "de velocidad" recuperaba la derivada de la aceleracion y realzaba las
+frecuencias altas. Corregido a **ceros** en el origen.
+
+Salida de las pruebas nuevas (filas 1.14 y 2.7b de `TAREAS_KALMAN.md`):
+
+```text
+python -m unittest geophone_scope.test_kalman_plant_magnitude
+..............
+Ran 14 tests in 1.855s
+OK
+
+python -m unittest geophone_scope.test_kalman_reference_overlay
+.....
+Ran 5 tests in 18.470s
+OK
+
+python -m geophone_scope.kalman_deconv.cli check-obsv --cond lp_pga_medido \
+    --estimate velocity --input-model leaky_rw --fs 1020
+rango PBH: 8/8   sigma_min = 7.040835e-05    RESULTADO: OBSERVABLE
+    (contra sigma_min = 4.837646e-02 en aceleracion: el margen cae ~500x)
+--input-model random_walk  ->  rango PBH: 7/8   RESULTADO: NO OBSERVABLE
+
+python -m geophone_scope.kalman_deconv.cli markov --cond lp_pga_medido --estimate velocity
+grado relativo por z/p: 3 | grado detectado / retardo minimo L: 3 | RESULTADO: PASS
+```
+
+Resumen de lo verificado:
+
+- identidades `H_v/H_a = jw` y `H_d/H_a = (jw)^2` a **< 1e-12**; el cociente es un
+  derivador exacto (+90,000 grados, +20 dB/decada);
+- TEST 1 confirma el signo del cambio: el grado relativo **baja** 4 -> 3;
+- TEST 2 **re-corrido** en velocidad (no se hereda): sigue observable con
+  `leaky_rw`, pero el margen PBH cae de 2,111e-2 a 4,024e-5 (~500x);
+- los 6 gates de S1 (2 acondicionadores x 3 fs), `validate-external` y el tracker
+  MASW siguen verdes, con los mismos numeros de la bitacora de S1/S2;
+- sintetico con verdad conocida: el modelo viejo erraba amplitud x**4628** y fase
+  **176 grados**; el corregido da amplitud **0,889** y fase **-1,39 grados**;
+- real, 21 canales: 21/21 finitos, `min eig(P)` = 9,999e-15 > 0, `q` por ML canal
+  por canal (0/21 pegados al borde), NIS medio 3,79 -> **0,53**;
+- espectro: centroide 22,07 -> **10,27 Hz**, banda 50-80 Hz de 0,0437 -> **0,0006**
+  (el realce espurio desaparece), SNR 10-50 Hz 27,23 -> **30,61 dB**.
+
+**Dos hallazgos que hay que leer antes de seguir:**
+
+1. **`v_ground` concentra el 38,7 % de su energia por debajo de 1 Hz** (contra
+   0,07 % de la aceleracion medida). Es la Obstruccion 2 de §6, agravada por el
+   segundo cero en el origen. El SOS posterior **pasa-bajos** que se venia usando
+   deja pasar DC y destruia la imagen MASW (correlacion 0,380). Se cambio a
+   **pasa-banda 1-80 Hz** y la imagen se recupera (correlacion 0,975).
+2. **Aun corregido, el MASW no mejora.** Contra `Amedida + SOS`: contraste 3,55
+   vs 3,51 dB, error de maximo local 6,93 vs 7,24 m/s, energia sobre la
+   referencia 0,968 vs 0,986. **Empate tecnico.** Coincide con lo ya medido para
+   RTS: la ganancia viene del tracker, no del preprocesamiento.
+
+Falla abierta: **casi ningun canal pasa el IC95 del NIS** (0/21 con `leaky_rw`,
+1/21 con `ou_band`). Causa medida: el prior es **estacionario** y el registro no
+lo es (NIS 0,005 en pre-arribo contra 1,458 en el evento). Sigue sin remedio; el
+candidato es un `q` por regimen o un modelo de entrada no estacionario.
+
+**Segunda iteracion, el mismo dia: el prior de entrada.** Lo anterior se midio
+con `leaky_rw` 0,7 Hz. Se cambio el default a **`ou_band` 10-50 Hz** (decision 4
+de §4). El modelo directo ya era el mas detallado del repo —13 polos, con los del
+AFE medido en 258 / 265,7 / 291 / 2728 Hz—, asi que la informacion que faltaba no
+estaba ahi sino en el **modelo de entrada**:
+
+```text
+                          leaky_rw 0,7    ou_band 10-50    Amedida+SOS
+frac < 1 Hz (21 canales)     0,387029        0,009769         0,000731
+frac 10-50 Hz                0,557020        0,962887         0,970589
+RMSE sintetico               0,7510          0,2748              -
+fase sintetica              -1,390 deg      +0,143 deg           -
+correlacion MASW 8-30 Hz     0,9751          0,9841              -
+error de maximo local        6,926 m/s       6,913 m/s        7,239 m/s
+mascara conjunta          6,86-23,71 Hz   6,86-46,57 Hz          -
+                            (60/171)       (115/171)
+```
+
+**La conclusion cambia respecto del parrafo de arriba:** contra la curva de
+referencia sigue siendo empate tecnico, pero la **region admisible casi se
+duplica** (115 filas contra 60, llegando a 46,6 Hz). Esa es banda utilizable que
+la deriva se comia. ⚠ La referencia hidro solo cubre 8,0-29,8 Hz, asi que la
+ampliacion por encima de eso **no esta validada contra nada externo**.
+
+Control anti-imposicion, para que no se lea como que el prior dicta la respuesta:
+en el sintetico la verdad tiene 2,09 % de energia en 1-10 Hz y el estimador
+recupera **2,28 %**, no cero.
+
+📄 **Informe canonico, con todos los comandos, tablas por canal y rutas de
+artefactos:**
+[`kalman_deconv/reports/velocity_model_fix_2026-08-17/INFORME_CORRECCION_VELOCIDAD_KALMAN.md`](kalman_deconv/reports/velocity_model_fix_2026-08-17/INFORME_CORRECCION_VELOCIDAD_KALMAN.md)
+
+### 2026-08-17 — control Amedida + Kalman en dispersion + inversion — Codex
+
+Se ejecuto el brazo sin Kalman temporal: `Amedida -> SOS existente -> MASW ->
+Kalman/RTS en frecuencia -> inversion Rayleigh`. La banda de inversion se corto
+en 8-22 Hz por el limite espacial `cR >= 2*dx*f` con `dx=2 m`; incluir 22-30 Hz
+obligaba al tracker a subir por aliasing y producia perfiles oscilatorios.
+
+Resultado recomendado: 4 capas monotonas + semiespacio, `Vs=91,01-95,31 m/s`
+en los primeros ~5,4 m, misfit 0,393 % y RMSE teorica/pick 0,463 m/s. Contra la
+referencia externa el pick da RMSE 8,72 m/s. Permitir dos inversiones baja el
+RMSE interno a 0,186 m/s, pero tres semillas producen capas distintas con la
+misma curva: no unicidad, complejidad no justificada.
+
+Informe y artefactos reproducibles:
+[`kalman_deconv/reports/acceleration_kalman_inversion_2026-08-17/INFORME_AMEDIDA_KALMAN_INVERSION.md`](kalman_deconv/reports/acceleration_kalman_inversion_2026-08-17/INFORME_AMEDIDA_KALMAN_INVERSION.md)
+
+### 2026-08-18 — S5, integracion web opcional — Claude (Opus 5)
+
+Se expuso la deconvolucion Kalman en la app web **como funcionalidad
+seleccionable, no obligatoria**. La consigna del usuario era esa: que se pueda
+prender, no que venga puesta.
+
+**Como se garantiza que es opcional** (las cuatro capas, de afuera hacia adentro):
+
+1. `DEFAULTS["enabled"] = False` y `masw_window_enabled = False` en
+   `server/kalman.py`. Nace apagado por campana.
+2. Los dos controles del front nacen desmarcados y la seccion de Filtros nace
+   plegada.
+3. Con el maestro apagado el JS **no emite ni un pedido**: verificado en el
+   navegador contando `fetch` a `/api/kalman/preview` mientras se tocaba el
+   pasa-banda normal -> **0 pedidos**, grafico oculto, y el tab se comporta
+   exactamente como antes de que el modulo existiera.
+4. **Import blando**: si `kalman_deconv` no se importa, `AVAILABLE=False`, el
+   catalogo responde `available:false` y la seccion se muestra deshabilitada con
+   el motivo. Ningun otro tab se entera.
+
+**Que se expuso.** Tab Filtros: geofono, acondicionador, magnitud estimada,
+prior de entrada (con su banda o su fuga, segun cual se elija), discretizacion,
+origen de Q y de R, y el pasa-banda posterior. Cuarto grafico con la salida y una
+linea de diagnostico con `log10 q`, NIS por ventana, `min eig(P)` y el reparto de
+energia. Tab MASW: overlay de la **ventana admisible del segundo Kalman**,
+dibujada como sus dos envolventes con halo oscuro (sobre la paleta arcoiris un
+trazo fino se pierde). **No es un picking y no se exporta como tal.**
+
+Verificacion en el navegador, campana Canchita:
+
+```text
+catalogo            -> available=true, 3 geofonos, 5 acondicionadores, 4 priors
+settings            -> enabled=false, revision="missing" (primera vez)
+POST settings       -> guarda; revision vieja -> 409; magnitud invalida -> 400
+preview (fs 2929)   -> planta 6c/9p, 7 estados + 2 de entrada
+                       log10 q = -4.05 (no pegado al borde), NIS 0.94
+                       min eig(P) = 1e-14 > 0, salida finita
+                       energia 10-50 Hz: medida 0.793 -> Kalman 0.765
+                       deriva <1 Hz: 0.0000
+masw-window         -> region admisible 2.19-34.92 Hz (254/398 filas, 13.8 %)
+apagado             -> 0 pedidos a /api/kalman/preview, grafico oculto
+```
+
+Todo write pasa por `state.py` (`locked` + `require_revision` +
+`atomic_write_json`), y los ajustes viven en `kalman_settings.json`, **aparte**
+del `filter_settings.json` de la app: no se pisa nada de lo que ya existia.
+
+**Gate del servidor: 57/58.**
+
+```text
+python server/smoke_test.py
+[gate] 57/58 checks OK
+  FAIL  masw.canchita_compatibilidad   AssertionError: {'0': 113}
+```
+
+⚠ **Ese FAIL es ajeno a este trabajo y conviene no volver a investigarlo.** El
+check exige `len(picks["0"]) == 112` y la campana Canchita tiene **113**. Prueba
+de que el pick de mas no lo agrego esta sesion:
+
+- `inv_c_obs` del NPZ tiene 112 puntos y **coincide exactamente con
+  `picks[1:]`** (`np.allclose` -> True; contra `picks[:-1]` -> False). O sea que
+  cuando se corrio la inversion los picks eran los 112 de la cola.
+- El pick sobrante es `picks[0]` = **(4,8277 Hz, 129,05 m/s)**, y esta **fuera de
+  la grilla** de frecuencias del auto-pick: los otros 112 estan espaciados
+  0,10796 Hz y este cae a 1,11 Hz del siguiente, que no es multiplo. Un pick
+  fuera de grilla solo lo produce un click a mano en el lienzo.
+- Esta sesion nunca corrio una inversion ni despacho un evento de puntero sobre
+  el lienzo; y el check es de **solo lectura** (md5 del JSON identico antes y
+  despues de correrlo).
+
+Conclusion: el pick manual se agrego entre el 2026-07-26 (ultima corrida del gate
+con este check en verde) y hoy, y **la expectativa 112 del smoke test quedo
+vieja respecto de los datos**. Es una decision del usuario si actualizar el
+numero del check o quitar ese pick; no se toco su analisis.

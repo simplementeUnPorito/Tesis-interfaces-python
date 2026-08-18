@@ -11,6 +11,11 @@ Ruta numerica, y el porque de cada paso:
 4. Escalado diagonal, para que la covarianza del KF no pierda simetria por
    diferencias de magnitud entre estados de 0,05 Hz y de 291 Hz.
 
+Entre 2. y 3. se aplica la **conversion de magnitud de entrada**
+(:func:`_magnitude_change`): la planta nativa tiene la aceleracion del suelo como
+entrada, y pedir velocidad o desplazamiento **multiplica** por ``s`` o ``s^2``.
+Son ceros en el origen, no polos.
+
 La poda de cuasi-cancelaciones y la residualizacion viven en ``reduce.py``.
 """
 
@@ -63,6 +68,14 @@ def geophone_zpk(spec: GeophoneSpec) -> Zpk:
 
         H_v(s) = -G * s^2 / (s^2 + 2*zeta*w0*s + w0^2)    entrada = velocidad
 
+    ⚠ No confundir ``GeophoneSpec.form`` con ``PlantSpec.estimate``. ``form`` dice
+    en que magnitud esta **escrito el modelo del sensor en el catalogo**;
+    ``estimate`` dice que magnitud del suelo se quiere **estimar**. La diferencia
+    entre las dos se salda multiplicando por ``s^(form - estimate)`` en
+    :func:`compose_plant_zpk`, y las dos formas de arriba son justamente el caso
+    ``form="acceleration"`` con ``estimate="acceleration"`` y con
+    ``estimate="velocity"``: ``H_v = s * H_a``.
+
     El signo negativo es del modelo publicado y se conserva; el pipeline de campo
     aplica ademas su propia convencion de polaridad (geo no invertido, hammer
     invertido) en ``field_review_data``, que es independiente de esto.
@@ -108,15 +121,37 @@ def conditioner_zpk(spec: ConditionerSpec) -> Zpk:
     raise ValueError(f"kind de acondicionador desconocido: {spec.kind!r}")
 
 
-def _integrator_chain(n: int) -> Zpk:
-    """n integradores puros: cambia la magnitud de entrada del modelo.
+# Orden de derivacion temporal de cada magnitud del movimiento del suelo:
+# d/dt(desplazamiento) = velocidad, d/dt(velocidad) = aceleracion.
+_DERIVATIVE_ORDER = {"displacement": 0, "velocity": 1, "acceleration": 2}
 
-    Estimar velocidad en vez de aceleracion equivale a poner un integrador
-    delante de la planta. Ojo: cada integrador agrega un polo exacto en s=0 (z=1
-    al discretizar) y empeora la observabilidad en DC; por eso ``displacement``
-    emite warning en la capa de arriba.
+
+def _magnitude_change(n: int) -> Zpk:
+    """``s^n``: cambia la magnitud de entrada del modelo agregando ceros en s=0.
+
+    **Ceros, no polos.** Si la planta nativa es ``H_a(s) = Y(s)/A(s)`` y se
+    quiere la planta cuya entrada es la velocidad de particula, hay que usar
+    ``a_ground = s * v_ground``, o sea::
+
+        H_v(s) = Y(s)/V(s) = H_a(s) * A(s)/V(s) = s * H_a(s)
+
+    y analogamente ``H_d(s) = s^2 * H_a(s)``. Multiplicar por ``s`` agrega un
+    **cero** en el origen y **baja** el grado relativo en uno.
+
+    La version anterior de esta funcion hacia lo contrario —agregaba polos en
+    s=0, es decir construia ``H_a/s``— y por lo tanto el estimador no recuperaba
+    velocidad sino la derivada de la aceleracion. Al invertir ese modelo el KF
+    realzaba las frecuencias altas en vez de las bajas; ver el informe
+    ``reports/velocity_model_fix_2026-08-17/``.
+
+    Ojo con el efecto colateral: cada cero extra en el origen es un modo mas que
+    la medicion no observa en DC (``q`` en la nomenclatura de Maes et al. 2016
+    §2.3), asi que la observabilidad del par aumentado hay que **re-verificar**,
+    no heredar del caso aceleracion.
     """
-    return np.zeros(0, dtype=complex), np.zeros(n, dtype=complex), 1.0
+    if n < 0:
+        raise ValueError(f"orden de magnitud negativo: {n}")
+    return np.zeros(n, dtype=complex), np.zeros(0, dtype=complex), 1.0
 
 
 def compose_plant_zpk(spec: PlantSpec) -> Zpk:
@@ -150,15 +185,45 @@ def compose_plant_zpk(spec: PlantSpec) -> Zpk:
             poles.append(p)
             gain *= k
 
-    n_integrators = {"acceleration": 0, "velocity": 1, "displacement": 2}[spec.estimate]
-    if n_integrators:
-        z, p, k = _integrator_chain(n_integrators)
+    # Conversion de magnitud de entrada. La forma nativa la fija el sensor: el
+    # catalogo de este proyecto usa "acceleration", o sea que la planta armada
+    # arriba es H_a(s) = Y(s)/A_ground(s). Pedir otra magnitud es multiplicar por
+    # s^(orden_nativo - orden_pedido), nunca dividir.
+    has_sensor = (
+        spec.include_geophone
+        or (spec.include_conditioner and spec.conditioner.includes_geophone)
+    )
+    if has_sensor:
+        native = _DERIVATIVE_ORDER[spec.geophone.form]
+    elif spec.estimate == "acceleration":
+        native = _DERIVATIVE_ORDER["acceleration"]
+    else:
+        raise ValueError(
+            "la cascada no incluye ningun geofono, asi que su entrada no es "
+            f"movimiento del suelo: estimate={spec.estimate!r} no tiene sentido. "
+            "Usa estimate='acceleration' o incluye el sensor"
+        )
+    n_zeros_at_origin = native - _DERIVATIVE_ORDER[spec.estimate]
+    if n_zeros_at_origin:
+        z, p, k = _magnitude_change(n_zeros_at_origin)
         zeros.append(z)
         poles.append(p)
         gain *= k
 
     all_zeros = np.concatenate(zeros) if zeros else np.zeros(0, dtype=complex)
     all_poles = np.concatenate(poles) if poles else np.zeros(0, dtype=complex)
+    if all_zeros.size > all_poles.size:
+        # Falla temprana y explicita. La combinacion que la dispara en este
+        # catalogo es geofono solo (sin acondicionador) + displacement: 3 ceros
+        # sobre 2 polos. zpk_to_modal_ss la rechazaria igual mas adelante, pero
+        # conviene que el mensaje nombre la causa fisica.
+        raise ValueError(
+            f"planta impropia: {all_zeros.size} ceros / {all_poles.size} polos "
+            f"con geophone.form={spec.geophone.form!r} y estimate={spec.estimate!r}. "
+            "Cada nivel de derivacion que se le quita a la entrada agrega un cero "
+            "en el origen; el acondicionador es el que aporta los polos que lo "
+            "compensan. No tiene realizacion en espacio de estados"
+        )
     gain *= float(spec.adc_scale_v_per_count)
     return all_zeros.astype(complex), all_poles.astype(complex), float(gain)
 

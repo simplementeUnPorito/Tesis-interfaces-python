@@ -35,6 +35,23 @@ from .reduce import (
     residualize_fast_modes,
     verify_frf,
 )
+from .discretize import (
+    augment_with_input_model,
+    build_input_model,
+    build_process_noise,
+    check_observability,
+    discretize_plant,
+    markov_parameters,
+    prepare_plant,
+    sampling_zeros,
+)
+from .kf import kf_forward, rts_backward
+from .synthetic import benchmark_ricker25
+from geophone_scope.masw_ridge_kalman import (
+    RidgeKalmanConfig,
+    RidgeKalmanResult,
+    track_dispersion_ridge,
+)
 
 __all__ = [
     "ConditionerSpec",
@@ -59,4 +76,18 @@ __all__ = [
     "save_geophone",
     "verify_frf",
     "zpk_to_modal_ss",
+    "augment_with_input_model",
+    "benchmark_ricker25",
+    "build_input_model",
+    "build_process_noise",
+    "check_observability",
+    "discretize_plant",
+    "kf_forward",
+    "markov_parameters",
+    "prepare_plant",
+    "rts_backward",
+    "sampling_zeros",
+    "RidgeKalmanConfig",
+    "RidgeKalmanResult",
+    "track_dispersion_ridge",
 ]

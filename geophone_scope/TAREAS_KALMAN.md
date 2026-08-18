@@ -40,26 +40,28 @@ CLI="python -m geophone_scope.kalman_deconv.cli"
 | 1.11 | `verify_frf` + tabla de aceptación | `reduce.py` | `$CLI verify-model --fs 2604 --report` | Imprime la tabla completa; todas las filas PASS | ✅ |
 | 1.12 | Chequeo cruzado `GEO_LP` vs `Hgeo·LP_PGA` | `plant.py` | `$CLI verify-model --stage crosscheck` | Coinciden dentro de 0,50 dB / 3,0° en 1–150 Hz. **Si no cierra, hay error de normalización — S1 no termina** | ✅ |
 | 1.13 | Higiene numérica | — | `grep -rn "np.roots\|tf2ss" plant.py reduce.py cli.py` | **Cero coincidencias.** Las cuadráticas usan `second_order_poles` (forma cerrada, estable con ζ≫1); los polinomios de orden 11/13 se factorizan una sola vez en `build_catalog.py` | ✅ |
+| 1.14 | **Conversión de magnitud de entrada** (`_magnitude_change`) | `plant.py` | `python -m unittest geophone_scope.test_kalman_plant_magnitude` | `H_v/H_a = jω` y `H_d/H_a = (jω)²` con error relativo **< 1e−12**; el cociente es un derivador (+90,000° y +20 dB/déc); el grado relativo **baja** uno por nivel; combinación impropia (geófono solo + displacement) falla explícita. **Corrige el bug de los polos en el origen**; ver `reports/velocity_model_fix_2026-08-17/` | ✅ |
 
 ## S2 — Discretización, KF+RTS, banco sintético
 
 | # | Función / entregable | Archivo | Comando de verificación | Criterio numérico | Estado |
 |---|---|---|---|---|---|
-| 2.1 | `discretize_plant` | `discretize.py` | `$CLI verify-model --stage discrete --fs 2604` | ≤ 0,30 dB / 2° hasta 0,4·Nyquist, para **1020, 2604 y 2929** | ⬜ |
-| 2.2 | Guarda anti-aliasing (test negativo) | `discretize.py` | `$CLI verify-model --stage discrete --fs 1020 --no-residualize` | Lanza `ValueError`. **Falla ruidosa, nunca aliasing silencioso** | ⬜ |
-| 2.3 | **TEST 1** — parámetros de Markov | `discretize.py` | `$CLI markov --cond comp_nominal` / `--cond lp_pga_medido` | Correr sobre las matrices **continuas** (A,B,C), o con umbral **relativo**. ⚠ Bajo ZOH los `CᵈAᵈⁱBᵈ` **nunca son exactamente cero**: para grado relativo r valen ≈(Tʳ/r!)·CA^(r−1)B, chicos pero no nulos, y un test de cero exacto encuentra i=0 y «falla» sin motivo. Esperado: r=2 (nominal), r=4 (medido) → L mínimo | ⬜ |
-| 2.4 | `build_input_model` (`leaky_rw`, `random_walk`, `wiener2`, `ou_band`) | `discretize.py` | `$CLI show-input-model --input-model leaky_rw` | Respuesta plana en 10–50 Hz y acotada en DC | ⬜ |
-| 2.5 | `augment_with_input_model` + `build_process_noise` (Van Loan) | `discretize.py` | `$CLI verify-model --stage augment --fs 1020 --fs 2929` | El mismo `q_scale` da la misma densidad continua a las dos fs (independencia de fs) | ⬜ |
-| 2.6 | **TEST 2** — `check_observability` (PBH + gramiano) | `discretize.py` | `$CLI check-obsv --input-model random_walk` | **Debe reportar NO observable** en z=1. Si no lo detecta, el chequeo no sirve | ⬜ |
-| 2.7 | **TEST 2** — caso que sí pasa | `discretize.py` | `$CLI check-obsv --input-model leaky_rw` | **Debe reportar observable**; imprime la dirección más débil y a qué modo corresponde | ⬜ |
-| 2.8 | **TEST 3** — ceros de muestreo | `discretize.py` | `$CLI sampling-zeros --fs 1020 --fs 2604 --fs 2929` | Clasifica cada cero vs \|z\|=1 y separa intrínsecos de ceros de muestreo. **Reportar si alguna fs se comporta mejor** | ⬜ |
-| 2.9 | `kf_forward` (Joseph, simetrización, NaN) | `kf.py` | `$CLI bench --case ricker25 --no-smoother` | `min eig(P) > 0` en todos los pasos y las tres fs; NIS dentro del IC 95 % | ⬜ |
-| 2.10 | Robustez a NaN | `kf.py` | `$CLI bench --case ricker25 --nan-frac 0.05` | Sin NaN en la salida; solo predicción en las muestras faltantes | ⬜ |
-| 2.11 | `rts_backward` | `kf.py` | `$CLI bench --case ricker25 --fs 2604 --snr 20` | `rmse_aligned` ≤ 8 % del RMS de la verdad; amplitud ±10 %; fase < 10° en 10–50 Hz | ⬜ |
-| 2.12 | RTS mejora sobre KF solo | `kf.py` | `$CLI bench --case ricker25 --compare-smoother` | Mejora ≥ 30 % en `rmse_aligned` | ⬜ |
-| 2.13 | `forward_simulate(use_full_model=True)` | `synthetic.py` | `$CLI bench --case ricker25 --full-model-sim` | Simula con el modelo **sin reducir** y estima con el reducido, para medir error de **modelo** y no solo de ruido | ⬜ |
-| 2.14 | `test_nmp_recovery` — inverso causal vs KF vs KF+RTS | `synthetic.py` | `$CLI bench --case nmp` | El inverso directo **diverge** (norma crece >10× al duplicar N); KF+RTS acotado. Demuestra empíricamente §Obstrucción 3 | ⬜ |
-| 2.15 | `P0` estacionaria, no `1e6·I` | `kf.py` | `$CLI bench --case ricker25 --report-burnin` | Sin rampa de baja frecuencia inicial; `burn_in` reportado | ⬜ |
+| 2.1 | `discretize_plant` | `discretize.py` | `$CLI verify-model --stage discrete --fs 2604` | ≤ 0,30 dB / 2° hasta 0,4·Nyquist, para **1020, 2604 y 2929** | 🔄 |
+| 2.2 | Guarda anti-aliasing (test negativo) | `discretize.py` | `$CLI verify-model --stage discrete --fs 1020 --no-residualize` | Lanza `ValueError`. **Falla ruidosa, nunca aliasing silencioso** | ✅ |
+| 2.3 | **TEST 1** — parámetros de Markov | `discretize.py` | `$CLI markov --cond comp_nominal` / `--cond lp_pga_medido` | Correr sobre las matrices **continuas** (A,B,C), o con umbral **relativo**. ⚠ Bajo ZOH los `CᵈAᵈⁱBᵈ` **nunca son exactamente cero**: para grado relativo r valen ≈(Tʳ/r!)·CA^(r−1)B, chicos pero no nulos, y un test de cero exacto encuentra i=0 y «falla» sin motivo. Esperado: r=2 (nominal), r=4 (medido) → L mínimo | ✅ |
+| 2.4 | `build_input_model` (`leaky_rw`, `random_walk`, `wiener2`, `ou_band`) | `discretize.py` | `$CLI show-input-model --input-model leaky_rw` | Respuesta plana en 10–50 Hz y acotada en DC | 🔄 |
+| 2.5 | `augment_with_input_model` + `build_process_noise` (Van Loan) | `discretize.py` | `$CLI verify-model --stage augment --fs 1020 --fs 2929` | El mismo `q_scale` da la misma densidad continua a las dos fs (independencia de fs) | ✅ |
+| 2.6 | **TEST 2** — `check_observability` (PBH + gramiano) | `discretize.py` | `$CLI check-obsv --input-model random_walk` | **Debe reportar NO observable** en z=1. Si no lo detecta, el chequeo no sirve | ✅ |
+| 2.7 | **TEST 2** — caso que sí pasa | `discretize.py` | `$CLI check-obsv --input-model leaky_rw` | **Debe reportar observable**; imprime la dirección más débil y a qué modo corresponde | ✅ |
+| 2.7b | **TEST 2 en la planta de VELOCIDAD** — no se hereda | `discretize.py` | `$CLI check-obsv --cond lp_pga_medido --estimate velocity --input-model leaky_rw --fs 1020` | Observable (8/8) con `leaky_rw`, no observable (7/8) con `random_walk`. **Pero el margen PBH cae de 2,111e−2 a 4,024e−5 (~500×)**: el doble cero en el origen degrada la observabilidad en DC y es la causa medida de la deriva sub-1 Hz | ✅ |
+| 2.8 | **TEST 3** — ceros de muestreo | `discretize.py` | `$CLI sampling-zeros --fs 1020 --fs 2604 --fs 2929` | Clasifica cada cero vs \|z\|=1 y separa intrínsecos de ceros de muestreo. **Reportar si alguna fs se comporta mejor** | ✅ |
+| 2.9 | `kf_forward` (Joseph, simetrización, NaN) | `kf.py` | `$CLI bench --case ricker25 --no-smoother` | `min eig(P) > 0` en todos los pasos y las tres fs; NIS dentro del IC 95 % | 🔄 |
+| 2.10 | Robustez a NaN | `kf.py` | `$CLI bench --case ricker25 --nan-frac 0.05` | Sin NaN en la salida; solo predicción en las muestras faltantes | ✅ |
+| 2.11 | `rts_backward` | `kf.py` | `$CLI bench --case ricker25 --fs 2604 --snr 20` | `rmse_aligned` ≤ 8 % del RMS de la verdad; amplitud ±10 %; fase < 10° en 10–50 Hz | ✅ |
+| 2.12 | RTS mejora sobre KF solo | `kf.py` | `$CLI bench --case ricker25 --compare-smoother` | Mejora ≥ 30 % en `rmse_aligned` | ✅ |
+| 2.13 | `forward_simulate(use_full_model=True)` | `synthetic.py` | `$CLI bench --case ricker25 --full-model-sim` | Simula con el modelo **sin reducir** y estima con el reducido, para medir error de **modelo** y no solo de ruido | ✅ |
+| 2.14 | `test_nmp_recovery` — inverso causal vs KF vs KF+RTS | `synthetic.py` | `$CLI bench --case nmp` | El inverso directo **diverge** (norma crece >10× al duplicar N); KF+RTS acotado. Demuestra empíricamente §Obstrucción 3 | ✅ |
+| 2.15 | `P0` estacionaria, no `1e6·I` | `kf.py` | `$CLI bench --case ricker25 --report-burnin` | Sin rampa de baja frecuencia inicial; `burn_in` reportado | ✅ |
 
 ## S3 — Q y R, anti-invención, métricas
 
@@ -96,10 +98,12 @@ CLI="python -m geophone_scope.kalman_deconv.cli"
 
 | # | Entregable | Verificación | Criterio | Estado |
 |---|---|---|---|---|
-| 5.1 | Función adaptadora contra `field_review_data` | test de import | Sin dependencia de Qt ni FastAPI en el módulo núcleo | ⬜ |
-| 5.2 | Backend `server/kalman.py` + `server/routers/kalman.py` | `python server/smoke_test.py` | Verde | ⬜ |
-| 5.3 | Tab JS con controles | manual | Combos de GEO y CONDITIONER, modelo de entrada, magnitud, discretización, origen de Q y R, posición del Butterworth, brazos a mostrar | ⬜ |
-| 5.4 | Estado compartido | revisión de código | **Todo write pasa por `server/state.py`** (lock, revisión, 409). Cero escrituras directas | ⬜ |
+| 5.1 | Función adaptadora contra `field_review_data` | test de import | Sin dependencia de Qt ni FastAPI en el módulo núcleo. **Import blando**: si `kalman_deconv` no está, `AVAILABLE=False` y el servidor arranca igual | ✅ |
+| 5.2 | Backend `server/kalman.py` + `server/routers/kalman.py` | `python server/smoke_test.py` | 57/58. El único FAIL es `masw.canchita_compatibilidad`, **ajeno a este trabajo**: el check espera 112 picks y los datos tienen 113 (ver bitácora 2026-08-18) | ✅ |
+| 5.3 | Tab JS con controles | manual + navegador | Combos de GEO y CONDITIONER, magnitud, prior de entrada con su banda/fuga, discretización, origen de Q y de R, pasa-banda posterior. **Todo opcional y apagado por defecto** | ✅ |
+| 5.4 | Estado compartido | revisión de código | **Todo write pasa por `server/state.py`** (`locked` + `require_revision` + `atomic_write_json`). Verificado: 409 ante revisión obsoleta, 400 ante magnitud inválida | ✅ |
+| 5.5 | La funcionalidad es **opcional**, no obligatoria | navegador | Con el maestro apagado: **0 pedidos** a `/api/kalman/preview`, gráfico oculto y el pasa-banda se comporta igual que antes de existir el módulo | ✅ |
+| 5.6 | Overlay opcional de la ventana Kalman en MASW | navegador | Checkbox apagado por defecto; prendido dibuja las dos envolventes de la región admisible. **No es un picking** y no se exporta como tal | ✅ |
 
 ## S6 — Picking de dispersión
 
@@ -108,9 +112,9 @@ CLI="python -m geophone_scope.kalman_deconv.cli"
 | 6.1 | **Medir el jitter de trigger** — hacer esto PRIMERO | script de análisis | Cuantificado en ms y comparado contra el período a 50 Hz (20 ms). Condiciona todo lo demás | ⬜ |
 | 6.2 | PWS como peso opcional del barrido | comparación contra phase-shift | Probar μ=1 antes que μ=2; **verificar que no suprime señal real** por el arreglo sintetizado | ⬜ |
 | 6.3 | Ridge/Hessiano (Hou et al. 2025) | contra el `argmax` actual | Menos saltos de rama modal | ⬜ |
-| 6.4 | Tracker Kalman en lentitud `p = 1/c` | contra `argmax` y ridge | Estado `[p, dp/df]`; `R(f)` desde energía, ancho, coherencia y SNR del pico | ⬜ |
-| 6.5 | Cotas del arreglo como *gating* de la innovación | test sobre gather sintético | `c ≥ 2Δx·f` y `c ≤ L·f` respetadas por construcción. **Es el aporte más defendible** | ⬜ |
-| 6.6 | Modo predictivo (acota la ventana de búsqueda del bin siguiente) | contra el modo suavizador | Robusto a saltos de modo donde el `argmax` falla | ⬜ |
+| 6.4 | Tracker Kalman en lentitud `p = 1/c` | contra `argmax` y ridge | Estado `[p, dp/df]`; `R(f)` desde energía, ancho, coherencia y SNR del pico | 🔄 |
+| 6.5 | Cotas del arreglo como *gating* de la innovación | test sobre gather sintético | `c ≥ 2Δx·f` y `c ≤ L·f` respetadas por construcción. **Es el aporte más defendible** | ✅ |
+| 6.6 | Modo predictivo (acota la ventana de búsqueda del bin siguiente) | contra el modo suavizador | Robusto a saltos de modo donde el `argmax` falla | ✅ |
 | 6.7 | σ(f) exportado como pesos de datos | integración con `masw_backends` | La inversión los consume | ⬜ |
 
 ## S6b — Benchmarks obligatorios
@@ -126,7 +130,7 @@ CLI="python -m geophone_scope.kalman_deconv.cli"
 
 | # | Entregable | Criterio | Estado |
 |---|---|---|---|
-| 7.1 | `ĉ_R(f)` contra `Moldeo Hidro` | RMS en el solape 8,0–29,8 Hz | ⬜ |
+| 7.1 | `ĉ_R(f)` contra `Moldeo Hidro` | RMS en el solape 8,0–29,8 Hz | ✅ |
 | 7.2 | `Vs(z)` contra el modelo de 7 capas | Comparación por cotas de litología | ⬜ |
 | 7.3 | Inversión ponderada por σ(f) | `evodcinv`/`disba` consumen los pesos | ⬜ |
 | 7.4 | Conclusión global | ¿La cadena KF+RTS → MASW → inversión acerca el `Vs(z)` a la referencia, o no? **Las dos respuestas son resultados** | ⬜ |

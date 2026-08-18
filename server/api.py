@@ -35,7 +35,7 @@ def get_analysis_jobs(request: Request) -> AnalysisJobs:
 # get_pipeline` y, al estar este módulo en medio de su propia importación,
 # necesitan encontrarlo ya definido.
 from .routers import (admin, alignment, averages, dataset, deletion, filters,  # noqa: E402
-                      grouping, ingest, jobs, masw, picks, waterfall)
+                      grouping, ingest, jobs, kalman, masw, picks, waterfall)
 
 
 class _TitleCaseHeaders:
@@ -121,6 +121,9 @@ def create_app(pipeline: Pipeline, *, read_only: bool = False) -> FastAPI:
     app.include_router(averages.router)
     app.include_router(waterfall.router)
     app.include_router(masw.router)
+    # Opcional: si kalman_deconv no esta, sus rutas responden available=false y
+    # ningun otro tab se entera. Ver server/kalman.py.
+    app.include_router(kalman.router)
     app.include_router(deletion.router)
     app.include_router(jobs.router)
 

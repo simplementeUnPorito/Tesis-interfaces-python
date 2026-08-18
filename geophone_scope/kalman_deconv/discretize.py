@@ -318,6 +318,21 @@ def _van_loan_q(
     return Ad, Qd
 
 
+def build_process_noise(
+    A_continuous: np.ndarray,
+    noise_map: np.ndarray,
+    spectral_density: np.ndarray,
+    *,
+    fs: float,
+) -> np.ndarray:
+    """Q discreta exacta desde una densidad continua (interfaz publica S2.5)."""
+
+    _, Qd = _van_loan_q(
+        A_continuous, noise_map, spectral_density, 1.0 / float(fs)
+    )
+    return Qd
+
+
 def build_input_model(spec: InputModel, *, fs: float) -> InputStateSpace:
     """Construye los cuatro priors de entrada con densidad continua invariante."""
 
@@ -504,6 +519,7 @@ __all__ = [
     "SamplingZeroRow",
     "augment_with_input_model",
     "build_input_model",
+    "build_process_noise",
     "check_observability",
     "discrete_freqresp",
     "discretization_error",

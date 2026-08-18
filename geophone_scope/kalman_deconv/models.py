@@ -102,10 +102,18 @@ class PlantSpec:
     conditioner: ConditionerSpec = field(default_factory=ConditionerSpec)
     include_geophone: bool = True
     include_conditioner: bool = True
-    # Magnitud del suelo que se estima. "acceleration" es la nativa del modelo y
-    # la numericamente sana; "velocity" agrega un integrador al modelo de entrada
-    # (no se integra despues, asi la incertidumbre sale de la covarianza);
-    # "displacement" agrega dos y empeora la observabilidad en DC.
+    # Magnitud del suelo que se estima, o sea cual es la entrada ``u`` del modelo
+    # directo. "acceleration" es la nativa del catalogo (H_a = Y/A_ground).
+    #
+    # Pedir otra magnitud NO agrega un integrador: como a = s*v = s^2*d, la
+    # planta correcta es H_v = s*H_a y H_d = s^2*H_a, o sea **ceros en el
+    # origen**. Cada cero extra baja el grado relativo en uno y agrega un modo
+    # que la medicion no observa en DC ("q" de Maes et al. 2016 §2.3), asi que
+    # con "velocity" y "displacement" hay que re-verificar la observabilidad del
+    # par aumentado (TEST 2) en vez de heredar el resultado del caso aceleracion.
+    #
+    # La incertidumbre sigue saliendo de la covarianza y no de integrar despues:
+    # ``u`` ES la magnitud pedida, estimada dentro del filtro.
     estimate: Literal["acceleration", "velocity", "displacement"] = "acceleration"
     adc_scale_v_per_count: float = 1.0
 
