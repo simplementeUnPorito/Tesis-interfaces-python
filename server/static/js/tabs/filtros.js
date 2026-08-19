@@ -124,6 +124,8 @@ export function mount(root) {
               <label for="k-r">R fijo</label>
               <input type="number" id="k-r" step="1e-6" min="0" class="num-input">
 
+              <label class="control-check span-4"><input type="checkbox" id="k-rts">
+                Suavizador RTS hacia atras (no causal, usa toda la ventana)</label>
               <label class="control-check span-4"><input type="checkbox" id="k-post">
                 Pasa-banda posterior sobre la salida del Kalman</label>
               <label for="k-post-low">Pasa-banda</label>
@@ -132,6 +134,9 @@ export function mount(root) {
               <input type="number" id="k-post-high" step="5" min="0" max="1000" class="num-input">
             </div>
             <p class="note" id="k-help"></p>
+            <p class="note">El RTS recorre la ventana hacia atras, asi que no sirve en tiempo real
+            pero si en procesamiento diferido: quita el retardo de grupo del filtro causal. Es una
+            eleccion explicita, no un default.</p>
 
             <div class="toolbar">
               <button type="button" id="k-save">Guardar preferencias</button>
@@ -253,6 +258,7 @@ export function mount(root) {
       q_scale: Number(kEl('#k-q').value) || 0,
       r_source: kEl('#k-r-source').value,
       r_var: Number(kEl('#k-r').value) || 0,
+      smoother_enabled: kEl('#k-rts').checked,
       post_band_enabled: kEl('#k-post').checked,
       post_low_hz: Number(kEl('#k-post-low').value) || 0,
       post_high_hz: Number(kEl('#k-post-high').value) || 80,
@@ -284,7 +290,10 @@ export function mount(root) {
     }
     const help = kEl('#k-help');
     if (help) {
-      help.textContent = model?.help || '';
+      const qMode = (kCatalog?.q_sources || [])
+        .find((m) => m.id === kEl('#k-q-source')?.value);
+      const partes = [model?.help, qMode?.help].filter(Boolean);
+      help.textContent = partes.join(' ');
       help.className = model?.warn ? 'warn-note' : 'note';
     }
     const box = kEl('#k-plot-box');
@@ -330,6 +339,7 @@ export function mount(root) {
     kEl('#k-leak').value = kSettings.leak_hz ?? 0.7;
     kEl('#k-q').value = kSettings.q_scale ?? 0;
     kEl('#k-r').value = kSettings.r_var ?? 0;
+    kEl('#k-rts').checked = !!kSettings.smoother_enabled;
     kEl('#k-post').checked = kSettings.post_band_enabled !== false;
     kEl('#k-post-low').value = kSettings.post_low_hz ?? 1;
     kEl('#k-post-high').value = kSettings.post_high_hz ?? 80;
@@ -444,6 +454,7 @@ export function mount(root) {
     const a = kPreview.applied;
     kEl('#k-plot-label').textContent =
       `${kPreview.estimate} - ${a.input_model}` +
+      (a.smoother_enabled ? ' - RTS' : ' - solo forward') +
       (a.post_band_enabled ? ` - pasa-banda ${a.post_low_hz}-${a.post_high_hz} Hz` : '');
   }
 
@@ -712,7 +723,7 @@ export function mount(root) {
   // brazo. Prender o apagar el maestro tampoco guarda nada por si solo.
   for (const id of ['#k-enabled', '#k-geo', '#k-cond', '#k-estimate', '#k-input',
     '#k-band-low', '#k-band-high', '#k-leak', '#k-disc', '#k-q-source', '#k-q',
-    '#k-r-source', '#k-r', '#k-post', '#k-post-low', '#k-post-high']) {
+    '#k-r-source', '#k-r', '#k-rts', '#k-post', '#k-post-low', '#k-post-high']) {
     const el = $(id);
     if (el) {
       el.addEventListener('change', () => {

@@ -1133,3 +1133,70 @@ Conclusion: el pick manual se agrego entre el 2026-07-26 (ultima corrida del gat
 con este check en verde) y hoy, y **la expectativa 112 del smoke test quedo
 vieja respecto de los datos**. Es una decision del usuario si actualizar el
 numero del check o quitar ese pick; no se toco su analisis.
+
+### 2026-08-18 — S5 (segunda vuelta): todo lo demas, tambien opcional — Claude (Opus 5)
+
+Pedido del usuario: *«todo son herramientas que puedo o no usar en cada caso»*.
+Se llevo a la web **lo que faltaba** del trabajo de Kalman, y con el mismo
+criterio: cada cosa es una casilla, apagada por defecto.
+
+**Lo que se agrego:**
+
+| Herramienta | Donde | Default |
+|---|---|---|
+| Suavizador **RTS** hacia atras | tab Filtros | apagada |
+| Origen de Q: `ml_reference` / `ml` / `manual` | tab Filtros | `ml_reference` |
+| Ventana admisible (interseccion) | tab MASW | apagada |
+| Solo mascara fisica del arreglo | tab MASW | apagada |
+| Solo candidatos energeticos | tab MASW | apagada |
+| Curva externa de referencia (cR) | tab MASW | apagada |
+| Ademas Vs aparente = cR/0,92 | tab MASW | apagada |
+| Imagen MASW desde `v_ground` del Kalman | tab MASW | apagada |
+
+**RTS.** `rts_backward` conmutable. Medido sobre la captura de prueba
+(fs 2929 Hz): la energia en 10-50 Hz pasa de **0,765** (solo forward) a
+**0,875** con RTS. El rotulo del grafico dice cual brazo se esta viendo, para
+que no haya duda de si el suavizador esta puesto.
+
+**Las cuatro mascaras por separado.** `build_masw_window` ahora devuelve
+`layers` con la envolvente de `physical`, `kalman_gate`, `energetic` y
+`combined`. La interfaz las prende de a una. Con las tres casillas apagadas no
+se emite ningun pedido.
+
+**Curva externa.** `GET /api/kalman/reference` lee
+`data/Moldeo Hidro/grupo1_curva_dispersion_hidro_guiada.csv`: 132 puntos,
+8,00-29,83 Hz, servida en `cR` y en `Vs_app = cR/0,92`. El payload lleva
+`enters_computation: false` y la nota correspondiente. Si el archivo no esta,
+responde `available: false` en vez de fallar.
+
+**Imagen MASW desde el Kalman.** `POST /api/kalman/masw-dispersion` corre el
+estimador canal por canal y arma la imagen desde `v_ground`. Devuelve **el mismo
+contrato** que `/api/masw/dispersion` (incluido `image_png`) para que la
+interfaz pueda intercambiar una por otra sin tocar nada mas; la ruta normal
+queda intacta y es la que se usa si no se pide esta.
+
+```text
+POST /api/kalman/masw-dispersion  (Canchita, grupo 1, 21 canales)
+  imagen 560 x 126
+  21/21 canales finitos
+  log10 q de -6.400 a -3.526
+  NIS medio 0.8843
+  3 min 24 s
+```
+
+⚠ **Costo, y por que hubo que trabajarlo.** La primera version ajustaba `q` por
+maxima verosimilitud en cada canal sobre el registro **entero** (11654 muestras
+x 21 canales x ~20 evaluaciones del optimizador, y cada evaluacion es un filtro
+completo). No terminaba: se corto a los 10 minutos. Dos cambios lo hicieron
+practicable, y los dos quedaron expuestos como opcion:
+
+1. La busqueda de `q` corre sobre una **ventana de 4 s** (`Q_FIT_SECONDS`), no
+   sobre el registro completo. Acota el costo de la *busqueda*; el filtro
+   despues corre sobre la traza entera igual.
+2. Nuevo `q_source = "ml_reference"` (ahora el default): un solo ajuste sobre el
+   canal del medio del tendido, escalado por la varianza de ruido de cada traza.
+   `ml` (canal por canal) sigue disponible para quien quiera el mejor NIS y
+   pueda pagar el tiempo.
+
+La interfaz avisa antes de correrlo que tarda varios minutos, y destildar la
+casilla vuelve a la imagen normal sin recalcular nada.

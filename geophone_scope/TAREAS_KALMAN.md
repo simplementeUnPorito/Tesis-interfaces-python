@@ -104,6 +104,11 @@ CLI="python -m geophone_scope.kalman_deconv.cli"
 | 5.4 | Estado compartido | revisión de código | **Todo write pasa por `server/state.py`** (`locked` + `require_revision` + `atomic_write_json`). Verificado: 409 ante revisión obsoleta, 400 ante magnitud inválida | ✅ |
 | 5.5 | La funcionalidad es **opcional**, no obligatoria | navegador | Con el maestro apagado: **0 pedidos** a `/api/kalman/preview`, gráfico oculto y el pasa-banda se comporta igual que antes de existir el módulo | ✅ |
 | 5.6 | Overlay opcional de la ventana Kalman en MASW | navegador | Checkbox apagado por defecto; prendido dibuja las dos envolventes de la región admisible. **No es un picking** y no se exporta como tal | ✅ |
+| 5.7 | Suavizador **RTS** conmutable desde la web | navegador | Checkbox apagado por defecto. Prendido, la energía en 10–50 Hz sube de 0,765 a **0,875** en la captura de prueba y el rótulo del gráfico pasa a decir «RTS» | ✅ |
+| 5.8 | Las cuatro máscaras, cada una por separado | navegador | `layers`: `physical`, `kalman_gate`, `energetic`, `combined`, con su envolvente propia. Tres checkboxes independientes; con todas apagadas no se pide nada | ✅ |
+| 5.9 | Curva externa de referencia como overlay | `GET /api/kalman/reference` | 132 puntos, 8,00–29,83 Hz, en `cR` y en `Vs_app = cR/0,92`. `enters_computation: false`. Si el archivo no está, `available: false` en vez de fallar | ✅ |
+| 5.10 | Imagen MASW calculada **desde `v_ground`** | `POST /api/kalman/masw-dispersion` | Mismo contrato que `/api/masw/dispersion` (incluido `image_png`). 21/21 canales finitos, NIS medio 0,88. **3 min 24 s**: es un botón explícito, con aviso en la interfaz | ✅ |
+| 5.11 | Origen de Q seleccionable, con el costo declarado | catálogo | `ml_reference` (un ajuste, escalado por R — el único practicable para la imagen completa), `ml` (canal por canal) y `manual`. El ajuste usa una ventana de 4 s: acota el costo de la **búsqueda**, no el del filtro | ✅ |
 
 ## S6 — Picking de dispersión
 

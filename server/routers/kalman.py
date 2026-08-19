@@ -80,6 +80,7 @@ def kalman_preview(
     post_band_enabled: bool | None = Query(None),
     post_low_hz: float | None = Query(None),
     post_high_hz: float | None = Query(None),
+    smoother_enabled: bool | None = Query(None),
     pipeline: Pipeline = Depends(get_pipeline),
 ):
     """Vista previa del estimador sobre **un** disparo.
@@ -114,6 +115,7 @@ def kalman_preview(
             "post_band_enabled": post_band_enabled,
             "post_low_hz": post_low_hz,
             "post_high_hz": post_high_hz,
+            "smoother_enabled": smoother_enabled,
         }.items()
         if value is not None
     }
@@ -174,5 +176,66 @@ def kalman_masw_window(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
         raise HTTPException(503, str(exc)) from exc
     except (ValueError, KeyError) as exc:
         raise HTTPException(400, f"no se pudo calcular la ventana: {exc}") from exc
+    body_json = json.dumps(payload, allow_nan=False, ensure_ascii=False)
+    return Response(content=body_json, media_type="application/json")
+
+
+@router.get("/api/kalman/reference")
+def kalman_reference() -> dict:
+    """Curva externa de referencia, para superponer sobre la imagen MASW.
+
+    Es **solo overlay**: no entra al cálculo de la imagen, ni a las máscaras, ni
+    al ajuste de Q/R. Si el archivo no está, responde ``available: false`` en vez
+    de fallar: es opcional.
+    """
+    return kalman.reference_curve()
+
+
+@router.post("/api/kalman/masw-dispersion")
+def kalman_masw_dispersion(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
+    """Imagen de dispersión calculada desde ``v_ground`` en vez del ADC.
+
+    Mismo contrato que ``/api/masw/dispersion`` (incluido ``image_png``), para
+    que la interfaz pueda intercambiar una por otra. **Es una opción**: la ruta
+    normal sigue intacta y es la que se usa si no se pide ésta.
+
+    Corre el estimador canal por canal, así que tarda del orden de un segundo por
+    traza. Handler síncrono a propósito.
+    """
+    if not kalman.AVAILABLE:
+        raise HTTPException(
+            503,
+            "la deconvolución Kalman no está disponible en este entorno: "
+            f"{kalman.UNAVAILABLE_REASON}",
+        )
+    root = _campaign_root(pipeline, str(body.get("campaign", "")))
+    params = body.get("params") or {}
+    raw_weights = body.get("group_weights") or {}
+    weights: dict[int, float] = {}
+    for key, value in raw_weights.items():
+        try:
+            weights[int(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    overrides = {k: v for k, v in (body.get("settings") or {}).items()
+                 if k in kalman.DEFAULTS}
+    try:
+        payload = kalman.build_dispersion_from_kalman(
+            root,
+            group_weights=weights or None,
+            group_id=int(body.get("group_id", 1) or 1),
+            c_min=float(params.get("c_min", 50.0)),
+            c_max=float(params.get("c_max", 800.0)),
+            c_step=float(params.get("c_step", 1.0)),
+            f_min=float(params.get("f_min", 1.0)),
+            f_max=float(params.get("f_max", 100.0)),
+            intensity_log=bool(body.get("intensity_log", False)),
+            intensity_per_freq=bool(body.get("intensity_per_freq", True)),
+            overrides=overrides,
+        )
+    except kalman.KalmanUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(400, f"no se pudo calcular la imagen: {exc}") from exc
     body_json = json.dumps(payload, allow_nan=False, ensure_ascii=False)
     return Response(content=body_json, media_type="application/json")

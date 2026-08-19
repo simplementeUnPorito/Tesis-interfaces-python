@@ -46,7 +46,11 @@ try:  # pragma: no cover - depende del entorno
         discretize_plant,
         prepare_plant,
     )
-    from geophone_scope.kalman_deconv.kf import kf_forward, nis_consistency
+    from geophone_scope.kalman_deconv.kf import (
+        kf_forward,
+        nis_consistency,
+        rts_backward,
+    )
     from geophone_scope.kalman_deconv.library import (
         list_conditioners,
         list_geophones,
@@ -125,7 +129,23 @@ R_SOURCES = [
 ]
 
 Q_SOURCES = [
-    {"id": "ml", "name": "Maxima verosimilitud de las innovaciones"},
+    {
+        "id": "ml_reference",
+        "name": "Verosimilitud en un canal de referencia (rapido)",
+        "help": (
+            "Ajusta q una sola vez sobre el canal del medio y lo escala por la "
+            "varianza de ruido de cada traza. Es el unico practico para la "
+            "imagen MASW completa."
+        ),
+    },
+    {
+        "id": "ml",
+        "name": "Verosimilitud canal por canal (lento, mas fiel)",
+        "help": (
+            "Ajusta q de forma independiente en cada traza. Da el mejor NIS pero "
+            "multiplica el tiempo por la cantidad de canales."
+        ),
+    },
     {"id": "manual", "name": "Valor fijo"},
 ]
 
@@ -141,7 +161,7 @@ DEFAULTS: dict[str, Any] = {
     "band_high_hz": 50.0,
     "leak_hz": 0.7,
     "disc_method": "zoh",
-    "q_source": "ml",
+    "q_source": "ml_reference",
     "q_scale": 1e-4,
     "r_source": "pre_arrival",
     "r_var": 0.0,
@@ -149,7 +169,16 @@ DEFAULTS: dict[str, Any] = {
     "post_band_enabled": True,
     "post_low_hz": 1.0,
     "post_high_hz": 80.0,
+    # Suavizador RTS. Apagado por defecto: es no causal (usa toda la ventana) y
+    # el usuario tiene que elegirlo a sabiendas. Cuando esta prendido, el brazo
+    # que sale hacia MASW es el suavizado.
+    "smoother_enabled": False,
+    # Overlays de MASW, cada uno por su cuenta.
     "masw_window_enabled": False,
+    "masw_physical_enabled": False,
+    "masw_energetic_enabled": False,
+    "masw_reference_enabled": False,
+    "masw_from_kalman": False,
     "notes": "",
 }
 
@@ -286,9 +315,27 @@ def _augmented(continuous, fs: float, settings: dict, q_scale: float):
     )
 
 
+#: Cuantos segundos de registro usa el ajuste de ``q``. El KF despues corre
+#: sobre la traza entera; esto solo acota el costo de la **busqueda**, que
+#: repite el filtro una vez por evaluacion del optimizador. Con 4 s alcanza y
+#: sobra para estimar la densidad de la entrada, y en las capturas largas de
+#: 11,4 s baja el costo casi 3x.
+Q_FIT_SECONDS = 4.0
+
+
 def _fit_q(values, continuous, fs: float, settings: dict, r_var: float):
-    """Maxima verosimilitud de las innovaciones sobre ``log10(q)``."""
+    """Maxima verosimilitud de las innovaciones sobre ``log10(q)``.
+
+    La busqueda corre sobre una ventana acotada (``Q_FIT_SECONDS``), no sobre el
+    registro completo: cada evaluacion del optimizador es un filtro entero y sin
+    esta cota una imagen MASW de 21 canales no termina nunca.
+    """
     from scipy import optimize
+
+    values = np.asarray(values, dtype=float)
+    tope = int(round(Q_FIT_SECONDS * fs))
+    if tope > 32 and values.size > tope:
+        values = values[:tope]
 
     def objective(log10_q: float) -> float:
         system = _augmented(continuous, fs, settings, 10.0 ** float(log10_q))
@@ -309,7 +356,7 @@ def _fit_q(values, continuous, fs: float, settings: dict, r_var: float):
     bounds = (-8.0, 5.0)
     fit = optimize.minimize_scalar(
         objective, bounds=bounds, method="bounded",
-        options={"maxiter": 20, "xatol": 0.03},
+        options={"maxiter": 16, "xatol": 0.05},
     )
     log10_q = float(fit.x)
     margin = min(log10_q - bounds[0], bounds[1] - log10_q)
@@ -319,6 +366,7 @@ def _fit_q(values, continuous, fs: float, settings: dict, r_var: float):
         "railed_at_bound": bool(margin < 0.05),
         "optimizer_success": bool(fit.success),
         "optimizer_evaluations": int(fit.nfev),
+        "fit_seconds": _round6(min(Q_FIT_SECONDS, values.size / max(fs, 1e-9))),
     }
 
 
@@ -504,7 +552,16 @@ def build_preview(
     estimate = (
         filtered.filtered_state[:, system.plant_order:] @ system.input_model.C.T
     ).ravel()
-    post = _post_band(estimate, fs, settings)
+    # RTS opcional. Es un suavizador de intervalo: no causal, y por eso es una
+    # eleccion explicita y no un default. Ver HANDOFF §6, Obstruccion 3.
+    smoothed = None
+    if bool(settings.get("smoother_enabled")):
+        rts = rts_backward(filtered, system.A)
+        smoothed = (
+            rts.smoothed_state[:, system.plant_order:] @ system.input_model.C.T
+        ).ravel()
+    salida = smoothed if smoothed is not None else estimate
+    post = _post_band(salida, fs, settings)
 
     nis = filtered.nis
     index = np.arange(nis.size)
@@ -551,10 +608,16 @@ def build_preview(
             "frac_10_50_hz": _round6(_band_fraction(estimate, fs, 10.0, 50.0)),
             "frac_10_50_hz_post": _round6(_band_fraction(post, fs, 10.0, 50.0)),
             "frac_10_50_hz_measured": _round6(_band_fraction(centered, fs, 10.0, 50.0)),
+            "smoother_enabled": bool(settings.get("smoother_enabled")),
         },
         "time": {
             "measured": _trace(centered, t0=-trigger_s, fs=fs, max_points=max_points),
             "kalman": _trace(estimate, t0=-trigger_s, fs=fs, max_points=max_points),
+            "kalman_rts": (
+                _trace(smoothed, t0=-trigger_s, fs=fs, max_points=max_points)
+                if smoothed is not None
+                else None
+            ),
             "kalman_post": (
                 _trace(post, t0=-trigger_s, fs=fs, max_points=max_points)
                 if bool(settings["post_band_enabled"])
@@ -563,8 +626,10 @@ def build_preview(
         },
         "spectrum": {
             "measured": _spectrum(centered, fs, max_points),
-            "kalman": _spectrum(post if bool(settings["post_band_enabled"]) else estimate,
-                                fs, max_points),
+            "kalman": _spectrum(
+                post if bool(settings["post_band_enabled"]) else salida,
+                fs, max_points,
+            ),
         },
     }
 
@@ -705,9 +770,17 @@ def build_masw_window(
     combined_mask = physical & gate & energetic
 
     lower, upper, cells = _envelope(f, c, combined_mask)
+    # Cada mascara por separado, para que la interfaz pueda prender y apagar
+    # una por una en vez de recibir solo la interseccion.
+    capas = {}
+    for nombre, mask in (("physical", physical), ("kalman_gate", gate),
+                         ("energetic", energetic), ("combined", combined_mask)):
+        lo, hi, n = _envelope(f, c, mask)
+        capas[nombre] = {"lower": lo, "upper": hi, "cells": n}
     nonempty = [f[i] for i, n in enumerate(cells) if n > 0]
     return {
         "available": True,
+        "layers": capas,
         "lower": lower,
         "upper": upper,
         "cells": cells,
@@ -732,3 +805,312 @@ def build_masw_window(
             "acotan donde puede estar la curva de dispersion."
         ),
     }
+
+# --------------------------------------------------------------------------- #
+# Curva externa de referencia. Es SOLO overlay.
+# --------------------------------------------------------------------------- #
+
+#: Factor de conversion Rayleigh -> Vs aparente. Ver el informe de
+#: ``velocity_model_fix_2026-08-17``.
+RAYLEIGH_FACTOR = 0.92
+
+#: Curva hidrogeologica guiada de ``data/Moldeo Hidro``. NO es una captura: es el
+#: resultado de un trabajo previo, y se muestra encima de la imagen para comparar
+#: a ojo. **Nunca entra al calculo** de la imagen, de las mascaras ni del ajuste
+#: de Q/R.
+REFERENCE_CSV_CANDIDATES = (
+    "grupo1_curva_dispersion_hidro_guiada.csv",
+)
+
+
+def _data_root() -> Path:
+    import os
+
+    return Path(
+        os.environ.get("TESIS_DATA_ROOT", Path(__file__).resolve().parents[4] / "data")
+    )
+
+
+def reference_curve() -> dict:
+    """Curva de dispersion externa, si esta disponible.
+
+    Devuelve ``available: false`` en vez de fallar cuando el archivo no esta:
+    es un overlay opcional, no un requisito.
+    """
+    import csv
+
+    base = _data_root() / "Moldeo Hidro"
+    path = None
+    for name in REFERENCE_CSV_CANDIDATES:
+        candidate = base / name
+        if candidate.is_file():
+            path = candidate
+            break
+    if path is None:
+        return {
+            "available": False,
+            "reason": f"no se encontro la curva externa en {base}",
+        }
+    freqs: list[float] = []
+    c_pick: list[float] = []
+    c_prior: list[float] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                try:
+                    f = float(row["freq_Hz"])
+                    c = float(row["cR_pick_ms"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not (np.isfinite(f) and np.isfinite(c)):
+                    continue
+                freqs.append(f)
+                c_pick.append(c)
+                try:
+                    c_prior.append(float(row.get("cR_hydro_prior_ms") or "nan"))
+                except ValueError:
+                    c_prior.append(float("nan"))
+    except OSError as exc:
+        return {"available": False, "reason": f"no se pudo leer {path}: {exc}"}
+    if not freqs:
+        return {"available": False, "reason": f"{path} no tiene filas utilizables"}
+    return {
+        "available": True,
+        "path": str(path),
+        "n_points": len(freqs),
+        "frequency_range_hz": [_round6(min(freqs)), _round6(max(freqs))],
+        # Rayleigh, que es el eje nativo de la imagen de dispersion.
+        "c_rayleigh": [[_round6(f), _round6(c)] for f, c in zip(freqs, c_pick)],
+        # Vs aparente, para cuando el eje se muestra convertido.
+        "vs_apparent": [
+            [_round6(f), _round6(c / RAYLEIGH_FACTOR)] for f, c in zip(freqs, c_pick)
+        ],
+        "c_hydro_prior": [
+            [_round6(f), _round6(c)]
+            for f, c in zip(freqs, c_prior)
+            if np.isfinite(c)
+        ],
+        "rayleigh_to_vs_factor": RAYLEIGH_FACTOR,
+        "is_external": True,
+        "enters_computation": False,
+        "note": (
+            "Resultado de un trabajo previo guiado por hidrogeologia. Se muestra "
+            "para comparar; no participa del calculo de la imagen ni de las mascaras."
+        ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Imagen MASW calculada desde la salida del Kalman
+# --------------------------------------------------------------------------- #
+
+
+def build_dispersion_from_kalman(
+    raw_root: str | Path,
+    *,
+    group_weights: dict[int, float] | None = None,
+    group_id: int = 1,
+    c_min: float,
+    c_max: float,
+    c_step: float,
+    f_min: float,
+    f_max: float,
+    intensity_log: bool = False,
+    intensity_per_freq: bool = True,
+    overrides: dict | None = None,
+) -> dict:
+    """La misma imagen de dispersion, pero desde ``v_ground`` en vez del ADC.
+
+    Devuelve **el mismo contrato** que ``masw.build_dispersion`` (incluido
+    ``image_png``) para que la interfaz pueda intercambiar una por otra sin
+    cambiar nada mas. Es una opcion: la ruta normal sigue intacta.
+
+    Ojo con el costo: corre el estimador **por canal**, asi que tarda del orden
+    de un segundo por traza. Por eso es un boton y no algo que pase solo.
+    """
+    if not AVAILABLE:
+        raise KalmanUnavailable(UNAVAILABLE_REASON)
+
+    from geophone_scope.masw_dispersion import phase_shift_dispersion_image
+
+    from .masw import _array_geometry, _normalizar, _png_gris
+
+    raw_root = Path(raw_root)
+    settings = load_settings(raw_root)
+    if overrides:
+        settings = _coerce(overrides, settings)
+
+    weights = group_weights or {int(group_id): 1.0}
+    weights = {
+        max(1, int(gid)): max(0.0, float(w))
+        for gid, w in weights.items()
+        if float(w) > 0
+    }
+    if not weights:
+        raise ValueError("hace falta al menos un grupo con peso positivo")
+
+    from .waterfall import matrix_for_masw
+
+    resultados = []
+    for gid in sorted(weights):
+        tiempo, distancias, matriz = matrix_for_masw(raw_root, group_id=gid)
+        if len(distancias) < 3:
+            raise ValueError(
+                "Hacen falta al menos 3 receptores para una imagen de dispersion "
+                f"y hay {len(distancias)}."
+            )
+        fs = 1.0 / float(np.median(np.diff(tiempo)))
+        matriz = np.nan_to_num(
+            np.asarray(matriz, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0
+        )
+        # La ventana pre-arribo del waterfall es el tramo con t < 0.
+        pre = tiempo < -0.05
+        if np.count_nonzero(pre) < 20:
+            pre = np.arange(tiempo.size) < max(20, tiempo.size // 20)
+        continuous = prepare_plant(_plant_spec(settings), fs).continuous
+        estimado = np.empty_like(matriz)
+        diagnosticos = []
+
+        # Centrado y R de todos los canales, antes del bucle: el modo
+        # "ml_reference" necesita las varianzas para escalar.
+        centradas = np.array([fila - float(np.median(fila[pre])) for fila in matriz])
+        r_vars = []
+        for base in centradas:
+            r_var = float(np.var(base[pre], ddof=1)) if np.count_nonzero(pre) > 2 else 0.0
+            if not np.isfinite(r_var) or r_var <= 0:
+                r_var = max(float(np.var(base)) * 1e-6, np.finfo(float).tiny)
+            r_vars.append(r_var)
+
+        modo_q = str(settings["q_source"])
+        q_ref = None
+        tuning_ref = {}
+        indice_ref = int(len(centradas) // 2)
+        if modo_q == "ml_reference":
+            # Un solo ajuste, sobre el canal del medio del tendido. Es lo que
+            # hace practicable la imagen completa.
+            q_ref, tuning_ref = _fit_q(
+                centradas[indice_ref], continuous, fs, settings, r_vars[indice_ref]
+            )
+
+        for i, base in enumerate(centradas):
+            r_var = r_vars[i]
+            if modo_q == "manual" and float(settings["q_scale"]) > 0:
+                q_scale = float(settings["q_scale"])
+                tuning = {"log10_q_scale": _round6(float(np.log10(q_scale))),
+                          "railed_at_bound": False}
+            elif modo_q == "ml_reference" and q_ref is not None:
+                q_scale = q_ref * r_var / max(r_vars[indice_ref], np.finfo(float).tiny)
+                tuning = {
+                    "log10_q_scale": _round6(float(np.log10(max(q_scale, 1e-300)))),
+                    "railed_at_bound": bool(tuning_ref.get("railed_at_bound")),
+                    "scaled_from_reference": True,
+                }
+            else:
+                q_scale, tuning = _fit_q(base, continuous, fs, settings, r_var)
+            system = _augmented(continuous, fs, settings, q_scale)
+            filtered = kf_forward(base, system.A, system.C, system.Q, r_var)
+            u = (
+                filtered.filtered_state[:, system.plant_order:]
+                @ system.input_model.C.T
+            ).ravel()
+            if bool(settings.get("smoother_enabled")):
+                rts = rts_backward(filtered, system.A)
+                u = (
+                    rts.smoothed_state[:, system.plant_order:]
+                    @ system.input_model.C.T
+                ).ravel()
+            estimado[i] = _post_band(u, fs, settings)
+            diagnosticos.append({
+                "distance_m": _round6(float(distancias[i])),
+                "log10_q_scale": tuning.get("log10_q_scale"),
+                "railed_at_bound": bool(tuning.get("railed_at_bound")),
+                "mean_nis": _round6(float(np.nanmean(filtered.nis))),
+                "min_cov_eigenvalue": _round6(float(filtered.min_cov_eigenvalue)),
+                "finite": bool(np.all(np.isfinite(estimado[i]))),
+            })
+        f, c, A = phase_shift_dispersion_image(
+            estimado.T, np.asarray(distancias, dtype=np.float64), fs,
+            c_min=float(c_min), c_max=float(c_max), c_step=float(c_step),
+            f_max=float(f_max), f_min=float(f_min),
+        )
+        resultados.append({
+            "group_id": int(gid),
+            "distances": np.asarray(distancias, dtype=np.float64),
+            "fs": fs,
+            "f": np.asarray(f, dtype=np.float64),
+            "c": np.asarray(c, dtype=np.float64),
+            "A_norm": _normalizar(A),
+            "diagnostics": diagnosticos,
+        })
+
+    first = resultados[0]
+    f, c = first["f"], first["c"]
+    combinada = np.zeros((f.size, c.size), dtype=np.float64)
+    for r in resultados:
+        if r["A_norm"].shape != combinada.shape:
+            raise ValueError("los grupos produjeron grillas incompatibles")
+        combinada += weights[r["group_id"]] * r["A_norm"]
+
+    display = np.abs(combinada)
+    if intensity_per_freq:
+        display = _normalizar(display)
+    else:
+        peak = float(np.nanmax(display)) if display.size else 1.0
+        display = display / (peak if peak > 0 else 1.0)
+    if intensity_log:
+        display = np.log1p(99.0 * display) / np.log(100.0)
+    norm = np.nan_to_num(display, nan=0.0, posinf=1.0, neginf=0.0)
+    img = np.flipud((norm.T * 255.0).clip(0, 255))
+
+    geometrias = [_array_geometry(r["distances"]) for r in resultados]
+    spacings = [sp for sp, _l in geometrias if sp]
+    lengths = [ln for _sp, ln in geometrias if ln]
+    spacing = max(spacings) if spacings else None
+    length = min(lengths) if lengths else None
+
+    return {
+        "source": "kalman",
+        "group_id": int(group_id),
+        "groups": [
+            {
+                "group_id": r["group_id"],
+                "weight": weights[r["group_id"]],
+                "n_channels": int(r["distances"].size),
+                "distances": [_round6(float(d)) for d in r["distances"]],
+                "fs": _round6(float(r["fs"])),
+                "diagnostics": r["diagnostics"],
+            }
+            for r in resultados
+        ],
+        "group_weights": {str(k): v for k, v in weights.items()},
+        "n_channels": int(first["distances"].size),
+        "distances": [_round6(float(d)) for d in first["distances"]],
+        "fs": _round6(float(first["fs"])),
+        "f_min": _round6(float(f[0])) if f.size else 0.0,
+        "f_max": _round6(float(f[-1])) if f.size else 0.0,
+        "c_min": _round6(float(c[0])) if c.size else 0.0,
+        "c_max": _round6(float(c[-1])) if c.size else 0.0,
+        "width": int(img.shape[1]),
+        "height": int(img.shape[0]),
+        "image_png": _png_gris(img),
+        "geophone_spacing_m": _finite_or_none(spacing),
+        "array_length_m": _finite_or_none(length),
+        "alias_boundary": (
+            [[_round6(float(freq)), _round6(float(2.0 * spacing * freq))] for freq in f]
+            if spacing else []
+        ),
+        "lambda_boundary": (
+            [[_round6(float(freq)), _round6(float(length * freq))] for freq in f]
+            if length else []
+        ),
+        "params": {"c_min": float(c_min), "c_max": float(c_max), "c_step": float(c_step),
+                   "f_min": float(f_min), "f_max": float(f_max)},
+        "applied": {k: settings[k] for k in DEFAULTS if k != "notes"},
+    }
+
+
+def _finite_or_none(value):
+    if value is None:
+        return None
+    value = float(value)
+    return _round6(value) if np.isfinite(value) else None

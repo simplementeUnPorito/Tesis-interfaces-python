@@ -66,9 +66,29 @@ export function mount(root) {
         <label class="control-check"><input id="mw-freq-log" type="checkbox"> Frecuencia log</label>
         <label class="control-check"><input id="mw-int-log" type="checkbox"> Intensidad log</label>
         <label class="control-check"><input id="mw-int-freq" type="checkbox" checked> Normalizar por frecuencia</label>
-        <label class="control-check"><input id="mw-kalman" type="checkbox">
-          Ventana Kalman <span class="legend">opcional</span></label>
-        <p class="note" id="mw-kalman-note" hidden></p>
+        <details class="foot-details" id="mw-kalman-details">
+          <summary>Capas Kalman <span class="legend">todas opcionales</span></summary>
+          <p class="note">Cada una se prende y se apaga por separado. Con todas apagadas la
+          pestana se comporta igual que antes de que existieran.</p>
+          <label class="control-check"><input id="mw-kalman" type="checkbox">
+            Ventana admisible (interseccion)</label>
+          <label class="control-check"><input id="mw-kalman-fis" type="checkbox">
+            Solo mascara fisica del arreglo</label>
+          <label class="control-check"><input id="mw-kalman-ene" type="checkbox">
+            Solo candidatos energeticos</label>
+          <label class="control-check"><input id="mw-ref" type="checkbox">
+            Curva externa de referencia (cR)</label>
+          <label class="control-check"><input id="mw-ref-vs" type="checkbox">
+            Ademas Vs aparente = cR / 0,92</label>
+          <label class="control-check"><input id="mw-from-kalman" type="checkbox">
+            Calcular la imagen desde v_ground del Kalman</label>
+          <p class="warn-note" id="mw-from-kalman-warn" hidden>Recalcular desde Kalman corre el
+          estimador canal por canal: en un tendido de 21 trazas tarda <strong>varios
+          minutos</strong>. La imagen normal queda intacta y se puede volver a ella
+          destildando esta casilla.</p>
+          <p class="note" id="mw-kalman-note" hidden></p>
+          <p class="note" id="mw-ref-note" hidden></p>
+        </details>
         <div class="toolbar"><button id="mw-calc">Calcular / combinar</button>
           <button id="mw-save" class="btn-quiet">Guardar análisis</button></div>
         <p id="mw-status" class="note"></p>
@@ -140,10 +160,11 @@ export function mount(root) {
 
   const $ = (q) => root.querySelector(q);
   let campaign = '', groupCount = 1, state = { revision: 'missing', masw: {}, backends: [] };
-  let dispersion = null, image = null, frame = null, activeMode = 0;
+  let dispersion = null, imageNormal = null, frame = null, activeMode = 0;
   // Ventana del segundo Kalman: overlay OPCIONAL. Nace apagado y, mientras lo
   // este, no se pide nada al servidor ni se dibuja nada.
   let kalmanWindow = null, kalmanBusy = false;
+  let referenceCurve = null, kalmanImage = null, kalmanDispersion = null;
   let tool = 'pick', regionDraft = [], drag = null, currentJob = null, pollTimer = null;
   let pedidoCarga = 0, pollFailures = 0;
   const view = attachViewControls($('#mw-plot'), {
@@ -293,7 +314,7 @@ export function mount(root) {
         throw new Error('el estado MASW cambió; se recargó');
       }
       if (!response.ok) throw new Error(out.detail || `HTTP ${response.status}`);
-      dispersion = out; image = await colorImage(out.image_png, out.width, out.height);
+      dispersion = out; imageNormal = await colorImage(out.image_png, out.width, out.height);
       if (out.state) state = out.state;
       masw().geophone_spacing_m = out.geophone_spacing_m;
       masw().array_length_m = out.array_length_m;
@@ -301,9 +322,10 @@ export function mount(root) {
       $('#mw-status').textContent = 'imagen combinada lista';
       await saveState();
       drawDispersion();
-      // La ventana depende de la imagen: si el overlay esta prendido, se
-      // recalcula sola. Si esta apagado, esta llamada no hace nada.
+      // La ventana depende de la imagen: si alguna capa esta prendida, se
+      // recalcula sola. Si estan todas apagadas, esta llamada no hace nada.
       loadKalmanWindow();
+      if ($('#mw-from-kalman')?.checked) loadKalmanImage();
       return true;
     } catch (err) {
       $('#mw-status').textContent = `falló: ${err}`;
@@ -312,10 +334,72 @@ export function mount(root) {
     finally { $('#mw-calc').disabled = false; }
   }
 
+  async function loadReference() {
+    if (referenceCurve) return referenceCurve;
+    try {
+      referenceCurve = await fetch('/api/kalman/reference', { cache: 'no-store' })
+        .then((r) => r.json());
+    } catch (err) {
+      referenceCurve = { available: false, reason: String(err) };
+    }
+    const note = $('#mw-ref-note');
+    note.hidden = false;
+    note.innerHTML = referenceCurve.available
+      ? `curva externa: ${referenceCurve.n_points} puntos,` +
+        ` ${fmt(referenceCurve.frequency_range_hz[0])}-${fmt(referenceCurve.frequency_range_hz[1])} Hz.` +
+        ' <strong>Solo se dibuja: no entra al calculo.</strong>'
+      : `sin curva externa: ${referenceCurve.reason || 'no disponible'}`;
+    return referenceCurve;
+  }
+
+  // Imagen calculada desde la salida del Kalman. Es cara y explicita: solo
+  // corre cuando se tilda la casilla.
+  async function loadKalmanImage() {
+    if (!$('#mw-from-kalman')?.checked) {
+      kalmanImage = null; kalmanDispersion = null;
+      return;
+    }
+    const status = $('#mw-status');
+    status.textContent = 'calculando la imagen desde Kalman (puede tardar varios minutos)...';
+    try {
+      const res = await fetch('/api/kalman/masw-dispersion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaign, params: imageParams(),
+          group_weights: weights(),
+          intensity_log: $('#mw-int-log').checked,
+          intensity_per_freq: $('#mw-int-freq').checked }),
+      });
+      if (!res.ok) {
+        const detalle = await res.text();
+        status.textContent = res.status === 503
+          ? 'La deconvolucion Kalman no esta disponible en este entorno.'
+          : `no se pudo calcular desde Kalman (HTTP ${res.status}): ${detalle.slice(0, 160)}`;
+        $('#mw-from-kalman').checked = false;
+        kalmanImage = null; kalmanDispersion = null;
+        return;
+      }
+      kalmanDispersion = await res.json();
+      kalmanImage = await colorImage(kalmanDispersion.image_png,
+        kalmanDispersion.width, kalmanDispersion.height);
+      const diag = (kalmanDispersion.groups || []).flatMap((g) => g.diagnostics || []);
+      const finitos = diag.filter((d) => d.finite).length;
+      status.innerHTML = `imagen desde Kalman lista &middot; ${finitos}/${diag.length} canales finitos` +
+        ` &middot; NIS medio ${fmt(diag.reduce((a, d) => a + (d.mean_nis || 0), 0) / Math.max(diag.length, 1))}`;
+    } catch (err) {
+      status.textContent = `error: ${err}`;
+      kalmanImage = null; kalmanDispersion = null;
+    } finally {
+      drawDispersion();
+    }
+  }
+
   // Se pide una sola vez por combinacion de parametros: el calculo recorre la
   // imagen entera y tarda varios segundos.
   async function loadKalmanWindow() {
-    if (!$('#mw-kalman')?.checked) { kalmanWindow = null; return; }
+    const alguna = ['#mw-kalman', '#mw-kalman-fis', '#mw-kalman-ene']
+      .some((id) => $(id)?.checked);
+    if (!alguna) { kalmanWindow = null; return; }
     if (kalmanBusy) return;
     kalmanBusy = true;
     const note = $('#mw-kalman-note');
@@ -354,13 +438,20 @@ export function mount(root) {
   }
 
   function drawDispersion() {
-    const p = dispersion || { f_min: Number($('#mw-fmin')?.value) || 1,
-      f_max: Number($('#mw-fmax')?.value) || 100, c_min: Number($('#mw-cmin')?.value) || 50,
-      c_max: Number($('#mw-cmax')?.value) || 800 };
+    // Los ejes salen de la imagen que efectivamente se va a dibujar: si es la
+    // de Kalman y su grilla difiere, usar los limites de la otra la estiraria.
+    const usandoKalman = !!($('#mw-from-kalman')?.checked && kalmanImage);
+    const p = (usandoKalman ? kalmanDispersion : dispersion)
+      || { f_min: Number($('#mw-fmin')?.value) || 1,
+        f_max: Number($('#mw-fmax')?.value) || 100, c_min: Number($('#mw-cmin')?.value) || 50,
+        c_max: Number($('#mw-cmax')?.value) || 800 };
     frame = createFrame($('#mw-plot'), view.apply({ xMin: p.f_min, xMax: p.f_max,
       yMin: p.c_min, yMax: p.c_max, xLog: !!$('#mw-freq-log')?.checked,
       xLabel: 'frecuencia [Hz]', yLabel: 'velocidad de fase [m/s]' }));
     const ctx = frame.ctx;
+    // Si se pidio la imagen desde Kalman y ya esta, se muestra esa; si no, la
+    // normal. La normal nunca se pierde: solo queda tapada.
+    const image = usandoKalman ? kalmanImage : imageNormal;
     if (image) {
       ctx.save(); ctx.beginPath(); ctx.rect(frame.x0, frame.y0, frame.pw, frame.ph); ctx.clip();
       if (!frame.xLog) {
@@ -376,18 +467,37 @@ export function mount(root) {
       }
       ctx.restore();
     }
-    line(dispersion?.alias_boundary || [], '#ffffff', [5, 4]);
-    line(dispersion?.lambda_boundary || [], '#111111', [5, 4]);
+    // `p` ya apunta a la imagen que se esta dibujando (normal o Kalman), asi que
+    // los limites geometricos salen de la misma y no de la otra.
+    line(p.alias_boundary || [], '#ffffff', [5, 4]);
+    line(p.lambda_boundary || [], '#111111', [5, 4]);
     // Envolvente de la region admisible del segundo Kalman. Son DOS bordes,
     // no una curva: acotan donde puede estar la dispersion, no dicen donde
     // esta. Por eso se dibujan punteados y nunca se exportan como picking.
-    if ($('#mw-kalman')?.checked && kalmanWindow) {
-      // Halo oscuro debajo: sobre la paleta arcoiris un trazo fino de un solo
-      // color se pierde, y el borde de la region es justo lo que hay que ver.
-      for (const pts of [kalmanWindow.lower || [], kalmanWindow.upper || []]) {
+    // Cada capa por separado. Halo oscuro debajo de todas: sobre la paleta
+    // arcoiris un trazo fino de un solo color se pierde, y el borde de la
+    // region es justo lo que hay que ver.
+    const capas = [
+      ['#mw-kalman', 'combined', '#00e5ff'],
+      ['#mw-kalman-fis', 'physical', '#ffb300'],
+      ['#mw-kalman-ene', 'energetic', '#76ff03'],
+    ];
+    for (const [id, nombre, color] of capas) {
+      if (!$(id)?.checked || !kalmanWindow?.layers?.[nombre]) continue;
+      const capa = kalmanWindow.layers[nombre];
+      for (const pts of [capa.lower || [], capa.upper || []]) {
         line(pts, 'rgba(0,0,0,.85)', [], 3.5);
-        line(pts, '#00e5ff', [3, 3], 1.6);
+        line(pts, color, [3, 3], 1.6);
       }
+    }
+    // Curva externa: overlay puro, nunca entra al calculo.
+    if ($('#mw-ref')?.checked && referenceCurve?.available) {
+      line(referenceCurve.c_rayleigh || [], 'rgba(0,0,0,.85)', [], 4);
+      line(referenceCurve.c_rayleigh || [], '#ff4081', [], 2);
+    }
+    if ($('#mw-ref-vs')?.checked && referenceCurve?.available) {
+      line(referenceCurve.vs_apparent || [], 'rgba(0,0,0,.85)', [], 4);
+      line(referenceCurve.vs_apparent || [], '#ff4081', [7, 4], 2);
     }
     Object.entries(masw().regions_by_mode || {}).forEach(([mode, polys]) =>
       (polys || []).forEach((poly) => line([...poly, poly[0]], COLORS[Number(mode) % COLORS.length], [6, 3])));
@@ -599,15 +709,34 @@ export function mount(root) {
   $('#mw-calc').addEventListener('click', calculate);
   $('#mw-save').addEventListener('click', () => saveState().then(() => $('#mw-status').textContent = 'guardado').catch((e) => $('#mw-status').textContent = e));
   $('#mw-freq-log').addEventListener('change', drawDispersion);
-  // Prender el overlay lo calcula; apagarlo lo borra y no deja pedidos colgando.
-  $('#mw-kalman').addEventListener('change', () => {
-    if ($('#mw-kalman').checked) {
-      loadKalmanWindow();
-    } else {
-      kalmanWindow = null;
-      $('#mw-kalman-note').hidden = true;
-      drawDispersion();
-    }
+  // Prender una capa la calcula; apagarlas todas borra la ventana y no deja
+  // pedidos colgando. Cada casilla es independiente.
+  const capasVentana = ['#mw-kalman', '#mw-kalman-fis', '#mw-kalman-ene'];
+  const algunaCapa = () => capasVentana.some((id) => $(id)?.checked);
+  for (const id of capasVentana) {
+    $(id).addEventListener('change', () => {
+      if (algunaCapa()) {
+        if (kalmanWindow) drawDispersion(); else loadKalmanWindow();
+      } else {
+        kalmanWindow = null;
+        $('#mw-kalman-note').hidden = true;
+        drawDispersion();
+      }
+    });
+  }
+  for (const id of ['#mw-ref', '#mw-ref-vs']) {
+    $(id).addEventListener('change', () => {
+      if ($('#mw-ref')?.checked || $('#mw-ref-vs')?.checked) {
+        loadReference().then(drawDispersion);
+      } else {
+        $('#mw-ref-note').hidden = true;
+        drawDispersion();
+      }
+    });
+  }
+  $('#mw-from-kalman').addEventListener('change', () => {
+    $('#mw-from-kalman-warn').hidden = !$('#mw-from-kalman').checked;
+    loadKalmanImage();
   });
   $('#mw-mode').addEventListener('change', (ev) => { activeMode = Number(ev.target.value); masw().active_mode = activeMode; drawDispersion(); });
   $('#mw-add-mode').addEventListener('click', () => {
