@@ -70,6 +70,7 @@ export function mount(root) {
   let campaign = '';
   let seleccion = new Set();
   let ultima = null;
+  let saveTail = Promise.resolve();
 
   const picker = mountCampaignPicker($('#ag-campaign'), {
     onChange: (id) => { campaign = id; seleccion.clear(); load(); },
@@ -112,7 +113,16 @@ export function mount(root) {
     }
   }
 
-  async function save(patch) {
+  function save(patch) {
+    // Cambiar la cantidad dispara `change` al perder foco. Si el usuario pulsa
+    // enseguida Asignar, ambos POST antes salían con la misma revisión: el
+    // primero guardaba y el segundo producía un 409 falso. La cola hace que
+    // cada operación use la revisión devuelta por la anterior.
+    saveTail = saveTail.then(() => saveNow(patch));
+    return saveTail;
+  }
+
+  async function saveNow(patch) {
     $('#ag-status').textContent = 'guardando…';
     try {
       const res = await fetch('/api/groups', {
@@ -154,8 +164,14 @@ export function mount(root) {
     render();
   });
 
-  $('#ag-count').addEventListener('change', (ev) =>
-    save({ group_count: Math.max(1, Math.min(20, Number(ev.target.value) || 1)) }));
+  $('#ag-count').addEventListener('change', (ev) => {
+    const count = Math.max(1, Math.min(20, Number(ev.target.value) || 1));
+    // La siguiente acción debe ver el valor nuevo aunque el POST siga en cola.
+    data.group_count = count;
+    $('#ag-target').max = count;
+    if (Number($('#ag-target').value) > count) $('#ag-target').value = count;
+    save({ group_count: count });
+  });
 
   $('#ag-assign').addEventListener('click', () => {
     if (!seleccion.size) {
