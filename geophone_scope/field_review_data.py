@@ -1107,6 +1107,10 @@ def apply_filter_chain(
     El supresor armónico no es un notch IIR. Estima la frecuencia de línea
     alrededor del valor nominal y resta, sobre la captura completa, el modelo
     de senos/cosenos ajustado por mínimos cuadrados que usa el master ESP.
+
+    El orden es deliberado: primero se resta la interferencia armónica sobre
+    la captura original y recién después se aplica el Butterworth de fase cero.
+    De esta forma el pasa-banda no modifica el modelo que se ajusta a la red.
     """
     y = np.asarray(x, dtype=np.float64)
     if y.size == 0 or settings is None or not settings.enabled:
@@ -1117,12 +1121,6 @@ def apply_filter_chain(
     work = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
     if settings.dc_enabled:
         work = work - float(np.mean(work[finite]))
-    work = np.asarray(
-        apply_bandpass_filter(
-            work, fs, settings.low_hz, settings.high_hz, settings.order
-        ),
-        dtype=np.float64,
-    )
     if settings.line_suppress_enabled:
         try:
             from .signal_proc import harmonic_notch
@@ -1135,6 +1133,12 @@ def apply_filter_chain(
             max(1, min(12, int(settings.line_harmonics))),
             max(0.0, float(settings.line_search_hz)),
         )
+    work = np.asarray(
+        apply_bandpass_filter(
+            work, fs, settings.low_hz, settings.high_hz, settings.order
+        ),
+        dtype=np.float64,
+    )
     work[~finite] = np.nan
     return work.astype(np.float32, copy=False)
 
