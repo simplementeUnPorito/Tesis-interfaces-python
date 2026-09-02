@@ -193,7 +193,10 @@ def dispersion_misfit(c_obs: np.ndarray, c_t: np.ndarray) -> float:
     c_obs = np.asarray(c_obs, dtype=np.float64)
     c_t = np.asarray(c_t, dtype=np.float64)
     valid = np.isfinite(c_t)
-    if valid.sum() < max(1, c_obs.size // 2):
+    # Se exige al menos la mitad de los puntos; para N impar esto significa
+    # ceil(N/2), no floor(N/2). Ej.: 2/3 y 3/5 son válidos, 1/3 y 2/5 no.
+    minimum_valid = max(1, (c_obs.size + 1) // 2)
+    if valid.sum() < minimum_valid:
         return float("inf")
     return float(np.mean(np.abs(c_obs[valid] - c_t[valid]) / c_obs[valid]) * 100.0)
 
@@ -298,17 +301,25 @@ def monte_carlo_inversion(
     def snapshot() -> dict:
         return {"beta": beta_opt.copy(), "h": h_opt.copy(), "c_t": c_t_opt.copy()}
 
+    iterations_to_run = n_iterations
     if progress_cb is not None:
-        progress_cb(0, n_iterations, e_opt, snapshot())
+        if progress_cb(0, n_iterations, e_opt, snapshot()) is False:
+            # Cancelación antes de muestrear: devolver el modelo inicial y un
+            # historial vacío, tal como promete el contrato del callback.
+            iterations_to_run = 0
+            history = history[:0]
 
-    for w in range(n_iterations):
+    for w in range(iterations_to_run):
         beta_test = beta_opt + rng.uniform(-(bs / 100.0) * beta_opt, (bs / 100.0) * beta_opt)
         tries = 0
         while np.any(beta_test[reversals:] != np.sort(beta_test[reversals:])) and tries < 50:
             beta_test = beta_opt + rng.uniform(-(bs / 100.0) * beta_opt, (bs / 100.0) * beta_opt)
             tries += 1
         if tries >= 50:
-            beta_test = np.sort(beta_test)
+            # ``reversals`` libera sólo las interfaces superficiales. El
+            # fallback debe ordenar el sufijo restringido, no el perfil entero,
+            # o elimina silenciosamente las inversiones solicitadas.
+            beta_test[reversals:] = np.sort(beta_test[reversals:])
         h_test = h_opt + rng.uniform(-(bh / 100.0) * h_opt, (bh / 100.0) * h_opt)
         h_test = np.maximum(h_test, 0.1)
 

@@ -10,7 +10,7 @@ PKT_LEN: int = 6             # Every packet is exactly 6 bytes
 # ── Packet types (byte 3 of every PKT_HEADER packet) ────────────────────────
 PTYPE_DATA: int       = 0x00  # ADC sample
 PTYPE_HEARTBEAT: int  = 0x01  # pga, vdac, master_state
-PTYPE_ACK: int        = 0x07  # ACK: b2=cmd, b1=val
+PTYPE_ACK: int        = 0x07  # ACK: b2=cmd, b1=status/eco low8, b0 reservado (no uint16)
 PTYPE_LATENCY: int    = 0xFC  # START latency: 3-byte µs
 PTYPE_STATUS: int     = 0xFD  # Status/HELLO from master or slave
 PTYPE_READY: int      = 0xFE  # READY: b2=n_slaves_ready

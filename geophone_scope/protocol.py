@@ -78,6 +78,7 @@ class Packet:
 
     @property
     def ack_val(self) -> int:
+        """Status/eco de 8 bits en b1; b0 está reservado, no es un uint16."""
         return self.b1
 
     # READY
