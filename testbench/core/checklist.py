@@ -77,6 +77,21 @@ TAP_NAMES = ("PGAgain", "BPo", "SUMo", "LPo", "AMuxCap")
 STAGE_NAMES = ("Vref_PGA", "Vref_BP", "Vref_ADDER", "Vref_LP")
 
 
+def fmt_mv(uv: float, decimales: int = 3) -> str:
+    """Un valor del ADC en mV, CON SIGNO explícito.
+
+    El ADC mide en diferencial contra ``Vref``, así que el signo es parte del
+    dato: un valor puede quedar por debajo de la referencia y eso no es un
+    error. Sin el ``+`` delante, un número positivo y uno sin signo se leen
+    igual y se pierde que la magnitud es una desviación respecto de ``Vref`` y
+    no una tensión absoluta contra masa.
+
+    Vive acá y no en ``figures`` porque ``figures`` arrastra matplotlib, y la
+    terminal formatea números en comandos que no dibujan nada.
+    """
+    return f"{uv / 1000.0:+,.{decimales}f} mV".replace(",", " ")
+
+
 # --------------------------------------------------------------------------
 # Estructuras
 # --------------------------------------------------------------------------

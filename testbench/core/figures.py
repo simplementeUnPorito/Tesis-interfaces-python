@@ -37,6 +37,9 @@ from .checklist import (
     STAGE_NAMES,
     TAP_NAMES,
     Measurements,
+    # Se importa para re-exportarlo: `figures.fmt_mv` es el formato con el que
+    # rotulan las figuras, y conviene que sea el mismo que usa la terminal.
+    fmt_mv,
 )
 
 # -- paleta ----------------------------------------------------------------
@@ -357,37 +360,76 @@ def fig_d7(taps: Sequence[dict]) -> Figure:
 # --------------------------------------------------------------------------
 # Modo manual — monitor en vivo y barridos
 # --------------------------------------------------------------------------
+#: Por encima de esta excursión el monitor pasa a eje absoluto en mV.
+#: Por debajo, todo el interés está en los últimos dígitos y conviene el eje
+#: relativo. 20 mV son ~10 códigos de IDAC: si se movió menos que eso, lo que
+#: se está mirando es ruido y deriva, no un cambio de punto de trabajo.
+MONITOR_EJE_ABSOLUTO_UV = 20_000.0
+
+
 def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "") -> Figure:
     """Traza del monitor lento: un tap contra el tiempo.
 
     Cambio en el tiempo, así que va en línea, no en barras. Una sola serie:
     sin caja de leyenda, el título dice qué es.
+
+    El eje se elige según lo que haya pasado, porque las dos situaciones no se
+    grafican igual:
+
+    * **Quieto** (excursión chica): el nivel son ~1000 mV y el interés está en
+      unas decenas de µV. Un eje absoluto gasta seis dígitos en repetir el mismo
+      número y deja la variación aplastada contra la resolución de las etiquetas.
+      Se grafica la desviación en µV respecto de la media y la media va al
+      subtítulo, en mV: es como se lee un instrumento real.
+    * **Movido** (se tocó un IDAC o una ganancia): ahí el nivel ES el dato, y
+      restarle la media escondería justamente el salto que se quiere ver.
+      Entonces el eje va absoluto, en mV.
     """
     fig = _figure(8.0, 4.0)
     ax = fig.add_subplot(111)
     nombre = TAP_NAMES[ch] if 0 <= ch < len(TAP_NAMES) else f"ch{ch}"
-    _style(ax, titulo or f"Monitor del tap ch{ch} ({nombre})", "mV respecto de Vref")
 
     if not samples:
+        _style(ax, titulo or f"Monitor del tap ch{ch} ({nombre})", "")
         ax.text(0.5, 0.5, "sin muestras", transform=ax.transAxes, ha="center",
                 va="center", color=MUTED, fontsize=11)
         ax.set_xticks([])
         return fig
 
     t = np.array([s.t_ms for s in samples], dtype=float) / 1000.0
-    y = np.array([s.mean_uv for s in samples], dtype=float) / 1000.0
-    ax.plot(t, y, color=SERIES_1, linewidth=2.0, solid_capstyle="round")
-    ax.set_xlabel("segundos desde el arranque del monitor", color=INK_2, fontsize=9)
+    uv = np.array([s.mean_uv for s in samples], dtype=float)
+    media = float(uv.mean())
+    excursion = float(uv.max() - uv.min())
+    absoluto = excursion >= MONITOR_EJE_ABSOLUTO_UV
 
-    # Etiqueta directa sobre el último punto en vez de un número por muestra.
-    ax.annotate(f"{y[-1]:,.1f} mV".replace(",", " "), xy=(t[-1], y[-1]),
-                xytext=(6, 0), textcoords="offset points", color=INK,
-                fontsize=9, va="center")
-    rango = float(y.max() - y.min())
+    if absoluto:
+        y = uv / 1000.0
+        eje = "mV respecto de Vref"
+    else:
+        y = uv - media
+        eje = f"µV alrededor de {fmt_mv(media)}"
+
+    _style(ax, titulo or f"Monitor del tap ch{ch} ({nombre})", eje)
+    ax.plot(t, y, color=SERIES_1, linewidth=1.6, solid_capstyle="round")
+    ax.set_xlabel("segundos desde el arranque del monitor", color=INK_2, fontsize=9)
+    if not absoluto:
+        # El cero es la media, no una tensión: se marca para que se lea como
+        # referencia y no se confunda con Vref.
+        ax.axhline(0.0, color=MUTED, linewidth=0.8, linestyle=(0, (4, 4)), zorder=0)
+
+    # Lectura en vivo: el valor actual, grande, en la fila del título. Va fuera
+    # del área de dibujo a propósito: anotado junto al último punto quedaba
+    # cortado contra el borde, y adentro del eje tapaba la traza.
+    fig.text(0.985, 0.945, fmt_mv(float(uv[-1])), ha="right", va="top",
+             color=INK, fontsize=13, fontweight="bold")
+
+    # La excursión también en la unidad que corresponda: 150 076 µV no se lee.
+    exc = f"{excursion:,.0f} µV" if excursion < 1000.0 else f"{excursion / 1000.0:,.1f} mV"
     fig.text(0.02, 0.02,
-             f"{len(samples)} muestras · excursión {rango * 1000:,.0f} µV".replace(",", " "),
+             f"{len(samples)} muestras · excursión {exc} · "
+             f"media {fmt_mv(media)}".replace(",", " "),
              color=MUTED, fontsize=8)
-    fig.subplots_adjust(left=0.11, right=0.93, top=0.88, bottom=0.20)
+    fig.subplots_adjust(left=0.13, right=0.97, top=0.88, bottom=0.20)
     return fig
 
 

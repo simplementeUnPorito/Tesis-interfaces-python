@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import queue
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -55,7 +56,9 @@ from .core import console as con
 from .core import figures
 from .core.checklist import (
     D2_MIN_SLOPE_UV_PLACA,
+    LSB_UV_PLACA,
     STAGE_NAMES,
+    fmt_mv,
     TAP_NAMES,
     ChecklistParser,
     Item,
@@ -88,6 +91,7 @@ class SerialWorker(QThread):
     job_finished = pyqtSignal(str, object)
     job_failed = pyqtSignal(str, str)
     state_changed = pyqtSignal(object)       # (link, sync_armed, hw)
+    mon_sample = pyqtSignal(object)          # lab.MonSample, una por vuelta
 
     def __init__(self, port: str, parent=None) -> None:
         super().__init__(parent)
@@ -241,6 +245,11 @@ class MainWindow(QMainWindow):
         #: Parser que alimentan el replay y las corridas sin placa.
         self.offline_parser = ChecklistParser()
         self._mon_samples: list[MonSample] = []
+        #: Canal y freno de redibujo del monitor en vivo.
+        self._mon_ch = 0
+        self._mon_last_draw = 0.0
+        #: El bucle del monitor corre en el worker; se lo corta con este flag.
+        self._mon_stop = threading.Event()
         self._last_sweep = None
         self._busy = False
 
@@ -520,8 +529,9 @@ class MainWindow(QMainWindow):
 
         nota = QLabel(
             "Estos comandos no necesitan el SYNC armado: miden, no capturan.\n"
-            f"Cada código de IDAC vale {figures and ''}1875 µV en la referencia "
-            "de esta placa."
+            f"Cada código de IDAC vale {LSB_UV_PLACA:.0f} µV en la referencia de "
+            "esta placa, y el código 0 es Vref: los negativos bajan la "
+            "referencia y los positivos la suben."
         )
         nota.setWordWrap(True)
         nota.setStyleSheet(f"color: {figures.MUTED};")
@@ -534,7 +544,7 @@ class MainWindow(QMainWindow):
             gl.addWidget(QLabel(f"{etapa} · {STAGE_NAMES[etapa]}"), etapa, 0)
             sp = QSpinBox()
             sp.setRange(-255, 255)
-            sp.setValue(128)
+            sp.setValue(0)          # 0 = Vref, el centro del rango con signo
             self.idac_spins[etapa] = sp
             gl.addWidget(sp, etapa, 1)
             b = QPushButton("Fijar")
@@ -561,14 +571,22 @@ class MainWindow(QMainWindow):
             gf.addRow(cual, cb)
         iv.addWidget(gg)
 
-        gm = QGroupBox("Medir")
-        gmv = QVBoxLayout(gm)
-        fila = QHBoxLayout()
-        fila.addWidget(QLabel("canal:"))
+        # El canal del AMux manda sobre "Medir" Y sobre el osciloscopio, así que
+        # va en su propia caja arriba de las dos. Estaba metido adentro de
+        # "Medir", y desde el osciloscopio no había forma de saber qué canal se
+        # iba a mirar.
+        gc = QGroupBox("Canal del AMux")
+        gcl = QHBoxLayout(gc)
         self.cmb_canal = QComboBox()
         for ch in range(5):
             self.cmb_canal.addItem(f"ch{ch} · {TAP_NAMES[ch]}", ch)
-        fila.addWidget(self.cmb_canal, 1)
+        self.cmb_canal.setCurrentIndex(3)
+        gcl.addWidget(self.cmb_canal, 1)
+        iv.addWidget(gc)
+
+        gm = QGroupBox("Medir")
+        gmv = QVBoxLayout(gm)
+        fila = QHBoxLayout()
         fila.addWidget(QLabel("asentamiento:"))
         self.cmb_settle = QComboBox()
         for i, ms in enumerate(SETTLE_MS):
@@ -602,17 +620,29 @@ class MainWindow(QMainWindow):
         gsl = QGridLayout(gs)
         gsl.addWidget(QLabel("período [ms]"), 0, 0)
         self.spin_periodo = QSpinBox()
-        self.spin_periodo.setRange(0, 5000)
+        # El firmware tarda ~137 ms en cada medida DC, así que pedir menos que
+        # eso no acelera nada: sólo hace creer que se mira más rápido.
+        self.spin_periodo.setRange(140, 5000)
         self.spin_periodo.setValue(200)
+        self.spin_periodo.setToolTip(
+            "El firmware no baja de ~137 ms por muestra: pedir menos no acelera.")
         gsl.addWidget(self.spin_periodo, 0, 1)
         gsl.addWidget(QLabel("muestras"), 1, 0)
         self.spin_n = QSpinBox()
         self.spin_n.setRange(1, 20000)
         self.spin_n.setValue(120)
         gsl.addWidget(self.spin_n, 1, 1)
-        b = QPushButton("Monitorear el canal elegido")
-        b.clicked.connect(self._run_monitor)
-        gsl.addWidget(b, 2, 0, 1, 2)
+        self.btn_mon = QPushButton()
+        self.btn_mon.clicked.connect(self._run_monitor)
+        gsl.addWidget(self.btn_mon, 2, 0, 1, 2)
+        self.btn_mon_stop = QPushButton("Parar")
+        self.btn_mon_stop.setEnabled(False)
+        self.btn_mon_stop.clicked.connect(self._stop_monitor)
+        gsl.addWidget(self.btn_mon_stop, 3, 0, 1, 2)
+        # El texto del botón nombra el canal elegido. Es la única forma de que
+        # desde acá se vea qué se va a mirar sin ir a buscarlo a otra caja.
+        self.cmb_canal.currentIndexChanged.connect(self._sync_mon_button)
+        self._sync_mon_button()
         iv.addWidget(gs)
 
         gb = QGroupBox("Barrido de un IDAC")
@@ -712,6 +742,7 @@ class MainWindow(QMainWindow):
         self.worker.job_finished.connect(lambda n, r: self._set_busy(False))
         self.worker.job_failed.connect(self._on_job_failed)
         self.worker.state_changed.connect(self._on_state)
+        self.worker.mon_sample.connect(self._on_mon_sample)
         self.worker.start()
         self.btn_connect.setText("Desconectar")
         self.statusBar().showMessage(f"Abriendo {puerto}… (abrir resetea el ESP)")
@@ -724,6 +755,12 @@ class MainWindow(QMainWindow):
 
     def _on_job_failed(self, nombre: str, error: str) -> None:
         self._set_busy(False)
+        if nombre == "monitor":
+            # Sin esto el botón queda deshabilitado para siempre y el monitor
+            # no se puede volver a arrancar sin reiniciar la ventana.
+            self.btn_mon.setEnabled(True)
+            self.btn_mon_stop.setEnabled(False)
+            self._mon_stop.clear()
         self.statusBar().showMessage(f"{nombre}: {error}")
         self._lab_print(f"error en {nombre}: {error}")
 
@@ -778,18 +815,63 @@ class MainWindow(QMainWindow):
             "1,47 s: no hace falta acertar ningún momento, con repetir alcanza.")
         self._job("D7", lambda s: s.tap(repeat=n), self._on_taps_result)
 
+    def _sync_mon_button(self) -> None:
+        ch = self.cmb_canal.currentData()
+        if ch is None:
+            return
+        self.btn_mon.setText(f"Monitorear ch{ch} · {TAP_NAMES[ch]}")
+
+    def _stop_monitor(self) -> None:
+        """Corta el barrido de muestras del monitor desde la GUI.
+
+        El bucle corre en el hilo del worker, así que no se lo puede
+        interrumpir: se le deja un flag que él mira entre muestra y muestra.
+        """
+        self._mon_stop.set()
+        self._lab_print("monitor: parando…")
+
     def _run_monitor(self) -> None:
         ch = self.cmb_canal.currentData()
         periodo = self.spin_periodo.value()
         n = self.spin_n.value()
         self._mon_samples = []
+        self._mon_ch = ch
+        self._mon_last_draw = 0.0
+        self._mon_stop.clear()
 
         def fn(s: Session):
-            return self.worker.lab.monitor(ch, periodo, n)
+            # on_sample dibuja mientras corre: con 120 muestras cada 200 ms son
+            # 24 s, y esperar a que termine para recién ver algo no es un
+            # osciloscopio, es un informe tardío.
+            return self.worker.lab.monitor(
+                ch, periodo, n,
+                on_sample=self.worker.mon_sample.emit,
+                stop=self._mon_stop.is_set)
 
+        self.btn_mon.setEnabled(False)
+        self.btn_mon_stop.setEnabled(True)
         self._lab_print(f"monitor del ch{ch} ({TAP_NAMES[ch]}): {n} muestras "
                         f"cada ~{periodo} ms")
         self._job("monitor", fn, lambda r: self._on_monitor(r, ch))
+
+    def _on_mon_sample(self, m: Any) -> None:
+        """Una muestra recién llegada: se acumula y se redibuja con freno.
+
+        Redibujar una figura de matplotlib por muestra satura la GUI cuando el
+        período es corto. Se redibuja como mucho cuatro veces por segundo, y
+        siempre la primera, para que se vea que arrancó.
+        """
+        if not isinstance(m, MonSample):
+            return
+        self._mon_samples.append(m)
+        ahora = time.monotonic()
+        if len(self._mon_samples) > 1 and ahora - self._mon_last_draw < 0.25:
+            return
+        self._mon_last_draw = ahora
+        # Sin `titulo`: el título por defecto nombra el canal, que es lo que hay
+        # que ver; la cantidad de muestras ya va en el pie de la figura.
+        self.lab_plot.show_figure(
+            figures.fig_monitor(self._mon_samples, ch=self._mon_ch))
 
     def _run_sweep(self) -> None:
         etapa = self.cmb_sweep_stage.currentData()
@@ -838,16 +920,18 @@ class MainWindow(QMainWindow):
             self._lab_print("DC: sin respuesta del PSoC")
             return
         self._lab_print(f"DC ch{pt.ch} {TAP_NAMES[pt.ch]:<8} "
-                        f"{pt.mean_uv / 1000.0:10.3f} mV   pp {pt.pp_uv} uV   "
+                        f"{fmt_mv(pt.mean_uv):>14}   pp {pt.pp_uv} uV   "
                         f"({SETTLE_MS[pt.settle_sel]} ms)")
 
     def _on_ac(self, pt: Any) -> None:
         if pt is None:
             self._lab_print("AC: sin respuesta del PSoC")
             return
+        # La media lleva signo porque es un nivel; RMS, pp y el tono de 50 Hz son
+        # magnitudes y no pueden ser negativos, así que van en µV a secas.
         self._lab_print(f"AC ch{pt.ch} {TAP_NAMES[pt.ch]:<8} media "
-                        f"{pt.mean_uv} uV  RMS {pt.rms_uv} uV  pp {pt.pp_uv} uV  "
-                        f"50 Hz {pt.hz50_uv} uV")
+                        f"{fmt_mv(pt.mean_uv)}  RMS {pt.rms_uv} uV  "
+                        f"pp {pt.pp_uv} uV  50 Hz {pt.hz50_uv} uV")
 
     def _on_taps(self, puntos: Any) -> None:
         if not isinstance(puntos, dict):
@@ -857,13 +941,29 @@ class MainWindow(QMainWindow):
             self._on_dc(puntos[ch])
 
     def _on_monitor(self, muestras: Any, ch: int) -> None:
+        self.btn_mon.setEnabled(True)
+        self.btn_mon_stop.setEnabled(False)
+        parado = self._mon_stop.is_set()
+        self._mon_stop.clear()
+        # Si se paró a mano, `monitor()` devuelve lo que alcanzó a juntar; si
+        # eso viniera vacío igual sirve lo que ya se dibujó en vivo.
+        muestras = muestras or self._mon_samples
         if not muestras:
             self._lab_print("monitor: sin muestras")
             return
-        self._mon_samples = muestras
+        self._mon_samples = list(muestras)
         vals = [m.mean_uv for m in muestras]
-        self._lab_print(f"monitor: {len(muestras)} muestras, "
-                        f"excursión {max(vals) - min(vals)} uV")
+        media = sum(vals) / len(vals)
+        # Cadencia REAL, no la pedida: el firmware tarda ~137 ms por muestra y
+        # no baja de ahí por más que se le pida un período de 1 ms. Informarla
+        # evita creer que se está mirando algo más rápido de lo que es.
+        span = muestras[-1].t_ms - muestras[0].t_ms
+        cadencia = (span / (len(muestras) - 1)) if len(muestras) > 1 else 0
+        self._lab_print(f"monitor: {len(muestras)} muestras"
+                        f"{' (parado a mano)' if parado else ''}, "
+                        f"media {fmt_mv(media)}, "
+                        f"excursión {max(vals) - min(vals)} uV, "
+                        f"{cadencia:.0f} ms reales por muestra")
         self.lab_plot.show_figure(figures.fig_monitor(muestras, ch=ch))
 
     def _on_sweep(self, sw: Any) -> None:
@@ -1130,6 +1230,30 @@ def _smoke() -> int:
     check("figura: barrido", win.lab_plot._figure is not None)
     check("barrido: pendiente ajustada",
           abs(sw.slope_uv_per_code(3) - 1240.0) < 1.0)
+
+    # Osciloscopio en vivo. Lo que se comprueba es lo que se rompió: que el
+    # canal se vea desde el propio botón, y que cada muestra dibuje sin esperar
+    # a que termine la corrida entera.
+    win.cmb_canal.setCurrentIndex(1)
+    check("el boton del monitor nombra el canal",
+          "ch1" in win.btn_mon.text() and TAP_NAMES[1] in win.btn_mon.text())
+    win._mon_samples = []
+    win._mon_ch = 3
+    win._mon_last_draw = 0.0
+    win.lab_plot.show_message("sin datos")
+    win._on_mon_sample(muestras[0])
+    check("la primera muestra ya dibuja",
+          win.lab_plot._figure is not None and len(win._mon_samples) == 1)
+    for m in muestras[1:6]:
+        win._on_mon_sample(m)
+    check("las muestras se acumulan", len(win._mon_samples) == 6)
+    win._mon_stop.clear()
+    win._stop_monitor()
+    check("Parar levanta el flag que mira el worker", win._mon_stop.is_set())
+    win._on_monitor([], 3)
+    check("al terminar se puede volver a arrancar",
+          win.btn_mon.isEnabled() and not win.btn_mon_stop.isEnabled()
+          and not win._mon_stop.is_set())
 
     check("add_tab disponible", callable(getattr(win, "add_tab", None)))
     check("las cinco pestañas", win.tabs.count() == 5)

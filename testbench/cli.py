@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 from .core import console as con
-from .core.checklist import ChecklistParser, evaluate
+from .core.checklist import ChecklistParser, evaluate, fmt_mv
 from .core.session import GROUPS, INTERACTIVE, Session
 
 # --------------------------------------------------------------------------
@@ -324,7 +324,7 @@ def _print_dc(pt) -> None:
         return
     estado = "ok" if pt.ok else color("ERROR", "FAIL")
     print(f"  ch{pt.ch} {describe_tap(pt.ch):<9} "
-          f"{pt.mean_uv:>10,} uV   pp {pt.pp_uv:>8,} uV   "
+          f"{fmt_mv(pt.mean_uv):>14}   pp {pt.pp_uv:>8,} uV   "
           f"(asentamiento {SETTLE_MS[pt.settle_sel]} ms)  {estado}".replace(",", " "))
 
 
@@ -364,7 +364,7 @@ def cmd_ac(args) -> int:
             return 1
         print(color(f"Medicion AC del tap ch{pt.ch} ({describe_tap(pt.ch)})", "bold"),
               f"sobre {AC_SAMPLES[pt.n_sel]} muestras")
-        print(f"  media {pt.mean_uv:>10,} uV".replace(",", " "))
+        print(f"  media {fmt_mv(pt.mean_uv):>14}")
         print(f"  RMS   {pt.rms_uv:>10,} uV".replace(",", " "))
         print(f"  pp    {pt.pp_uv:>10,} uV".replace(",", " "))
         print(f"  50 Hz {pt.hz50_uv:>10,} uV".replace(",", " "))
@@ -422,7 +422,7 @@ def cmd_mon(args) -> int:
         return cortar["si"]
 
     def on_sample(m) -> None:
-        print(f"  {m.t_ms / 1000.0:7.2f} s   {m.mean_uv / 1000.0:10.3f} mV   "
+        print(f"  {m.t_ms / 1000.0:7.2f} s   {fmt_mv(m.mean_uv):>14}   "
               f"pp {m.pp_uv:>7,} uV".replace(",", " "))
 
     try:
@@ -692,7 +692,7 @@ def cmd_consola(args) -> int:
                     lab = Lab(sess)
                     if cmd == "taps":
                         for ch, pt in sorted(lab.read_all_taps().items()):
-                            print(f"  ch{ch}  {pt.mean_uv / 1000.0:10.3f} mV  "
+                            print(f"  ch{ch}  {fmt_mv(pt.mean_uv):>14}  "
                                   f"pp {pt.pp_uv} uV")
                     elif cmd == "mon" and resto:
                         canal = int(resto[0])
@@ -701,7 +701,7 @@ def cmd_consola(args) -> int:
                         lab.monitor(canal, periodo, n,
                                     on_sample=lambda m: print(
                                         f"  {m.t_ms / 1000.0:7.2f} s "
-                                        f"{m.mean_uv / 1000.0:10.3f} mV"))
+                                        f"{fmt_mv(m.mean_uv):>14}"))
                     elif cmd == "sweep" and len(resto) >= 4:
                         sw = lab.sweep(int(resto[0]), int(resto[1]), int(resto[2]),
                                        int(resto[3]),
