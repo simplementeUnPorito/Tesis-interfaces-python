@@ -250,6 +250,10 @@ class MainWindow(QMainWindow):
         self._mon_last_draw = 0.0
         #: El bucle del monitor corre en el worker; se lo corta con este flag.
         self._mon_stop = threading.Event()
+        #: A qué panel van las muestras: "scope" o "lab". Hay un solo motor de
+        #: monitor porque la consola del firmware es una sola.
+        self._mon_target = "lab"
+        self._scope_running = False
         self._last_sweep = None
         self._busy = False
 
@@ -262,6 +266,10 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         vbox.addWidget(self.tabs, 1)
 
+        # Primera, y a propósito: mirar un tap dibujarse es lo que más se hace
+        # en el banco, y estaba enterrado adentro de Experimentos detrás de
+        # elegir cuántas muestras. Acá se elige el canal y se aprieta Graficar.
+        self.tabs.addTab(self._build_scope_tab(), "Osciloscopio")
         self.tabs.addTab(self._build_actions_tab(), "Acciones")
         self.tabs.addTab(self._build_checklist_tab(), "Checklist")
         self.tabs.addTab(self._build_console_tab(), "Consola")
@@ -327,6 +335,116 @@ class MainWindow(QMainWindow):
                 if self.port_combo.itemData(i) == preferido:
                     self.port_combo.setCurrentIndex(i)
                     break
+
+    # -- pestaña Osciloscopio -----------------------------------------------
+    def _build_scope_tab(self) -> QWidget:
+        """Un tap dibujándose en vivo, y nada más.
+
+        Corre CONTINUO: se aprieta Graficar y sigue hasta que se para. La otra
+        forma —pedir N muestras y que termine— no es un osciloscopio, y era lo
+        único que había.
+        """
+        w = QWidget()
+        v = QVBoxLayout(w)
+
+        barra = QHBoxLayout()
+        barra.addWidget(QLabel("Canal:"))
+        self.scope_canal = QComboBox()
+        for ch in range(5):
+            self.scope_canal.addItem(f"ch{ch} · {TAP_NAMES[ch]}", ch)
+        self.scope_canal.setMinimumWidth(170)
+        barra.addWidget(self.scope_canal)
+
+        barra.addSpacing(12)
+        barra.addWidget(QLabel("cada"))
+        self.scope_periodo = QSpinBox()
+        self.scope_periodo.setRange(140, 5000)
+        self.scope_periodo.setValue(200)
+        self.scope_periodo.setSuffix(" ms")
+        self.scope_periodo.setToolTip(
+            "El firmware no baja de ~137 ms por medida: pedir menos no acelera.")
+        barra.addWidget(self.scope_periodo)
+
+        barra.addWidget(QLabel("ventana"))
+        self.scope_ventana = QSpinBox()
+        self.scope_ventana.setRange(10, 3600)
+        self.scope_ventana.setValue(60)
+        self.scope_ventana.setSuffix(" s")
+        self.scope_ventana.setToolTip(
+            "Cuánto pasado se muestra. Lo anterior se sigue guardando para el "
+            "botón de exportar.")
+        barra.addWidget(self.scope_ventana)
+
+        barra.addSpacing(12)
+        self.btn_scope = QPushButton("▶  Graficar")
+        self.btn_scope.setMinimumHeight(34)
+        self.btn_scope.setMinimumWidth(150)
+        self.btn_scope.clicked.connect(self._toggle_scope)
+        barra.addWidget(self.btn_scope)
+
+        b = QPushButton("Guardar PNG")
+        b.clicked.connect(lambda: self.scope_plot.save(self))
+        barra.addWidget(b)
+        barra.addStretch(1)
+        v.addLayout(barra)
+
+        self.scope_plot = FigurePane()
+        self.scope_plot.show_message(
+            "Elegí un canal y apretá Graficar.\n"
+            "Si el botón está gris, todavía no hay placa conectada: "
+            "usá Conectar arriba.")
+        v.addWidget(self.scope_plot, 1)
+        return w
+
+    def _toggle_scope(self) -> None:
+        if self._scope_running:
+            self._mon_stop.set()
+            self.btn_scope.setText("▶  Graficar")
+            self.btn_scope.setEnabled(False)   # hasta que el worker confirme
+            return
+        if self.worker is None or self.worker.lab is None:
+            QMessageBox.information(
+                self, "Osciloscopio",
+                "Primero hay que conectar la placa con el botón Conectar.")
+            return
+        if self._busy:
+            # Se comprueba ACÁ y no después: _job() también rebota si hay algo
+            # corriendo, pero para entonces el botón ya diría "Parar" sin que
+            # haya nada que parar.
+            QMessageBox.information(
+                self, "Ocupado",
+                "Hay otro trabajo en curso. El firmware tiene una sola consola.")
+            return
+
+        ch = self.scope_canal.currentData()
+        periodo = self.scope_periodo.value()
+        self._scope_running = True
+        self._mon_target = "scope"
+        self._mon_samples = []
+        self._mon_ch = ch
+        self._mon_last_draw = 0.0
+        self._mon_stop.clear()
+        self.btn_scope.setText("■  Parar")
+        self.scope_plot.show_message("esperando la primera muestra…")
+
+        def fn(s: Session):
+            # n grande a propósito: el lazo lo corta el botón, no un contador.
+            # El firmware acepta hasta 100000, que a 140 ms son cuatro horas.
+            return self.worker.lab.monitor(
+                ch, periodo, 100000,
+                on_sample=self.worker.mon_sample.emit,
+                stop=self._mon_stop.is_set)
+
+        self._job("monitor", fn, self._on_scope_done)
+
+    def _on_scope_done(self, muestras: Any) -> None:
+        self._scope_running = False
+        self._mon_target = "lab"
+        self._mon_stop.clear()
+        self.btn_scope.setEnabled(True)
+        self.btn_scope.setText("▶  Graficar")
+        n = len(muestras) if muestras else len(self._mon_samples)
+        self.statusBar().showMessage(f"osciloscopio parado · {n} muestras")
 
     # -- pestaña Acciones ---------------------------------------------------
     def _build_actions_tab(self) -> QWidget:
@@ -756,10 +874,14 @@ class MainWindow(QMainWindow):
     def _on_job_failed(self, nombre: str, error: str) -> None:
         self._set_busy(False)
         if nombre == "monitor":
-            # Sin esto el botón queda deshabilitado para siempre y el monitor
-            # no se puede volver a arrancar sin reiniciar la ventana.
+            # Sin esto los botones quedan deshabilitados para siempre y no se
+            # puede volver a arrancar sin reiniciar la ventana.
             self.btn_mon.setEnabled(True)
             self.btn_mon_stop.setEnabled(False)
+            self.btn_scope.setEnabled(True)
+            self.btn_scope.setText("▶  Graficar")
+            self._scope_running = False
+            self._mon_target = "lab"
             self._mon_stop.clear()
         self.statusBar().showMessage(f"{nombre}: {error}")
         self._lab_print(f"error en {nombre}: {error}")
@@ -838,6 +960,7 @@ class MainWindow(QMainWindow):
         self._mon_ch = ch
         self._mon_last_draw = 0.0
         self._mon_stop.clear()
+        self._mon_target = "lab"
 
         def fn(s: Session):
             # on_sample dibuja mientras corre: con 120 muestras cada 200 ms son
@@ -868,10 +991,19 @@ class MainWindow(QMainWindow):
         if len(self._mon_samples) > 1 and ahora - self._mon_last_draw < 0.25:
             return
         self._mon_last_draw = ahora
+
+        muestras = self._mon_samples
+        if self._mon_target == "scope":
+            # Ventana deslizante: en continuo, dibujar todo desde el arranque
+            # aplasta el presente contra el borde derecho. Lo viejo NO se tira,
+            # queda en _mon_samples para exportar.
+            corte = m.t_ms - self.scope_ventana.value() * 1000
+            muestras = [s for s in self._mon_samples if s.t_ms >= corte]
         # Sin `titulo`: el título por defecto nombra el canal, que es lo que hay
         # que ver; la cantidad de muestras ya va en el pie de la figura.
-        self.lab_plot.show_figure(
-            figures.fig_monitor(self._mon_samples, ch=self._mon_ch))
+        fig = figures.fig_monitor(muestras, ch=self._mon_ch)
+        destino = self.scope_plot if self._mon_target == "scope" else self.lab_plot
+        destino.show_figure(fig)
 
     def _run_sweep(self) -> None:
         etapa = self.cmb_sweep_stage.currentData()
@@ -1255,8 +1387,30 @@ def _smoke() -> int:
           win.btn_mon.isEnabled() and not win.btn_mon_stop.isEnabled()
           and not win._mon_stop.is_set())
 
+    # Osciloscopio: la pestaña que el usuario ve primero.
+    check("Osciloscopio es la primera pestaña", win.tabs.tabText(0) == "Osciloscopio")
+    check("arranca en Graficar", "Graficar" in win.btn_scope.text())
+    win._mon_target = "scope"
+    win._mon_ch = 0
+    win._mon_samples = []
+    win._mon_last_draw = 0.0
+    win.scope_ventana.setValue(10)
+    # Muestras que abarcan 40 s con ventana de 10 s: sólo entran las últimas.
+    largas = [MonSample(i, i * 1000, 0, 1001014, 286, True) for i in range(40)]
+    for m in largas:
+        win._mon_last_draw = 0.0     # forzar redibujo en cada una
+        win._on_mon_sample(m)
+    check("la muestra va al panel del osciloscopio",
+          win.scope_plot._figure is not None)
+    check("la ventana deslizante no tira nada", len(win._mon_samples) == 40)
+    win._scope_running = True
+    win._on_scope_done([])
+    check("al parar vuelve a Graficar",
+          not win._scope_running and "Graficar" in win.btn_scope.text()
+          and win.btn_scope.isEnabled() and win._mon_target == "lab")
+
     check("add_tab disponible", callable(getattr(win, "add_tab", None)))
-    check("las cinco pestañas", win.tabs.count() == 5)
+    check("las seis pestañas", win.tabs.count() == 6)
     check("sin conexion no crashea", win._current_parser() is win.offline_parser)
 
     win.close()
