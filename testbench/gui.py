@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -92,6 +93,7 @@ class SerialWorker(QThread):
     job_failed = pyqtSignal(str, str)
     state_changed = pyqtSignal(object)       # (link, sync_armed, hw)
     mon_sample = pyqtSignal(object)          # lab.MonSample, una por vuelta
+    mon_mark = pyqtSignal(object)            # (segundos, etiqueta) del cambio
 
     def __init__(self, port: str, parent=None) -> None:
         super().__init__(parent)
@@ -254,6 +256,10 @@ class MainWindow(QMainWindow):
         #: monitor porque la consola del firmware es una sola.
         self._mon_target = "lab"
         self._scope_running = False
+        #: Cambios pedidos desde la GUI mientras el osciloscopio corre.
+        self._scope_actions: queue.Queue = queue.Queue()
+        #: (segundos, etiqueta) de cada cambio aplicado, para marcar la traza.
+        self._mon_marcas: list[tuple[float, str]] = []
         self._last_sweep = None
         self._busy = False
 
@@ -385,16 +391,121 @@ class MainWindow(QMainWindow):
         b = QPushButton("Guardar PNG")
         b.clicked.connect(lambda: self.scope_plot.save(self))
         barra.addWidget(b)
+
+        self.btn_scope_reset = QPushButton("Reiniciar PSoC")
+        self.btn_scope_reset.setToolTip(
+            "ToggleReset por el KitProg. Sirve cuando el enlace figura ARRIBA "
+            "—los pings los manda el PSoC— pero ninguna medida contesta: eso es "
+            "la UART de bajada desincronizada, y esto la recupera.")
+        self.btn_scope_reset.clicked.connect(self._reset_psoc)
+        barra.addWidget(self.btn_scope_reset)
         barra.addStretch(1)
         v.addLayout(barra)
 
+        # Segunda fila: mover la cadena SIN salir de acá. Es el uso real del
+        # monitor —ver el punto de trabajo moverse mientras se toca una
+        # referencia o una ganancia— y tenerlo en otra pestaña lo hacía inútil.
+        mandos = QHBoxLayout()
+        mandos.addWidget(QLabel("IDAC:"))
+        self.cmb_scope_stage = QComboBox()
+        for e in range(4):
+            self.cmb_scope_stage.addItem(f"{e} · {STAGE_NAMES[e]}", e)
+        mandos.addWidget(self.cmb_scope_stage)
+        self.spin_scope_idac = QSpinBox()
+        self.spin_scope_idac.setRange(-255, 255)
+        self.spin_scope_idac.setValue(0)
+        self.spin_scope_idac.setToolTip(
+            f"0 = Vref. Cada código vale {LSB_UV_PLACA:.0f} µV en la referencia.")
+        mandos.addWidget(self.spin_scope_idac)
+        self.btn_scope_fijar = QPushButton("Fijar")
+        self.btn_scope_fijar.clicked.connect(self._scope_set_idac)
+        mandos.addWidget(self.btn_scope_fijar)
+
+        mandos.addSpacing(16)
+        for cual, etiqueta in (("pga", "PGA"), ("pgaout", "PGAout")):
+            mandos.addWidget(QLabel(f"{etiqueta}:"))
+            cb = QComboBox()
+            for i, g in enumerate(GAIN_CODES):
+                cb.addItem(f"{g}x", i)
+            cb.activated.connect(
+                lambda idx, C=cual: self._scope_set_gain(C, idx))
+            setattr(self, f"cmb_scope_{cual}", cb)
+            mandos.addWidget(cb)
+        mandos.addStretch(1)
+        v.addLayout(mandos)
+
         self.scope_plot = FigurePane()
-        self.scope_plot.show_message(
-            "Elegí un canal y apretá Graficar.\n"
-            "Si el botón está gris, todavía no hay placa conectada: "
-            "usá Conectar arriba.")
         v.addWidget(self.scope_plot, 1)
+        self._set_scope_enabled(False)
         return w
+
+    def _reset_psoc(self) -> None:
+        """ToggleReset del PSoC por el KitProg, sin salir de la ventana.
+
+        Se recurre a esto cuando el enlace figura ARRIBA pero ninguna medida
+        contesta. No es contradictorio: los pings los origina el PSoC y suben
+        por I2C, mientras que los comandos bajan por UART. Si esa UART se
+        desincroniza —abrir el puerto resetea el ESP, y si eso cae en mitad de
+        un byte el PSoC queda esperando el resto de una trama que no llega— los
+        pings siguen llegando y las medidas no. El reset la resincroniza.
+        """
+        if self._scope_running:
+            QMessageBox.information(self, "Reiniciar PSoC",
+                                    "Primero pará el osciloscopio.")
+            return
+        script = (Path(__file__).resolve().parents[3]
+                  / "firmware" / "psoc" / "reset_psoc.ps1")
+        if not script.exists():
+            QMessageBox.warning(self, "Reiniciar PSoC",
+                                f"No encontré el script:\n{script}")
+            return
+        self.statusBar().showMessage("reiniciando el PSoC por el KitProg…")
+        QApplication.processEvents()
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", str(script)],
+                capture_output=True, text=True, timeout=120)
+        except Exception as exc:
+            QMessageBox.warning(self, "Reiniciar PSoC", f"{type(exc).__name__}: {exc}")
+            return
+        if r.returncode != 0:
+            QMessageBox.warning(
+                self, "Reiniciar PSoC",
+                "El KitProg no contestó. ¿Está enchufado?\n\n"
+                + (r.stderr or r.stdout)[-600:])
+            return
+        QMessageBox.information(
+            self, "Reiniciar PSoC",
+            "PSoC reiniciado. Esperá unos segundos y volvé a graficar.")
+        self.statusBar().showMessage("PSoC reiniciado")
+
+    # -- mandos del osciloscopio -------------------------------------------
+    def _scope_encolar(self, etiqueta: str, accion: Callable[[Lab], Any]) -> None:
+        """Pide un cambio en la cadena mientras el osciloscopio corre.
+
+        El firmware corta su lazo ``mon`` apenas le llega un byte, así que no se
+        le puede mandar un comando sin pararlo. En vez de prohibirlo, el motor
+        del osciloscopio corta el tramo, aplica lo encolado y vuelve a arrancar
+        empalmando el tiempo: se ve el escalón, con una marca donde se tocó.
+
+        Con el osciloscopio parado se ejecuta como un trabajo suelto y listo.
+        """
+        if self._scope_running:
+            self._scope_actions.put((etiqueta, accion))
+            self.statusBar().showMessage(f"{etiqueta}: aplicando…")
+            return
+        self._job(etiqueta, lambda s: accion(self.worker.lab), None)
+
+    def _scope_set_idac(self) -> None:
+        etapa = self.cmb_scope_stage.currentData()
+        code = self.spin_scope_idac.value()
+        self._scope_encolar(f"{STAGE_NAMES[etapa]}={code:+d}",
+                            lambda lab, E=etapa, C=code: lab.set_idac(E, C))
+
+    def _scope_set_gain(self, cual: str, idx: int) -> None:
+        self._scope_encolar(f"{cual} {GAIN_CODES[idx]}x",
+                            lambda lab, C=cual, I=idx: lab.set_gain(C, I))
 
     def _toggle_scope(self) -> None:
         if self._scope_running:
@@ -421,21 +532,67 @@ class MainWindow(QMainWindow):
         self._scope_running = True
         self._mon_target = "scope"
         self._mon_samples = []
+        self._mon_marcas = []
         self._mon_ch = ch
         self._mon_last_draw = 0.0
         self._mon_stop.clear()
+        while not self._scope_actions.empty():       # restos de una corrida previa
+            self._scope_actions.get_nowait()
         self.btn_scope.setText("■  Parar")
         self.scope_plot.show_message("esperando la primera muestra…")
 
+        emitir = self.worker.mon_sample.emit
+        marcar = self.worker.mon_mark.emit
+
         def fn(s: Session):
-            # n grande a propósito: el lazo lo corta el botón, no un contador.
-            # El firmware acepta hasta 100000, que a 140 ms son cuatro horas.
-            return self.worker.lab.monitor(
-                ch, periodo, 100000,
-                on_sample=self.worker.mon_sample.emit,
-                stop=self._mon_stop.is_set)
+            """Motor del osciloscopio: corre por tramos y empalma el tiempo.
+
+            No se puede mandar un comando sin cortar el ``mon`` del firmware,
+            que rompe su lazo apenas le llega un byte. Entonces el tramo se
+            corta a propósito cuando hay algo encolado, se aplica, y se arranca
+            otro tramo. Como cada ``mon`` reinicia su reloj en cero, se lleva un
+            desplazamiento acumulado para que la traza sea una sola línea de
+            tiempo y no vuelva al origen en cada cambio.
+            """
+            lab = self.worker.lab
+            desplazamiento = 0
+            total: list[MonSample] = []
+
+            def al_llegar(m: MonSample) -> None:
+                corrido = MonSample(m.idx, m.t_ms + desplazamiento, m.ch,
+                                    m.mean_uv, m.pp_uv, m.ok)
+                total.append(corrido)
+                emitir(corrido)
+
+            def cortar() -> bool:
+                # Dos motivos para cortar un tramo: el botón Parar, o que haya
+                # un cambio esperando. El segundo no termina la corrida.
+                return self._mon_stop.is_set() or not self._scope_actions.empty()
+
+            while not self._mon_stop.is_set():
+                tramo = lab.monitor(ch, periodo, 100000,
+                                    on_sample=al_llegar, stop=cortar)
+                if tramo:
+                    desplazamiento += tramo[-1].t_ms + periodo
+                if self._mon_stop.is_set():
+                    break
+                # Aplicar todo lo encolado antes de volver a arrancar.
+                while not self._scope_actions.empty():
+                    etiqueta, accion = self._scope_actions.get_nowait()
+                    try:
+                        accion(lab)
+                    except Exception as exc:            # no tirar la corrida
+                        etiqueta = f"{etiqueta}: {type(exc).__name__}"
+                    marcar((desplazamiento / 1000.0, etiqueta))
+            return total
 
         self._job("monitor", fn, self._on_scope_done)
+
+    def _on_scope_mark(self, marca: Any) -> None:
+        """Una marca de "acá se tocó algo", para leer el escalón."""
+        if isinstance(marca, tuple) and len(marca) == 2:
+            self._mon_marcas.append(marca)
+            self.statusBar().showMessage(f"aplicado: {marca[1]}")
 
     def _on_scope_done(self, muestras: Any) -> None:
         self._scope_running = False
@@ -861,6 +1018,7 @@ class MainWindow(QMainWindow):
         self.worker.job_failed.connect(self._on_job_failed)
         self.worker.state_changed.connect(self._on_state)
         self.worker.mon_sample.connect(self._on_mon_sample)
+        self.worker.mon_mark.connect(self._on_scope_mark)
         self.worker.start()
         self.btn_connect.setText("Desconectar")
         self.statusBar().showMessage(f"Abriendo {puerto}… (abrir resetea el ESP)")
@@ -869,7 +1027,25 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(mensaje)
         if not ok and self.worker is not None:
             self.btn_connect.setText("Conectar")
+        # Abrir el puerto resetea el ESP y hay que esperarle el banner: hasta
+        # 25 s en los que ya se apretó Conectar pero todavía no hay con qué
+        # hablar. Los controles del osciloscopio se habilitan recién ACÁ, que es
+        # cuando el enlace está de verdad. Antes quedaban vivos todo ese rato y
+        # contestaban "primero hay que conectar", que era falso y confundía.
+        self._set_scope_enabled(ok)
         self._set_link(None)
+
+    def _set_scope_enabled(self, listo: bool) -> None:
+        for wdg in (self.btn_scope, self.btn_scope_fijar, self.cmb_scope_pga,
+                    self.cmb_scope_pgaout):
+            wdg.setEnabled(listo)
+        if listo:
+            self.scope_plot.show_message("Elegí un canal y apretá Graficar.")
+        else:
+            self.scope_plot.show_message(
+                "Conectá la placa con el botón Conectar de arriba.\n"
+                "Abrir el puerto resetea el ESP: tarda unos segundos en "
+                "contestar, y los controles se habilitan solos cuando está.")
 
     def _on_job_failed(self, nombre: str, error: str) -> None:
         self._set_busy(False)
@@ -993,7 +1169,9 @@ class MainWindow(QMainWindow):
         self._mon_last_draw = ahora
 
         muestras = self._mon_samples
+        marcas: list[tuple[float, str]] = []
         if self._mon_target == "scope":
+            marcas = self._mon_marcas
             # Ventana deslizante: en continuo, dibujar todo desde el arranque
             # aplasta el presente contra el borde derecho. Lo viejo NO se tira,
             # queda en _mon_samples para exportar.
@@ -1001,7 +1179,7 @@ class MainWindow(QMainWindow):
             muestras = [s for s in self._mon_samples if s.t_ms >= corte]
         # Sin `titulo`: el título por defecto nombra el canal, que es lo que hay
         # que ver; la cantidad de muestras ya va en el pie de la figura.
-        fig = figures.fig_monitor(muestras, ch=self._mon_ch)
+        fig = figures.fig_monitor(muestras, ch=self._mon_ch, marcas=marcas)
         destino = self.scope_plot if self._mon_target == "scope" else self.lab_plot
         destino.show_figure(fig)
 
@@ -1408,6 +1586,38 @@ def _smoke() -> int:
     check("al parar vuelve a Graficar",
           not win._scope_running and "Graficar" in win.btn_scope.text()
           and win.btn_scope.isEnabled() and win._mon_target == "lab")
+
+    # ok=0 NO es una medida de 0 V. Esto es lo que hizo parecer muerta una etapa
+    # sana: siete ceros seguidos dibujados como una línea plana en el origen.
+    muertas = [MonSample(i, i * 200, 1, 0, 0, False) for i in range(7)]
+    f = figures.fig_monitor(muertas, ch=1)
+    check("todo ok=0 no se dibuja como cero", f is not None
+          and any("ninguna conversión" in t.get_text() for t in f.axes[0].texts))
+    mixtas = muertas + [MonSample(i, 2000 + i * 200, 1, 1001014, 286, True)
+                        for i in range(10)]
+    f = figures.fig_monitor(mixtas, ch=1)
+    check("las fallidas se cuentan aparte",
+          any("sin conversión" in t.get_text() for t in f.texts))
+
+    # Los mandos del osciloscopio, y que se encolen en vez de pisar la corrida.
+    check("mandos deshabilitados sin conexión", not win.btn_scope_fijar.isEnabled())
+    win._scope_running = True
+    win.cmb_scope_stage.setCurrentIndex(2)
+    win.spin_scope_idac.setValue(-40)
+    win._scope_set_idac()
+    check("el cambio se encola, no pisa la corrida",
+          win._scope_actions.qsize() == 1)
+    etiqueta, accion = win._scope_actions.get_nowait()
+    check("la etiqueta dice etapa y codigo", etiqueta == "Vref_ADDER=-40")
+    win._mon_marcas = []
+    win._on_scope_mark((12.5, etiqueta))
+    check("la marca queda para la figura", win._mon_marcas == [(12.5, etiqueta)])
+    f = figures.fig_monitor(
+        [MonSample(i, i * 1000, 0, 1001014 + i, 286, True) for i in range(30)],
+        ch=0, marcas=[(12.5, "Vref_ADDER=-40")])
+    check("la marca se dibuja en la traza",
+          any("Vref_ADDER" in t.get_text() for t in f.axes[0].texts))
+    win._scope_running = False
 
     check("add_tab disponible", callable(getattr(win, "add_tab", None)))
     check("las seis pestañas", win.tabs.count() == 6)

@@ -367,7 +367,8 @@ def fig_d7(taps: Sequence[dict]) -> Figure:
 MONITOR_EJE_ABSOLUTO_UV = 20_000.0
 
 
-def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "") -> Figure:
+def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "",
+                marcas: Sequence[tuple[float, str]] = ()) -> Figure:
     """Traza del monitor lento: un tap contra el tiempo.
 
     Cambio en el tiempo, así que va en línea, no en barras. Una sola serie:
@@ -396,8 +397,29 @@ def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "") -> Figure:
         ax.set_xticks([])
         return fig
 
-    t = np.array([s.t_ms for s in samples], dtype=float) / 1000.0
-    uv = np.array([s.mean_uv for s in samples], dtype=float)
+    # Las muestras con ok=0 NO son medidas: el firmware devuelve 0 cuando la
+    # conversión no salió, y sin mirar el flag ese cero se dibuja como una línea
+    # plana en el origen, que es exactamente lo que parece una etapa muerta.
+    # Se sacan de la traza y se cuentan aparte.
+    buenas = [s for s in samples if getattr(s, "ok", True)]
+    fallidas = len(samples) - len(buenas)
+
+    if not buenas:
+        _style(ax, titulo or f"Monitor del tap ch{ch} ({nombre})", "")
+        ax.text(0.5, 0.55, "ninguna conversión salió", transform=ax.transAxes,
+                ha="center", va="center", color=STATUS["FAIL"], fontsize=12,
+                fontweight="bold")
+        ax.text(0.5, 0.40,
+                f"{len(samples)} muestras, todas con ok=0.\nEl PSoC no está "
+                "midiendo: no es la etapa, es el enlace.",
+                transform=ax.transAxes, ha="center", va="center",
+                color=INK_2, fontsize=9)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return fig
+
+    t = np.array([s.t_ms for s in buenas], dtype=float) / 1000.0
+    uv = np.array([s.mean_uv for s in buenas], dtype=float)
     media = float(uv.mean())
     excursion = float(uv.max() - uv.min())
     absoluto = excursion >= MONITOR_EJE_ABSOLUTO_UV
@@ -417,6 +439,18 @@ def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "") -> Figure:
         # referencia y no se confunda con Vref.
         ax.axhline(0.0, color=MUTED, linewidth=0.8, linestyle=(0, (4, 4)), zorder=0)
 
+    # Dónde se tocó un IDAC o una ganancia. Sin esto, en una traza larga no hay
+    # forma de saber si un escalón lo produjo el operador o la placa sola.
+    lo, hi = ax.get_ylim()
+    for t_marca, etiqueta in marcas:
+        if not (t[0] <= t_marca <= t[-1]):
+            continue
+        ax.axvline(t_marca, color=SERIES_2, linewidth=1.0,
+                   linestyle=(0, (3, 3)), zorder=1)
+        ax.text(t_marca, hi, f" {etiqueta}", color=SERIES_2, fontsize=8,
+                rotation=90, ha="left", va="top")
+    ax.set_ylim(lo, hi)
+
     # Lectura en vivo: el valor actual, grande, en la fila del título. Va fuera
     # del área de dibujo a propósito: anotado junto al último punto quedaba
     # cortado contra el borde, y adentro del eje tapaba la traza.
@@ -425,10 +459,11 @@ def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "") -> Figure:
 
     # La excursión también en la unidad que corresponda: 150 076 µV no se lee.
     exc = f"{excursion:,.0f} µV" if excursion < 1000.0 else f"{excursion / 1000.0:,.1f} mV"
-    fig.text(0.02, 0.02,
-             f"{len(samples)} muestras · excursión {exc} · "
-             f"media {fmt_mv(media)}".replace(",", " "),
-             color=MUTED, fontsize=8)
+    pie = (f"{len(buenas)} muestras · excursión {exc} · media {fmt_mv(media)}")
+    if fallidas:
+        pie += f"  ·  {fallidas} sin conversión, no dibujadas"
+    fig.text(0.02, 0.02, pie.replace(",", " "),
+             color=STATUS["WARN"] if fallidas else MUTED, fontsize=8)
     fig.subplots_adjust(left=0.13, right=0.97, top=0.88, bottom=0.20)
     return fig
 
