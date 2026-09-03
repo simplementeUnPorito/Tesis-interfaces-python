@@ -68,8 +68,14 @@ DIVERGING = LinearSegmentedColormap.from_list(
 )
 
 
-def _style(ax: plt.Axes, titulo: str = "", ylabel: str = "") -> None:
-    """Cromo recesivo: la grilla y los ejes no compiten con los datos."""
+def _style(ax: plt.Axes, titulo: str = "", ylabel: str = "",
+           grilla_x: bool = False) -> None:
+    """Cromo recesivo: la grilla y los ejes no compiten con los datos.
+
+    ``grilla_x`` agrega las verticales. Se pide sólo donde el eje X es una
+    magnitud continua que uno quiere leer —el tiempo del monitor, el código en
+    un barrido—: en una categoría no aportan nada y ensucian.
+    """
     ax.set_facecolor(SURFACE)
     for lado in ("top", "right"):
         ax.spines[lado].set_visible(False)
@@ -78,6 +84,13 @@ def _style(ax: plt.Axes, titulo: str = "", ylabel: str = "") -> None:
         ax.spines[lado].set_linewidth(1.0)
     ax.tick_params(colors=MUTED, labelsize=9, length=3, width=0.8)
     ax.yaxis.grid(True, color=GRID, linewidth=0.8)
+    if grilla_x:
+        ax.xaxis.grid(True, color=GRID, linewidth=0.8)
+        # Menor más tenue: da resolución para leer un instante sin convertir el
+        # fondo en un cuadriculado que compita con la traza.
+        ax.minorticks_on()
+        ax.grid(which="minor", color=GRID, linewidth=0.4, alpha=0.55)
+        ax.tick_params(which="minor", length=0)
     ax.set_axisbelow(True)
     if titulo:
         ax.set_title(titulo, color=INK, fontsize=11, loc="left", pad=10)
@@ -431,7 +444,7 @@ def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "",
         y = uv - media
         eje = f"µV alrededor de {fmt_mv(media)}"
 
-    _style(ax, titulo or f"Monitor del tap ch{ch} ({nombre})", eje)
+    _style(ax, titulo or f"Monitor del tap ch{ch} ({nombre})", eje, grilla_x=True)
     ax.plot(t, y, color=SERIES_1, linewidth=1.6, solid_capstyle="round")
     ax.set_xlabel("segundos desde el arranque del monitor", color=INK_2, fontsize=9)
     if not absoluto:
@@ -441,15 +454,18 @@ def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "",
 
     # Dónde se tocó un IDAC o una ganancia. Sin esto, en una traza larga no hay
     # forma de saber si un escalón lo produjo el operador o la placa sola.
-    lo, hi = ax.get_ylim()
     for t_marca, etiqueta in marcas:
         if not (t[0] <= t_marca <= t[-1]):
             continue
         ax.axvline(t_marca, color=SERIES_2, linewidth=1.0,
                    linestyle=(0, (3, 3)), zorder=1)
-        ax.text(t_marca, hi, f" {etiqueta}", color=SERIES_2, fontsize=8,
-                rotation=90, ha="left", va="top")
-    ax.set_ylim(lo, hi)
+        # X en datos, Y en fracción del eje: así la etiqueta no puede salirse
+        # por arriba. Con el tope en coordenadas de dato quedaba cortada contra
+        # el borde de la figura.
+        ax.text(t_marca, 0.985, f"{etiqueta} ",
+                transform=ax.get_xaxis_transform(),
+                color=SERIES_2, fontsize=7.5, rotation=90,
+                ha="right", va="top")
 
     # Lectura en vivo: el valor actual, grande, en la fila del título. Va fuera
     # del área de dibujo a propósito: anotado junto al último punto quedaba

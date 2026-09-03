@@ -94,6 +94,7 @@ class SerialWorker(QThread):
     state_changed = pyqtSignal(object)       # (link, sync_armed, hw)
     mon_sample = pyqtSignal(object)          # lab.MonSample, una por vuelta
     mon_mark = pyqtSignal(object)            # (segundos, etiqueta) del cambio
+    mon_reset = pyqtSignal(int)              # se cambió de canal: traza nueva
 
     def __init__(self, port: str, parent=None) -> None:
         super().__init__(parent)
@@ -256,6 +257,8 @@ class MainWindow(QMainWindow):
         #: monitor porque la consola del firmware es una sola.
         self._mon_target = "lab"
         self._scope_running = False
+        #: Canal pedido desde la GUI; el motor lo relee en cada corte.
+        self._scope_ch = 0
         #: Cambios pedidos desde la GUI mientras el osciloscopio corre.
         self._scope_actions: queue.Queue = queue.Queue()
         #: (segundos, etiqueta) de cada cambio aplicado, para marcar la traza.
@@ -312,6 +315,17 @@ class MainWindow(QMainWindow):
         self.btn_reset.clicked.connect(self._reset_esp)
         h.addWidget(self.btn_reset)
 
+        # Al lado del reset del ESP porque son la misma clase de accion: sacar
+        # de un estado colgado. El del PSoC va por el KitProg, asi que anda
+        # incluso con el puerto del ESP cerrado.
+        self.btn_scope_reset = QPushButton("Reiniciar PSoC")
+        self.btn_scope_reset.setToolTip(
+            "ToggleReset por el KitProg. Sirve cuando el enlace figura ARRIBA "
+            "-los pings los manda el PSoC- pero ninguna medida contesta: eso es "
+            "la UART de bajada desincronizada, y esto la recupera.")
+        self.btn_scope_reset.clicked.connect(self._reset_psoc)
+        h.addWidget(self.btn_scope_reset)
+
         h.addSpacing(16)
         self.lbl_link = QLabel("enlace: ?")
         self.lbl_link.setStyleSheet(f"color: {figures.MUTED}; font-weight: bold;")
@@ -359,6 +373,10 @@ class MainWindow(QMainWindow):
         for ch in range(5):
             self.scope_canal.addItem(f"ch{ch} · {TAP_NAMES[ch]}", ch)
         self.scope_canal.setMinimumWidth(170)
+        # En marcha, cambiar de canal tiene que cambiar de canal. Antes el canal
+        # se fijaba al arrancar y quedaba capturado en el motor: se elegía otro,
+        # no pasaba nada, y el mux parecía trabado. No lo estaba.
+        self.scope_canal.currentIndexChanged.connect(self._scope_cambiar_canal)
         barra.addWidget(self.scope_canal)
 
         barra.addSpacing(12)
@@ -392,45 +410,47 @@ class MainWindow(QMainWindow):
         b.clicked.connect(lambda: self.scope_plot.save(self))
         barra.addWidget(b)
 
-        self.btn_scope_reset = QPushButton("Reiniciar PSoC")
-        self.btn_scope_reset.setToolTip(
-            "ToggleReset por el KitProg. Sirve cuando el enlace figura ARRIBA "
-            "—los pings los manda el PSoC— pero ninguna medida contesta: eso es "
-            "la UART de bajada desincronizada, y esto la recupera.")
-        self.btn_scope_reset.clicked.connect(self._reset_psoc)
-        barra.addWidget(self.btn_scope_reset)
-        barra.addStretch(1)
-        v.addLayout(barra)
-
-        # Segunda fila: mover la cadena SIN salir de acá. Es el uso real del
-        # monitor —ver el punto de trabajo moverse mientras se toca una
-        # referencia o una ganancia— y tenerlo en otra pestaña lo hacía inútil.
-        mandos = QHBoxLayout()
-        mandos.addWidget(QLabel("IDAC:"))
-        self.cmb_scope_stage = QComboBox()
-        for e in range(4):
-            self.cmb_scope_stage.addItem(f"{e} · {STAGE_NAMES[e]}", e)
-        mandos.addWidget(self.cmb_scope_stage)
-        self.spin_scope_idac = QSpinBox()
-        self.spin_scope_idac.setRange(-255, 255)
-        self.spin_scope_idac.setValue(0)
-        self.spin_scope_idac.setToolTip(
-            f"0 = Vref. Cada código vale {LSB_UV_PLACA:.0f} µV en la referencia.")
-        mandos.addWidget(self.spin_scope_idac)
-        self.btn_scope_fijar = QPushButton("Fijar")
-        self.btn_scope_fijar.clicked.connect(self._scope_set_idac)
-        mandos.addWidget(self.btn_scope_fijar)
-
-        mandos.addSpacing(16)
+        barra.addSpacing(12)
         for cual, etiqueta in (("pga", "PGA"), ("pgaout", "PGAout")):
-            mandos.addWidget(QLabel(f"{etiqueta}:"))
+            barra.addWidget(QLabel(f"{etiqueta}:"))
             cb = QComboBox()
             for i, g in enumerate(GAIN_CODES):
                 cb.addItem(f"{g}x", i)
             cb.activated.connect(
                 lambda idx, C=cual: self._scope_set_gain(C, idx))
             setattr(self, f"cmb_scope_{cual}", cb)
-            mandos.addWidget(cb)
+            barra.addWidget(cb)
+        barra.addStretch(1)
+        v.addLayout(barra)
+
+        # Segunda fila: LAS CUATRO referencias a la vista. Con un selector de
+        # etapa había que acordarse de cuál estaba elegida y no se veía en qué
+        # quedó cada una: son cuatro números, entran todos.
+        mandos = QHBoxLayout()
+        mandos.addWidget(QLabel("IDAC:"))
+        self.spin_scope_idac: dict[int, QSpinBox] = {}
+        self.btn_scope_idac: dict[int, QPushButton] = {}
+        for etapa in range(4):
+            mandos.addWidget(QLabel(f"{etapa}·{STAGE_NAMES[etapa]}"))
+            sp = QSpinBox()
+            sp.setRange(-255, 255)
+            sp.setValue(0)
+            sp.setMinimumWidth(70)
+            sp.setToolTip(
+                f"0 = Vref. Cada código vale {LSB_UV_PLACA:.0f} µV en la "
+                "referencia; Enter aplica.")
+            # Enter aplica sin tener que ir al botón, que es como se usa cuando
+            # uno está mirando la traza y no el teclado.
+            sp.editingFinished.connect(lambda E=etapa: self._scope_set_idac(E))
+            self.spin_scope_idac[etapa] = sp
+            mandos.addWidget(sp)
+            bt = QPushButton("Fijar")
+            bt.setMaximumWidth(52)
+            bt.clicked.connect(lambda _c=False, E=etapa: self._scope_set_idac(E))
+            self.btn_scope_idac[etapa] = bt
+            mandos.addWidget(bt)
+            if etapa < 3:
+                mandos.addSpacing(10)
         mandos.addStretch(1)
         v.addLayout(mandos)
 
@@ -497,9 +517,8 @@ class MainWindow(QMainWindow):
             return
         self._job(etiqueta, lambda s: accion(self.worker.lab), None)
 
-    def _scope_set_idac(self) -> None:
-        etapa = self.cmb_scope_stage.currentData()
-        code = self.spin_scope_idac.value()
+    def _scope_set_idac(self, etapa: int) -> None:
+        code = self.spin_scope_idac[etapa].value()
         self._scope_encolar(f"{STAGE_NAMES[etapa]}={code:+d}",
                             lambda lab, E=etapa, C=code: lab.set_idac(E, C))
 
@@ -541,8 +560,10 @@ class MainWindow(QMainWindow):
         self.btn_scope.setText("■  Parar")
         self.scope_plot.show_message("esperando la primera muestra…")
 
+        self._scope_ch = ch
         emitir = self.worker.mon_sample.emit
         marcar = self.worker.mon_mark.emit
+        reiniciar = self.worker.mon_reset.emit
 
         def fn(s: Session):
             """Motor del osciloscopio: corre por tramos y empalma el tiempo.
@@ -555,6 +576,7 @@ class MainWindow(QMainWindow):
             tiempo y no vuelva al origen en cada cambio.
             """
             lab = self.worker.lab
+            canal = ch
             desplazamiento = 0
             total: list[MonSample] = []
 
@@ -565,12 +587,15 @@ class MainWindow(QMainWindow):
                 emitir(corrido)
 
             def cortar() -> bool:
-                # Dos motivos para cortar un tramo: el botón Parar, o que haya
-                # un cambio esperando. El segundo no termina la corrida.
-                return self._mon_stop.is_set() or not self._scope_actions.empty()
+                # Tres motivos para cortar un tramo: el botón Parar, un cambio
+                # encolado, o que se haya elegido otro canal. Sólo el primero
+                # termina la corrida.
+                return (self._mon_stop.is_set()
+                        or not self._scope_actions.empty()
+                        or self._scope_ch != canal)
 
             while not self._mon_stop.is_set():
-                tramo = lab.monitor(ch, periodo, 100000,
+                tramo = lab.monitor(canal, periodo, 100000,
                                     on_sample=al_llegar, stop=cortar)
                 if tramo:
                     desplazamiento += tramo[-1].t_ms + periodo
@@ -584,9 +609,37 @@ class MainWindow(QMainWindow):
                     except Exception as exc:            # no tirar la corrida
                         etiqueta = f"{etiqueta}: {type(exc).__name__}"
                     marcar((desplazamiento / 1000.0, etiqueta))
+                if self._scope_ch != canal:
+                    # Otro canal es otra señal: empalmarla con la anterior
+                    # dibujaría un escalón que no existe. Se arranca de cero.
+                    canal = self._scope_ch
+                    desplazamiento = 0
+                    total = []
+                    reiniciar(canal)
             return total
 
         self._job("monitor", fn, self._on_scope_done)
+
+    def _scope_cambiar_canal(self) -> None:
+        """Cambia el tap que se mira, también con el osciloscopio en marcha."""
+        ch = self.scope_canal.currentData()
+        if ch is None:
+            return
+        self._scope_ch = ch
+        if not self._scope_running:
+            return
+        # El motor ve el cambio en el próximo corte de tramo; acá sólo se avisa
+        # para que no parezca que no pasó nada durante el segundo que tarda.
+        self.statusBar().showMessage(f"cambiando a ch{ch} · {TAP_NAMES[ch]}…")
+
+    def _on_scope_reset(self, ch: int) -> None:
+        """Traza nueva: se cambió de canal y lo anterior era otra señal."""
+        self._mon_samples = []
+        self._mon_marcas = []
+        self._mon_ch = ch
+        self._mon_last_draw = 0.0
+        self.scope_plot.show_message(f"ch{ch} · {TAP_NAMES[ch]} — esperando…")
+        self.statusBar().showMessage(f"midiendo ch{ch} · {TAP_NAMES[ch]}")
 
     def _on_scope_mark(self, marca: Any) -> None:
         """Una marca de "acá se tocó algo", para leer el escalón."""
@@ -1019,6 +1072,7 @@ class MainWindow(QMainWindow):
         self.worker.state_changed.connect(self._on_state)
         self.worker.mon_sample.connect(self._on_mon_sample)
         self.worker.mon_mark.connect(self._on_scope_mark)
+        self.worker.mon_reset.connect(self._on_scope_reset)
         self.worker.start()
         self.btn_connect.setText("Desconectar")
         self.statusBar().showMessage(f"Abriendo {puerto}… (abrir resetea el ESP)")
@@ -1036,8 +1090,9 @@ class MainWindow(QMainWindow):
         self._set_link(None)
 
     def _set_scope_enabled(self, listo: bool) -> None:
-        for wdg in (self.btn_scope, self.btn_scope_fijar, self.cmb_scope_pga,
-                    self.cmb_scope_pgaout):
+        for wdg in ([self.btn_scope, self.cmb_scope_pga, self.cmb_scope_pgaout]
+                    + list(self.btn_scope_idac.values())
+                    + list(self.spin_scope_idac.values())):
             wdg.setEnabled(listo)
         if listo:
             self.scope_plot.show_message("Elegí un canal y apretá Graficar.")
@@ -1600,11 +1655,13 @@ def _smoke() -> int:
           any("sin conversión" in t.get_text() for t in f.texts))
 
     # Los mandos del osciloscopio, y que se encolen en vez de pisar la corrida.
-    check("mandos deshabilitados sin conexión", not win.btn_scope_fijar.isEnabled())
+    check("mandos deshabilitados sin conexión",
+          not win.btn_scope_idac[0].isEnabled())
+    check("las cuatro referencias a la vista",
+          len(win.spin_scope_idac) == 4 and len(win.btn_scope_idac) == 4)
     win._scope_running = True
-    win.cmb_scope_stage.setCurrentIndex(2)
-    win.spin_scope_idac.setValue(-40)
-    win._scope_set_idac()
+    win.spin_scope_idac[2].setValue(-40)
+    win._scope_set_idac(2)
     check("el cambio se encola, no pisa la corrida",
           win._scope_actions.qsize() == 1)
     etiqueta, accion = win._scope_actions.get_nowait()
@@ -1617,7 +1674,21 @@ def _smoke() -> int:
         ch=0, marcas=[(12.5, "Vref_ADDER=-40")])
     check("la marca se dibuja en la traza",
           any("Vref_ADDER" in t.get_text() for t in f.axes[0].texts))
+    # Cambiar de canal EN MARCHA. Antes el canal quedaba capturado al arrancar,
+    # se elegía otro y no pasaba nada: parecía que el mux se trababa.
+    win._scope_ch = 0
+    win.scope_canal.setCurrentIndex(2)
+    check("el canal nuevo llega al motor", win._scope_ch == 2)
+    win._mon_samples = [MonSample(0, 0, 0, 1000, 10, True)]
+    win._mon_marcas = [(1.0, "algo")]
+    win._on_scope_reset(2)
+    check("cambiar de canal arranca traza nueva",
+          win._mon_samples == [] and win._mon_marcas == [] and win._mon_ch == 2)
     win._scope_running = False
+
+    check("el botón de reiniciar el PSoC está en la barra de arriba",
+          win.btn_scope_reset.parent() is not None
+          and win.btn_scope_reset not in win.tabs.widget(0).findChildren(QPushButton))
 
     check("add_tab disponible", callable(getattr(win, "add_tab", None)))
     check("las seis pestañas", win.tabs.count() == 6)
