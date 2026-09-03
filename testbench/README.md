@@ -186,3 +186,31 @@ con `#` y campos separados por espacios, para parsearlas sin adivinar:
 | `pga C` / `pgaout C` | `#GAIN cual codigo` |
 
 `mon` y `sweep` cortan si llega cualquier byte por el USB.
+
+## Bitácora de sesión
+
+La ventana registra todo lo que se hace en un archivo JSON Lines, un evento por
+renglón, en `%LOCALAPPDATA%\banco_placas\bitacora\`. Existe porque cuando un
+experimento a mano sale raro lo que hace falta reconstruir no es el gráfico sino
+la **secuencia**: qué IDAC se movió, a qué código, qué contestó y qué se midió
+justo antes y justo después. Eso no cabe en una captura de pantalla y se pierde
+al cerrar la ventana.
+
+```powershell
+& $py -m testbench informe --listar     # qué sesiones hay
+& $py -m testbench informe              # resumen de la última
+& $py -m testbench informe --cual 2     # la anterior
+```
+
+El resumen da la duración, cuántas veces se tocó cada cosa, la secuencia
+completa de acciones y la lista de errores.
+
+**Para pedirle un informe a otra herramienta** (codex, por ejemplo), alcanza con
+esto:
+
+> Corré `python -m testbench informe` desde `C:\Github\Tesis\src\interfaces\python`
+> con el Python 3.14 del sistema y contame qué hizo el operador, en qué orden, y
+> qué midió la placa en cada paso.
+
+Se escribe y se vacía en cada evento a propósito: si la ventana se cuelga, lo
+que interesa es justamente lo último que pasó antes.

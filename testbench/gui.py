@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .core import bitacora as bit
 from .core import console as con
 from .core import figures
 from .core.checklist import (
@@ -265,6 +266,10 @@ class MainWindow(QMainWindow):
         self._mon_marcas: list[tuple[float, str]] = []
         self._last_sweep = None
         self._busy = False
+        #: Bitacora de la sesion. Se abre siempre: lo que hace falta
+        #: reconstruir cuando algo sale raro es la SECUENCIA, y eso se pierde
+        #: apenas se cierra la ventana si no se escribio en el momento.
+        self.bitacora = bit.Bitacora('banco')
 
         raiz = QWidget()
         self.setCentralWidget(raiz)
@@ -480,6 +485,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Reiniciar PSoC",
                                 f"No encontré el script:\n{script}")
             return
+        self.bitacora.accion("reset_psoc")
         self.statusBar().showMessage("reiniciando el PSoC por el KitProg…")
         QApplication.processEvents()
         try:
@@ -512,6 +518,8 @@ class MainWindow(QMainWindow):
 
         Con el osciloscopio parado se ejecuta como un trabajo suelto y listo.
         """
+        self.bitacora.accion("cambio", detalle=etiqueta,
+                             osciloscopio="corriendo" if self._scope_running else "parado")
         if self._scope_running:
             self._scope_actions.put((etiqueta, accion))
             self.statusBar().showMessage(f"{etiqueta}: aplicando…")
@@ -559,6 +567,8 @@ class MainWindow(QMainWindow):
         while not self._scope_actions.empty():       # restos de una corrida previa
             self._scope_actions.get_nowait()
         self.btn_scope.setText("■  Parar")
+        self.bitacora.accion("osciloscopio", estado="arranca", ch=ch,
+                             tap=TAP_NAMES[ch], periodo_ms=periodo)
         self.scope_plot.show_message("esperando la primera muestra…")
 
         self._scope_ch = ch
@@ -631,6 +641,7 @@ class MainWindow(QMainWindow):
             return
         # El motor ve el cambio en el próximo corte de tramo; acá sólo se avisa
         # para que no parezca que no pasó nada durante el segundo que tarda.
+        self.bitacora.accion("canal", ch=ch, tap=TAP_NAMES[ch])
         self.statusBar().showMessage(f"cambiando a ch{ch} · {TAP_NAMES[ch]}…")
 
     def _on_scope_reset(self, ch: int) -> None:
@@ -655,6 +666,11 @@ class MainWindow(QMainWindow):
         self.btn_scope.setEnabled(True)
         self.btn_scope.setText("▶  Graficar")
         n = len(muestras) if muestras else len(self._mon_samples)
+        vals = [m.mean_uv for m in (muestras or self._mon_samples) if m.ok]
+        self.bitacora.accion(
+            "osciloscopio", estado="para", muestras=n,
+            media_uv=round(sum(vals) / len(vals)) if vals else None,
+            excursion_uv=(max(vals) - min(vals)) if vals else None)
         self.statusBar().showMessage(f"osciloscopio parado · {n} muestras")
 
     # -- pestaña Acciones ---------------------------------------------------
@@ -1078,6 +1094,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Abriendo {puerto}… (abrir resetea el ESP)")
 
     def _on_connection(self, ok: bool, mensaje: str) -> None:
+        self.bitacora.nota("enlace", conectado=ok, mensaje=mensaje)
         self.statusBar().showMessage(mensaje)
         if not ok and self.worker is not None:
             self.btn_connect.setText("Conectar")
@@ -1114,6 +1131,7 @@ class MainWindow(QMainWindow):
             self._scope_running = False
             self._mon_target = "lab"
             self._mon_stop.clear()
+        self.bitacora.error(nombre, detalle=error)
         self.statusBar().showMessage(f"{nombre}: {error}")
         self._lab_print(f"error en {nombre}: {error}")
 
@@ -1284,6 +1302,8 @@ class MainWindow(QMainWindow):
         if pt is None:
             self._lab_print("DC: sin respuesta del PSoC")
             return
+        self.bitacora.medida("dc", ch=pt.ch, tap=TAP_NAMES[pt.ch],
+                             media_uv=pt.mean_uv, pp_uv=pt.pp_uv, ok=pt.ok)
         self._lab_print(f"DC ch{pt.ch} {TAP_NAMES[pt.ch]:<8} "
                         f"{fmt_mv(pt.mean_uv):>14}   pp {pt.pp_uv} uV   "
                         f"({SETTLE_MS[pt.settle_sel]} ms)")
@@ -1294,6 +1314,9 @@ class MainWindow(QMainWindow):
             return
         # La media lleva signo porque es un nivel; RMS, pp y el tono de 50 Hz son
         # magnitudes y no pueden ser negativos, así que van en µV a secas.
+        self.bitacora.medida("ac", ch=pt.ch, tap=TAP_NAMES[pt.ch],
+                             media_uv=pt.mean_uv, rms_uv=pt.rms_uv,
+                             pp_uv=pt.pp_uv, hz50_uv=pt.hz50_uv, ok=pt.ok)
         self._lab_print(f"AC ch{pt.ch} {TAP_NAMES[pt.ch]:<8} media "
                         f"{fmt_mv(pt.mean_uv)}  RMS {pt.rms_uv} uV  "
                         f"pp {pt.pp_uv} uV  50 Hz {pt.hz50_uv} uV")
@@ -1689,6 +1712,18 @@ def _smoke() -> int:
     check("el botón de reiniciar el PSoC está en la barra de arriba",
           win.btn_scope_reset.parent() is not None
           and win.btn_scope_reset not in win.tabs.widget(0).findChildren(QPushButton))
+
+    # Bitácora: lo que hace falta después no es el gráfico, es la secuencia.
+    from .core import bitacora as _bit
+    win.bitacora.accion("cambio", detalle="Vref_BP=-64", osciloscopio="parado")
+    win.bitacora.medida("dc", ch=1, tap="BPo", media_uv=1004924, pp_uv=13332, ok=True)
+    win.bitacora.error("monitor", detalle="prueba")
+    filas = _bit.leer(win.bitacora.ruta)
+    check("la bitácora guarda accion, medida y error",
+          {f["tipo"] for f in filas} >= {"accion", "medida", "error"})
+    resumen = _bit.resumir(filas)
+    check("el resumen nombra lo que se tocó",
+          "Vref_BP=-64" in resumen and "Errores:" in resumen)
 
     check("add_tab disponible", callable(getattr(win, "add_tab", None)))
     check("las seis pestañas", win.tabs.count() == 6)

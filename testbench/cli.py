@@ -753,6 +753,48 @@ def cmd_consola(args) -> int:
 # --------------------------------------------------------------------------
 # Argumentos
 # --------------------------------------------------------------------------
+def cmd_informe(args) -> int:
+    """Resumen de una sesión de la ventana, para leer sin haber estado ahí.
+
+    Existe para que otra herramienta —o yo mismo mañana— pueda reconstruir un
+    experimento hecho a mano: qué IDAC se movió, a qué código, qué contestó y
+    qué se midió alrededor. Una captura de pantalla no lo dice y la ventana lo
+    olvida al cerrarse.
+    """
+    from pathlib import Path
+
+    from .core import bitacora as bit
+
+    if args.listar:
+        rutas = bit.ultimas(20)
+        if not rutas:
+            print(f"No hay bitacoras en {bit.DIRECTORIO}")
+            return 1
+        print(color(f"Bitacoras en {bit.DIRECTORIO}", "bold"))
+        for i, r in enumerate(rutas, 1):
+            filas = bit.leer(r)
+            dur = max((f.get("t", 0) for f in filas), default=0)
+            print(f"  {i:2d}. {r.name}   {len(filas):5d} eventos, {dur:6.0f} s")
+        return 0
+
+    if args.archivo:
+        ruta = Path(args.archivo)
+        if not ruta.exists():
+            print(color(f"No existe: {ruta}", "FAIL"))
+            return 2
+    else:
+        rutas = bit.ultimas(args.cual)
+        if len(rutas) < args.cual:
+            print(color(f"No hay {args.cual} bitacoras en {bit.DIRECTORIO}", "FAIL"))
+            return 1
+        ruta = rutas[args.cual - 1]
+
+    print(color(f"Bitacora: {ruta}", "bold"))
+    print()
+    print(bit.resumir(bit.leer(ruta)))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="testbench",
@@ -863,6 +905,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("self-test", help="pruebas del parser, sin hardware")
     sp.set_defaults(func=cmd_selftest)
+
+    sp = sub.add_parser(
+        "informe",
+        help="resumen de lo que se hizo en la ventana (bitacora de sesion)")
+    sp.add_argument("--cual", type=int, default=1,
+                    help="1 = la ultima sesion, 2 = la anterior, etc.")
+    sp.add_argument("--archivo", help="una bitacora concreta, en vez de la ultima")
+    sp.add_argument("--listar", action="store_true",
+                    help="listar las bitacoras disponibles y salir")
+    sp.set_defaults(func=cmd_informe)
 
     return p
 

@@ -136,26 +136,55 @@ class Lab:
         self.s = session
 
     # -- primitivas -------------------------------------------------------
+    #
+    # REGLA, y esto ya rompió una medición entera: cada respuesta se acepta sólo
+    # si su IDENTIDAD coincide con la del pedido. El canal, la etapa y el código
+    # viajan en la propia respuesta justamente para eso.
+    #
+    # Tomar la primera línea que "parezca" la respuesta no alcanza. El firmware
+    # a veces contesta tarde —hay un transitorio conocido tras cambiar de
+    # configuración— y esa respuesta atrasada llega mientras uno ya está
+    # esperando la del comando siguiente. Sin comprobar la identidad se la toma
+    # como buena, y como el canal se lee de la línea recibida, el valor termina
+    # etiquetado con el canal viejo: dos taps aparecen con los valores
+    # intercambiados. Medido en placa: ch2 y ch3 se cambiaron los valores en
+    # mitad de un barrido, que es exactamente lo que parece un mux trabado.
     def set_idac(self, stage: int, code: int, timeout: float = 8.0) -> bool:
         if not 0 <= stage <= 3 or not -255 <= code <= 255:
             raise ValueError("etapa 0-3, codigo -255..255 (0 = Vref)")
-        for linea in self.s.raw(f"idac {stage} {code}", idle=0.8, timeout=timeout,
-                                until=RE_IDAC.match):
+
+        def es_mia(linea: str) -> bool:
             m = RE_IDAC.match(linea)
-            if m:
-                return m.group(3) == "1"
+            return bool(m) and int(m.group(1)) == stage and int(m.group(2)) == code
+
+        # Un reintento. El firmware avisa en su propio comentario que "el primer
+        # comando despues de un cambio de configuracion se ignora en silencio",
+        # y todos sus runners usan el mismo patron acotado. Sin esto, en un
+        # barrido aparecian puntos sueltos como si el IDAC no hubiera aceptado
+        # el codigo, y el que fallaba era el comando, no el IDAC.
+        for intento in range(2):
+            for linea in self.s.raw(f"idac {stage} {code}", idle=0.8,
+                                    timeout=timeout, until=es_mia):
+                if es_mia(linea):
+                    return RE_IDAC.match(linea).group(3) == "1"
         return False
 
     def measure_dc(self, ch: int, settle_sel: int = SETTLE_DEFAULT) -> Optional[DcPoint]:
         if not 0 <= ch <= 4 or not 0 <= settle_sel <= 7:
             raise ValueError("canal 0-4, asentamiento 0-7")
         plazo = SETTLE_MS[settle_sel] / 1000.0 + 8.0
-        for linea in self.s.raw(f"dc {ch} {settle_sel}", idle=0.8, timeout=plazo,
-                                until=RE_DC.match):
+
+        def es_mia(linea: str) -> bool:
             m = RE_DC.match(linea)
-            if m:
-                return DcPoint(int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                               int(m.group(4)), m.group(5) == "1")
+            return bool(m) and int(m.group(1)) == ch
+
+        for intento in range(2):        # mismo reintento acotado que set_idac
+            for linea in self.s.raw(f"dc {ch} {settle_sel}", idle=0.8,
+                                    timeout=plazo, until=es_mia):
+                if es_mia(linea):
+                    m = RE_DC.match(linea)
+                    return DcPoint(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                                   int(m.group(4)), m.group(5) == "1")
         return None
 
     def measure_ac(self, ch: int, n_sel: int = 0) -> Optional[AcPoint]:
@@ -163,10 +192,15 @@ class Lab:
             raise ValueError("canal 0-4, n 0-7")
         # 8192 muestras a 2604 Hz son más de tres segundos; el plazo lo cubre.
         plazo = AC_SAMPLES[n_sel] / 2604.0 + 15.0
-        for linea in self.s.raw(f"ac {ch} {n_sel}", idle=1.0, timeout=plazo,
-                                until=RE_AC.match):
+
+        def es_mia(linea: str) -> bool:
             m = RE_AC.match(linea)
-            if m:
+            return bool(m) and int(m.group(1)) == ch
+
+        for linea in self.s.raw(f"ac {ch} {n_sel}", idle=1.0, timeout=plazo,
+                                until=es_mia):
+            if es_mia(linea):
+                m = RE_AC.match(linea)
                 return AcPoint(int(m.group(1)), int(m.group(2)), int(m.group(3)),
                                int(m.group(4)), int(m.group(5)), int(m.group(6)),
                                m.group(7) == "1")
@@ -177,9 +211,13 @@ class Lab:
             raise ValueError("which tiene que ser 'pga' o 'pgaout'")
         if not 0 <= code <= 8:
             raise ValueError("codigo de ganancia 0-8")
+        def es_mia(linea: str) -> bool:
+            m = RE_GAIN.match(linea)
+            return bool(m) and m.group(1) == which and int(m.group(2)) == code
+
         for linea in self.s.raw(f"{which} {code}", idle=0.8, timeout=8.0,
-                                until=RE_GAIN.match):
-            if RE_GAIN.match(linea):
+                                until=es_mia):
+            if es_mia(linea):
                 return True
         return False
 
@@ -227,7 +265,10 @@ class Lab:
             for linea in self.s.console.poll():
                 self.s.parser.feed(linea)
                 m = RE_MON.match(linea)
-                if m:
+                # Misma regla que las primitivas: una muestra de OTRO canal es
+                # una respuesta atrasada de la corrida anterior. Aceptarla
+                # metia el valor de un tap en la traza de otro.
+                if m and int(m.group(3)) == ch:
                     ms = MonSample(int(m.group(1)), int(m.group(2)), int(m.group(3)),
                                    int(m.group(4)), int(m.group(5)), m.group(6) == "1")
                     muestras.append(ms)
@@ -274,7 +315,10 @@ class Lab:
             for linea in self.s.console.poll():
                 self.s.parser.feed(linea)
                 m = RE_SWEEP.match(linea)
-                if m and m.group(6) == "1":
+                # La etapa tiene que ser la que se pidió: un punto de un barrido
+                # anterior que llegue tarde ensuciaría esta curva con datos de
+                # otra etapa, y el ajuste de pendiente saldría de una mezcla.
+                if m and m.group(6) == "1" and int(m.group(1)) == stage:
                     etapa, code, canal, media = (int(m.group(1)), int(m.group(2)),
                                                  int(m.group(3)), int(m.group(4)))
                     sw.add(canal, code, media)
