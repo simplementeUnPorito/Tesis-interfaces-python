@@ -380,8 +380,14 @@ def fig_d7(taps: Sequence[dict]) -> Figure:
 MONITOR_EJE_ABSOLUTO_UV = 20_000.0
 
 
+#: Fondo de escala del ADC en la configuración 1, en µV. Es ±2,5 V porque el
+#: rango es ADC_IR_VNEG_2VREF_DIFF: diferencial contra Vneg, ±2·Vref.
+ADC_FONDO_UV = 2_500_000.0
+
+
 def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "",
-                marcas: Sequence[tuple[float, str]] = ()) -> Figure:
+                marcas: Sequence[tuple[float, str]] = (),
+                escala: str = "auto") -> Figure:
     """Traza del monitor lento: un tap contra el tiempo.
 
     Cambio en el tiempo, así que va en línea, no en barras. Una sola serie:
@@ -435,7 +441,12 @@ def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "",
     uv = np.array([s.mean_uv for s in buenas], dtype=float)
     media = float(uv.mean())
     excursion = float(uv.max() - uv.min())
-    absoluto = excursion >= MONITOR_EJE_ABSOLUTO_UV
+    # "completo" fija el eje al fondo de escala del ADC. No es lo mismo que un
+    # autoescalado generoso: sirve para ver CUÁNTO del rango disponible usa la
+    # cadena, que con autoescala no se ve nunca porque la traza siempre llena
+    # la altura. Con la cadena sin calibrar la diferencia es enorme.
+    completo = escala == "completo"
+    absoluto = completo or excursion >= MONITOR_EJE_ABSOLUTO_UV
 
     if absoluto:
         y = uv / 1000.0
@@ -447,6 +458,18 @@ def fig_monitor(samples: Sequence, ch: int = 0, titulo: str = "",
     _style(ax, titulo or f"Monitor del tap ch{ch} ({nombre})", eje, grilla_x=True)
     ax.plot(t, y, color=SERIES_1, linewidth=1.6, solid_capstyle="round")
     ax.set_xlabel("segundos desde el arranque del monitor", color=INK_2, fontsize=9)
+
+    if completo:
+        tope = ADC_FONDO_UV / 1000.0
+        ax.set_ylim(-tope, tope)
+        # El cero es Vref y es la referencia real de todo lo que se mide acá:
+        # con el eje completo hay que verlo, porque es adonde la calibración
+        # tiene que llevar cada tap.
+        ax.axhline(0.0, color=BASELINE, linewidth=1.0, zorder=0)
+        usado = excursion / ADC_FONDO_UV / 2.0 * 100.0
+        ax.text(0.01, 0.02, f"la traza usa el {usado:.1f} % del rango del ADC",
+                transform=ax.transAxes, ha="left", va="bottom",
+                color=MUTED, fontsize=8)
     if not absoluto:
         # El cero es la media, no una tensión: se marca para que se lea como
         # referencia y no se confunda con Vref.

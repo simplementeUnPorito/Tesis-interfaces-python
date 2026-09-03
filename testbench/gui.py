@@ -416,6 +416,17 @@ class MainWindow(QMainWindow):
         b.clicked.connect(lambda: self.scope_plot.save(self))
         barra.addWidget(b)
 
+        barra.addWidget(QLabel("eje"))
+        self.cmb_scope_escala = QComboBox()
+        self.cmb_scope_escala.addItem("auto", "auto")
+        self.cmb_scope_escala.addItem("completo (+-2,5 V)", "completo")
+        self.cmb_scope_escala.setToolTip(
+            "auto ajusta el eje a los datos; completo lo fija al fondo de "
+            "escala del ADC, que es la unica forma de ver cuanto del rango "
+            "disponible usa realmente la cadena.")
+        self.cmb_scope_escala.currentIndexChanged.connect(self._redibujar_scope)
+        barra.addWidget(self.cmb_scope_escala)
+
         barra.addSpacing(12)
         for cual, etiqueta in (("pga", "PGA"), ("pgaout", "PGAout")):
             barra.addWidget(QLabel(f"{etiqueta}:"))
@@ -630,6 +641,21 @@ class MainWindow(QMainWindow):
             return total
 
         self._job("monitor", fn, self._on_scope_done)
+
+    def _redibujar_scope(self) -> None:
+        """Vuelve a dibujar con lo que ya hay, sin esperar la próxima muestra.
+
+        Cambiar el eje tiene que verse ya. Sin esto había que aguantar hasta la
+        muestra siguiente —o, con el osciloscopio parado, no pasaba nunca.
+        """
+        if self._mon_target != "scope" or not self._mon_samples:
+            return
+        corte = self._mon_samples[-1].t_ms - self.scope_ventana.value() * 1000
+        muestras = [s for s in self._mon_samples if s.t_ms >= corte]
+        self.scope_plot.show_figure(
+            figures.fig_monitor(muestras, ch=self._mon_ch,
+                                marcas=self._mon_marcas,
+                                escala=self.cmb_scope_escala.currentData()))
 
     def _scope_cambiar_canal(self) -> None:
         """Cambia el tap que se mira, también con el osciloscopio en marcha."""
@@ -1252,7 +1278,10 @@ class MainWindow(QMainWindow):
             muestras = [s for s in self._mon_samples if s.t_ms >= corte]
         # Sin `titulo`: el título por defecto nombra el canal, que es lo que hay
         # que ver; la cantidad de muestras ya va en el pie de la figura.
-        fig = figures.fig_monitor(muestras, ch=self._mon_ch, marcas=marcas)
+        escala = (self.cmb_scope_escala.currentData()
+                  if self._mon_target == "scope" else "auto")
+        fig = figures.fig_monitor(muestras, ch=self._mon_ch, marcas=marcas,
+                                  escala=escala)
         destino = self.scope_plot if self._mon_target == "scope" else self.lab_plot
         destino.show_figure(fig)
 
@@ -1712,6 +1741,17 @@ def _smoke() -> int:
     check("el botón de reiniciar el PSoC está en la barra de arriba",
           win.btn_scope_reset.parent() is not None
           and win.btn_scope_reset not in win.tabs.widget(0).findChildren(QPushButton))
+
+    # Eje completo: la única forma de ver cuánto del rango usa la cadena.
+    f = figures.fig_monitor(muestras, ch=0, escala="completo")
+    lo, hi = f.axes[0].get_ylim()
+    check("el eje completo es el fondo de escala del ADC",
+          abs(lo + 2500) < 1 and abs(hi - 2500) < 1)
+    check("dice qué porcentaje del rango se usa",
+          any("% del rango" in t.get_text() for t in f.axes[0].texts))
+    f = figures.fig_monitor(muestras, ch=0, escala="auto")
+    lo2, hi2 = f.axes[0].get_ylim()
+    check("en auto el eje se ajusta a los datos", (hi2 - lo2) < (hi - lo))
 
     # Bitácora: lo que hace falta después no es el gráfico, es la secuencia.
     from .core import bitacora as _bit
