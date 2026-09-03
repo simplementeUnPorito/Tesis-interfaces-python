@@ -154,13 +154,47 @@ def encode_std16(cmd: int, value16: int) -> bytes:
     return bytes([config.CMD_HEADER, cmd & 0xFF, n_lo, n_hi, cs])
 
 
-def encode_directed(node_id: int, sub_cmd: int, param: int) -> bytes:
-    """Encode a 6-byte directed slave command: [0xAB][0xBD][node_id][sub_cmd][param][cs]."""
+def encode_directed(
+    node_id: int,
+    sub_cmd: int,
+    param: int,
+    param2: int | None = None,
+) -> bytes:
+    """Encode a directed command.
+
+    Normal subcommands keep the original 6-byte frame.  Signed manual IDAC
+    (subcommand 0xAA) uses a 7-byte frame where ``param`` is sign|stage and
+    ``param2`` is the 0..255 magnitude.
+    """
     node_id = node_id & 0xFF
     sub_cmd = sub_cmd & 0xFF
     param   = param   & 0xFF
+    if param2 is not None:
+        param2 = int(param2) & 0xFF
+        cs = (node_id ^ sub_cmd ^ param ^ param2) & 0xFF
+        return bytes([
+            config.CMD_HEADER,
+            config.CMD_DIRECTED,
+            node_id,
+            sub_cmd,
+            param,
+            param2,
+            cs,
+        ])
     cs = (node_id ^ sub_cmd ^ param) & 0xFF
     return bytes([config.CMD_HEADER, config.CMD_DIRECTED, node_id, sub_cmd, param, cs])
+
+
+def encode_manual_idac(node_id: int, stage: int, code: int) -> bytes:
+    """Encode field-PSoC command 0xAA for a signed stage IDAC (-255..255)."""
+    stage = int(stage)
+    code = int(code)
+    if not 0 <= stage < 4:
+        raise ValueError("stage must be in 0..3")
+    if not -255 <= code <= 255:
+        raise ValueError("code must be in -255..255")
+    p1 = stage | (0x80 if code < 0 else 0)
+    return encode_directed(node_id, 0xAA, p1, abs(code))
 
 
 # ── Decoding (Master → PC) ───────────────────────────────────────────────────
