@@ -382,11 +382,12 @@ class MainWindow(QMainWindow):
         barra.addSpacing(12)
         barra.addWidget(QLabel("cada"))
         self.scope_periodo = QSpinBox()
-        self.scope_periodo.setRange(140, 5000)
-        self.scope_periodo.setValue(200)
+        self.scope_periodo.setRange(0, 5000)
+        self.scope_periodo.setValue(100)
         self.scope_periodo.setSuffix(" ms")
         self.scope_periodo.setToolTip(
-            "El firmware no baja de ~137 ms por medida: pedir menos no acelera.")
+            "Espera ENTRE medidas. 0 = lo mas rapido posible; el piso real lo "
+            "pone el firmware y esta entre 60 y 200 ms por punto.")
         barra.addWidget(self.scope_periodo)
 
         barra.addWidget(QLabel("ventana"))
@@ -948,12 +949,11 @@ class MainWindow(QMainWindow):
         gsl = QGridLayout(gs)
         gsl.addWidget(QLabel("período [ms]"), 0, 0)
         self.spin_periodo = QSpinBox()
-        # El firmware tarda ~137 ms en cada medida DC, así que pedir menos que
-        # eso no acelera nada: sólo hace creer que se mira más rápido.
-        self.spin_periodo.setRange(140, 5000)
-        self.spin_periodo.setValue(200)
+        self.spin_periodo.setRange(0, 5000)
+        self.spin_periodo.setValue(100)
         self.spin_periodo.setToolTip(
-            "El firmware no baja de ~137 ms por muestra: pedir menos no acelera.")
+            "Espera ENTRE medidas. 0 = lo más rápido posible; el piso real lo "
+            "pone el firmware y está entre 60 y 200 ms por punto.")
         gsl.addWidget(self.spin_periodo, 0, 1)
         gsl.addWidget(QLabel("muestras"), 1, 0)
         self.spin_n = QSpinBox()

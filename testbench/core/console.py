@@ -231,8 +231,21 @@ class Console:
         idle: float = 2.0,
         timeout: float = 30.0,
         on_line: Optional[Callable[[str], None]] = None,
+        until: Optional[Callable[[str], bool]] = None,
     ) -> list[str]:
-        """Lee hasta que pasen ``idle`` segundos sin datos nuevos."""
+        """Lee hasta que pasen ``idle`` segundos sin datos nuevos.
+
+        ``until`` corta apenas una línea lo satisface, sin esperar el silencio.
+        Importa mucho más de lo que parece: un comando como ``dc`` contesta una
+        sola línea y ya está, pero sin esto se seguían esperando los ``idle``
+        segundos igual. Con el valor que usaba el modo manual eso eran 1,1 s de
+        regalo POR MEDIDA —medido, y sin depender del asentamiento pedido—, o
+        sea que leer los cuatro taps tardaba cuatro segundos y medio en vez de
+        dos décimas.
+
+        Lo que quede en el buffer después del corte no se pierde ni ensucia el
+        comando siguiente: ``Session.raw`` drena antes de mandar cada uno.
+        """
         lineas: list[str] = []
         t0 = time.monotonic()
         ultimo = t0
@@ -240,10 +253,15 @@ class Console:
             nuevas = self.poll()
             if nuevas:
                 ultimo = time.monotonic()
+                listo = False
                 for linea in nuevas:
                     if on_line is not None:
                         on_line(linea)
+                    if until is not None and until(linea):
+                        listo = True
                 lineas.extend(nuevas)
+                if listo:
+                    break
             elif time.monotonic() - ultimo >= idle:
                 break
             else:

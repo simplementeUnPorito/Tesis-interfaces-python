@@ -139,7 +139,8 @@ class Lab:
     def set_idac(self, stage: int, code: int, timeout: float = 8.0) -> bool:
         if not 0 <= stage <= 3 or not -255 <= code <= 255:
             raise ValueError("etapa 0-3, codigo -255..255 (0 = Vref)")
-        for linea in self.s.raw(f"idac {stage} {code}", idle=0.8, timeout=timeout):
+        for linea in self.s.raw(f"idac {stage} {code}", idle=0.8, timeout=timeout,
+                                until=RE_IDAC.match):
             m = RE_IDAC.match(linea)
             if m:
                 return m.group(3) == "1"
@@ -149,7 +150,8 @@ class Lab:
         if not 0 <= ch <= 4 or not 0 <= settle_sel <= 7:
             raise ValueError("canal 0-4, asentamiento 0-7")
         plazo = SETTLE_MS[settle_sel] / 1000.0 + 8.0
-        for linea in self.s.raw(f"dc {ch} {settle_sel}", idle=0.8, timeout=plazo):
+        for linea in self.s.raw(f"dc {ch} {settle_sel}", idle=0.8, timeout=plazo,
+                                until=RE_DC.match):
             m = RE_DC.match(linea)
             if m:
                 return DcPoint(int(m.group(1)), int(m.group(2)), int(m.group(3)),
@@ -161,7 +163,8 @@ class Lab:
             raise ValueError("canal 0-4, n 0-7")
         # 8192 muestras a 2604 Hz son más de tres segundos; el plazo lo cubre.
         plazo = AC_SAMPLES[n_sel] / 2604.0 + 15.0
-        for linea in self.s.raw(f"ac {ch} {n_sel}", idle=1.0, timeout=plazo):
+        for linea in self.s.raw(f"ac {ch} {n_sel}", idle=1.0, timeout=plazo,
+                                until=RE_AC.match):
             m = RE_AC.match(linea)
             if m:
                 return AcPoint(int(m.group(1)), int(m.group(2)), int(m.group(3)),
@@ -174,7 +177,8 @@ class Lab:
             raise ValueError("which tiene que ser 'pga' o 'pgaout'")
         if not 0 <= code <= 8:
             raise ValueError("codigo de ganancia 0-8")
-        for linea in self.s.raw(f"{which} {code}", idle=0.8, timeout=8.0):
+        for linea in self.s.raw(f"{which} {code}", idle=0.8, timeout=8.0,
+                                until=RE_GAIN.match):
             if RE_GAIN.match(linea):
                 return True
         return False

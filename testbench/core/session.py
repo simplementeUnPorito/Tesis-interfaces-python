@@ -101,13 +101,27 @@ class Session:
         if self._on_item is not None and len(self.parser.items) > antes:
             self._on_item(self.parser.items[-1])
 
-    def _drain(self, seconds: float = 0.6) -> None:
-        """Vacía lo que quedó colgando antes de empezar algo nuevo."""
+    def _drain(self, seconds: float = 0.6, quiet: float = 0.0) -> None:
+        """Vacía lo que quedó colgando antes de empezar algo nuevo.
+
+        Con ``quiet`` corta apenas pasa ese rato sin recibir nada, usando
+        ``seconds`` sólo como tope. Vaciar es lo que evita que la respuesta de
+        un comando se le atribuya al siguiente —el peligro concreto es medir
+        cuatro veces el mismo canal y quedarse con una lectura vieja—, pero
+        esperar un tiempo fijo cuando no hay nada colgando es tiempo tirado, y
+        se paga en CADA comando del modo manual.
+        """
         t0 = time.monotonic()
+        ultimo = t0
         while time.monotonic() - t0 < seconds:
-            for linea in self.console.poll():
+            nuevas = self.console.poll()
+            for linea in nuevas:
                 self._consume(linea)
-            time.sleep(0.02)
+            if nuevas:
+                ultimo = time.monotonic()
+            elif quiet > 0.0 and time.monotonic() - ultimo >= quiet:
+                return
+            time.sleep(0.005 if quiet > 0.0 else 0.02)
 
     # -- consultas rápidas ------------------------------------------------
     def probe(self, timeout: float = 6.0):
@@ -142,11 +156,22 @@ class Session:
         self.console.send("diag on" if encendido else "diag off")
         self._drain(0.5)
 
-    def raw(self, comando: str, idle: float = 2.0, timeout: float = 30.0) -> list[str]:
-        """Manda cualquier comando y devuelve lo que conteste. Escotilla de escape."""
-        self._drain(0.2)
+    def raw(self, comando: str, idle: float = 2.0, timeout: float = 30.0,
+            until=None) -> list[str]:
+        """Manda cualquier comando y devuelve lo que conteste. Escotilla de escape.
+
+        ``until`` corta apenas llega la línea que se esperaba, en vez de aguantar
+        el silencio completo. El drenaje de acá arriba es lo que hace que sea
+        seguro: cualquier cola del comando anterior se descarta antes de mandar
+        el siguiente.
+        """
+        # Tope de 200 ms, pero se corta a los 30 ms de silencio: en el caso
+        # normal no hay nada colgando y esperar el tope entero era el grueso de
+        # lo que tardaba cada comando del modo manual.
+        self._drain(0.2, quiet=0.03)
         self.console.send(comando)
-        return self.console.read_idle(idle=idle, timeout=timeout, on_line=self._consume)
+        return self.console.read_idle(idle=idle, timeout=timeout,
+                                      on_line=self._consume, until=until)
 
     # -- corridas ---------------------------------------------------------
     def arm_sync(self, force: bool = False) -> RunResult:
