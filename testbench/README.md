@@ -63,6 +63,12 @@ Otros subcomandos automáticos:
 `replay` y `self-test` no tocan hardware: sirven para revisar todo sin la placa
 enchufada.
 
+`replay` acepta dos cosas: la salida cruda del firmware, y el transcript que
+escribe `--transcript` (le saca la hora y la dirección de adelante). Lo que **no**
+sirve es redirigir la salida por pantalla del propio banco a un archivo: esa
+reformatea la línea `RESUMEN`, ya no es lo que dijo el firmware, y `replay` la
+marca —con razón— como corrida incompleta.
+
 ## Modo manual
 
 ```powershell

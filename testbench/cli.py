@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -505,9 +506,29 @@ def cmd_sweep(args) -> int:
         c.close()
 
 
+# `  12.345  RX   [B1] Subida I2C ...` -> `[B1] Subida I2C ...`
+TRANSCRIPT_RE = re.compile(r"^\s*\d+\.\d{3}\s{2}(TX|RX|PSoC|--)\s{2,}(.*)$")
+
+
+def normalize_capture(texto: str) -> str:
+    """Acepta tanto la salida cruda del firmware como un transcript del banco.
+
+    El transcript lleva hora y dirección adelante de cada línea; sin sacarlas,
+    el parser no reconoce un solo ítem y una corrida perfecta se reporta como
+    trunca. Lo que NO se acepta es la salida por pantalla del propio CLI: esa
+    reformatea el RESUMEN y ya no es lo que dijo el firmware.
+    """
+    salida = []
+    for linea in texto.splitlines():
+        m = TRANSCRIPT_RE.match(linea)
+        salida.append(m.group(2) if m else linea)
+    return "\n".join(salida)
+
+
 def cmd_replay(args) -> int:
     """Evalúa una captura guardada. No toca hardware."""
-    texto = Path(args.archivo).read_text(encoding="utf-8", errors="replace")
+    texto = normalize_capture(
+        Path(args.archivo).read_text(encoding="utf-8", errors="replace"))
     parser = ChecklistParser()
     parser.feed_many(texto)
     v = evaluate(parser)
