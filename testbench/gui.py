@@ -533,7 +533,7 @@ class MainWindow(QMainWindow):
         for etapa in range(4):
             gl.addWidget(QLabel(f"{etapa} · {STAGE_NAMES[etapa]}"), etapa, 0)
             sp = QSpinBox()
-            sp.setRange(0, 255)
+            sp.setRange(-255, 255)
             sp.setValue(128)
             self.idac_spins[etapa] = sp
             gl.addWidget(sp, etapa, 1)
@@ -624,8 +624,8 @@ class MainWindow(QMainWindow):
         gbl.addWidget(self.cmb_sweep_stage, 0, 1)
         gbl.addWidget(QLabel("desde / hasta / paso"), 1, 0)
         fila = QHBoxLayout()
-        self.spin_lo = QSpinBox(); self.spin_lo.setRange(0, 255); self.spin_lo.setValue(0)
-        self.spin_hi = QSpinBox(); self.spin_hi.setRange(0, 255); self.spin_hi.setValue(240)
+        self.spin_lo = QSpinBox(); self.spin_lo.setRange(-255, 255); self.spin_lo.setValue(-240)
+        self.spin_hi = QSpinBox(); self.spin_hi.setRange(-255, 255); self.spin_hi.setValue(240)
         self.spin_paso = QSpinBox(); self.spin_paso.setRange(1, 128); self.spin_paso.setValue(16)
         for s in (self.spin_lo, self.spin_hi, self.spin_paso):
             fila.addWidget(s)

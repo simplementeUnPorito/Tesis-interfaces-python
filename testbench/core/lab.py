@@ -44,10 +44,10 @@ GAIN_CODES = (1, 2, 4, 8, 16, 24, 32, 48, 50)
 
 RE_DC = re.compile(r"^#DC (\d+) (\d+) (-?\d+) (-?\d+) (\d)")
 RE_AC = re.compile(r"^#AC (\d+) (\d+) (-?\d+) (-?\d+) (-?\d+) (-?\d+) (\d)")
-RE_IDAC = re.compile(r"^#IDAC (\d+) (\d+) (\d)")
+RE_IDAC = re.compile(r"^#IDAC (\d+) (-?\d+) (\d)")
 RE_MON = re.compile(r"^#MON (\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d)")
 RE_MONEND = re.compile(r"^#MONEND (\d+)")
-RE_SWEEP = re.compile(r"^#SWEEP (\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d)")
+RE_SWEEP = re.compile(r"^#SWEEP (\d+) (-?\d+) (\d+) (-?\d+) (-?\d+) (\d)")
 RE_SWEEPEND = re.compile(r"^#SWEEPEND (\d+) (-?\d+)")
 RE_GAIN = re.compile(r"^#GAIN (pga|pgaout) (\d+)")
 
@@ -137,8 +137,8 @@ class Lab:
 
     # -- primitivas -------------------------------------------------------
     def set_idac(self, stage: int, code: int, timeout: float = 8.0) -> bool:
-        if not 0 <= stage <= 3 or not 0 <= code <= 255:
-            raise ValueError("etapa 0-3, codigo 0-255")
+        if not 0 <= stage <= 3 or not -255 <= code <= 255:
+            raise ValueError("etapa 0-3, codigo -255..255 (0 = Vref)")
         for linea in self.s.raw(f"idac {stage} {code}", idle=0.8, timeout=timeout):
             m = RE_IDAC.match(linea)
             if m:
@@ -255,7 +255,7 @@ class Lab:
         """
         if not 0 <= stage <= 3:
             raise ValueError("etapa 0-3")
-        if step <= 0 or not 0 <= lo <= hi <= 255:
+        if step <= 0 or not -255 <= lo <= hi <= 255:
             raise ValueError("rango invalido")
 
         sw = Sweep(stage=stage)

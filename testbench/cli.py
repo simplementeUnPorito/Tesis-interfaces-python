@@ -849,8 +849,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("sweep", help="barrer un IDAC midiendo los taps")
     comunes(sp)
     sp.add_argument("etapa", type=int, choices=range(4))
-    sp.add_argument("--lo", type=int, default=0)
-    sp.add_argument("--hi", type=int, default=255)
+    sp.add_argument("--lo", type=int, default=-240)
+    sp.add_argument("--hi", type=int, default=240)
     sp.add_argument("--paso", type=int, default=16)
     sp.add_argument("--canal", type=int, default=-1,
                     help="canal a medir; -1 mide los cuatro")
