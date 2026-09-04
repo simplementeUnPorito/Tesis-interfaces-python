@@ -333,6 +333,69 @@ def exp_matriz(lab: Lab, combos: list[tuple[int, int]], espera_s: float) -> dict
 
 # --------------------------------------------------------------------------
 
+def combos_por_dificultad() -> list[tuple[int, int]]:
+    """Las 81 combinaciones, de la mas dificil de calibrar a la mas facil.
+
+    El criterio no es arbitrario, sale de lo ya medido:
+
+    - La autoridad de la etapa 0 ESCALA CON LA GANANCIA DEL PGA: 28,2 mV de
+      recorrido con el PGA en 1x, 355 mV con el PGA en 50x. O sea que PGA BAJO
+      es el caso dificil, porque el IDAC casi no puede corregir.
+    - PGAout amplifica todo lo que viene de aguas arriba antes de los taps de
+      abajo, asi que PGAOUT ALTO agranda el offset que las etapas 2 y 3 tienen
+      que anular con la misma autoridad de siempre.
+
+    Por eso el orden es PGA ascendente y PGAout descendente: la primera
+    combinacion de la lista, PGA 1x con PGAout 50x, es la que junta la minima
+    capacidad de corregir en la entrada con la maxima amplificacion de lo que
+    quede sin corregir. Si esa calibra, es buena senal para todas.
+    """
+    combos = []
+    for i_pga, pga in enumerate(GAIN_CODES):
+        for i_out, out in enumerate(GAIN_CODES):
+            # dificultad: PGA chico pesa, PGAout grande pesa
+            dificultad = (len(GAIN_CODES) - 1 - i_pga) + i_out
+            combos.append((dificultad, i_pga, i_out))
+    combos.sort(key=lambda c: -c[0])
+    return [(p, o) for _, p, o in combos]
+
+
+def exp_campana(lab: Lab, cons, espera_s: float, max_combos: int,
+                stamp: str) -> None:
+    """La campana completa, desatendida y REANUDABLE.
+
+    Guarda cada combinacion apenas la termina, en su propio archivo. Si se corta
+    -o si hay que apagar el banco- al volver a correr saltea lo que ya esta y
+    sigue donde iba. Con 81 combinaciones y esperas de minutos, dar por perdida
+    una corrida de horas por un corte no es aceptable.
+    """
+    SALIDA.mkdir(parents=True, exist_ok=True)
+    combos = combos_por_dificultad()[:max_combos]
+    print(f"\n=== CAMPANA: {len(combos)} combinaciones, de la mas dificil a la mas facil ===")
+    print(f"    espera {espera_s:.0f} s por punto; se guarda cada una al terminar\n")
+
+    for i, (pga, pgaout) in enumerate(combos, 1):
+        ruta = SALIDA / f"campana_pga{pga}_out{pgaout}.json"
+        if ruta.is_file():
+            print(f"  [{i}/{len(combos)}] PGA={GAIN_CODES[pga]}x "
+                  f"PGAout={GAIN_CODES[pgaout]}x  ya estaba, salteo")
+            continue
+        print(f"  [{i}/{len(combos)}] PGA={GAIN_CODES[pga]}x "
+              f"PGAout={GAIN_CODES[pgaout]}x")
+        lab.set_gain("pga", pga)
+        lab.set_gain("pgaout", pgaout)
+        d = autoridad_y_offset(lab, espera_s)
+        d.update({"experimento": "matriz", "pga_code": pga, "pgaout_code": pgaout,
+                  "pga_x": GAIN_CODES[pga], "pgaout_x": GAIN_CODES[pgaout],
+                  "espera_s": espera_s, "filas": None})
+        # Se guarda con la forma que espera el analizador: una fila por archivo.
+        payload = {"experimento": "matriz", "espera_s": espera_s, "filas": [d]}
+        ruta.write_text(json.dumps(payload, indent=1, ensure_ascii=False),
+                        encoding="utf-8")
+        print(f"      reposo: " + "  ".join(
+            f"ch{ch} {(d['reposo_uv'][ch] or 0)/1000.0:9.3f} mV" for ch in CANALES))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -357,6 +420,11 @@ def main() -> int:
     c.add_argument("--todos", action="store_true",
                    help="medir los cuatro taps, no solo el propio")
 
+    k = sub.add_parser("campana", help="las 81 combinaciones, de la mas dificil "
+                                      "a la mas facil, desatendida y reanudable")
+    k.add_argument("--espera", type=float, default=150.0)
+    k.add_argument("--max", type=int, default=81)
+
     m = sub.add_parser("matriz", help="barrido de combinaciones PGA x PGAout")
     m.add_argument("--combos", default="",
                    help="lista pga:pgaout separada por comas; vacio = las 4 esquinas")
@@ -375,6 +443,8 @@ def main() -> int:
             d = exp_curva(lab, args.etapa, args.lo, args.hi, args.paso,
                           args.settle, args.pga, args.pgaout, args.todos)
             guardar(f"curva_e{args.etapa}_pga{args.pga}_out{args.pgaout}_{stamp}.json", d)
+        elif args.cmd == "campana":
+            exp_campana(lab, cons, args.espera, args.max, stamp)
         else:
             if args.combos:
                 combos = [tuple(int(v) for v in par.split(":"))
