@@ -336,7 +336,9 @@ def exp_matriz(lab: Lab, combos: list[tuple[int, int]], espera_s: float) -> dict
               f"PGAout={GAIN_CODES[pgaout]}x")
         lab.set_gain("pga", pga)
         lab.set_gain("pgaout", pgaout)
-        d = autoridad_y_offset(lab, espera_s)
+        d = solo_offset(lab, espera_s) if rapido else autoridad_y_offset(lab, espera_s)
+        if rapido:
+            d["autoridad_uv"] = {}
         d.update({"pga_code": pga, "pgaout_code": pgaout,
                   "pga_x": GAIN_CODES[pga], "pgaout_x": GAIN_CODES[pgaout]})
         filas.append(d)
@@ -391,8 +393,23 @@ def combos_por_dificultad() -> list[tuple[int, int]]:
     return [(p, o) for _, _, p, o in combos]
 
 
+def solo_offset(lab: Lab, espera_s: float) -> dict:
+    """Sólo el reposo: los cuatro IDAC en 0 y leer los cuatro taps.
+
+    Diez veces más rápido que `autoridad_y_offset` porque paga UNA espera de
+    planta en vez de diez. La autoridad no hace falta medirla en cada
+    combinación: sale de la ganancia de la etapa, que ya está medida, y se
+    verifica en unos pocos puntos en vez de en los 81.
+    """
+    for st in CANALES:
+        lab.set_idac(st, 0)
+    time.sleep(espera_s)
+    r = {ch: lab.measure_dc(ch, SETTLE_DC) for ch in CANALES}
+    return {"reposo_uv": {ch: (p.mean_uv if p else None) for ch, p in r.items()}}
+
+
 def exp_campana(lab: Lab, cons, espera_s: float, max_combos: int,
-                stamp: str) -> None:
+                stamp: str, rapido: bool = False) -> None:
     """La campana completa, desatendida y REANUDABLE.
 
     Guarda cada combinacion apenas la termina, en su propio archivo. Si se corta
@@ -415,7 +432,9 @@ def exp_campana(lab: Lab, cons, espera_s: float, max_combos: int,
               f"PGAout={GAIN_CODES[pgaout]}x")
         lab.set_gain("pga", pga)
         lab.set_gain("pgaout", pgaout)
-        d = autoridad_y_offset(lab, espera_s)
+        d = solo_offset(lab, espera_s) if rapido else autoridad_y_offset(lab, espera_s)
+        if rapido:
+            d["autoridad_uv"] = {}
         d.update({"experimento": "matriz", "pga_code": pga, "pgaout_code": pgaout,
                   "pga_x": GAIN_CODES[pga], "pgaout_x": GAIN_CODES[pgaout],
                   "espera_s": espera_s, "filas": None})
@@ -457,6 +476,8 @@ def main() -> int:
                                       "a la mas facil, desatendida y reanudable")
     k.add_argument("--espera", type=float, default=150.0)
     k.add_argument("--max", type=int, default=81)
+    k.add_argument("--rapido", action="store_true",
+                   help="solo el reposo: 1 espera por combinacion en vez de 10")
 
     m = sub.add_parser("matriz", help="barrido de combinaciones PGA x PGAout")
     m.add_argument("--combos", default="",
@@ -478,7 +499,7 @@ def main() -> int:
                           args.dwell)
             guardar(f"curva_e{args.etapa}_pga{args.pga}_out{args.pgaout}_{stamp}.json", d)
         elif args.cmd == "campana":
-            exp_campana(lab, cons, args.espera, args.max, stamp)
+            exp_campana(lab, cons, args.espera, args.max, stamp, args.rapido)
         else:
             if args.combos:
                 combos = [tuple(int(v) for v in par.split(":"))
