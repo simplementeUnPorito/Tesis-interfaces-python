@@ -338,26 +338,43 @@ def combos_por_dificultad() -> list[tuple[int, int]]:
 
     El criterio no es arbitrario, sale de lo ya medido:
 
-    - La autoridad de la etapa 0 ESCALA CON LA GANANCIA DEL PGA: 28,2 mV de
-      recorrido con el PGA en 1x, 355 mV con el PGA en 50x. O sea que PGA BAJO
-      es el caso dificil, porque el IDAC casi no puede corregir.
-    - PGAout amplifica todo lo que viene de aguas arriba antes de los taps de
-      abajo, asi que PGAOUT ALTO agranda el offset que las etapas 2 y 3 tienen
-      que anular con la misma autoridad de siempre.
+    PRIMERA VERSION DE ESTO ESTABA MAL, Y LA CORRECCION IMPORTA.
 
-    Por eso el orden es PGA ascendente y PGAout descendente: la primera
-    combinacion de la lista, PGA 1x con PGAout 50x, es la que junta la minima
-    capacidad de corregir en la entrada con la maxima amplificacion de lo que
-    quede sin corregir. Si esa calibra, es buena senal para todas.
+    Habia ordenado PGA ascendente razonando que "PGA bajo = poca autoridad = mas
+    dificil": con el PGA en 1x el recorrido de Vref_PGA es de solo 28,2 mV. Pero
+    eso ignora que el OFFSET en ch0 tambien escala con la ganancia del PGA, asi
+    que lo que decide no es la autoridad sino la RAZON autoridad/offset.
+
+    Y lo medido apunta al reves: 28,2 mV de recorrido con el PGA en 1x contra
+    355 mV en 50x son x12,6 de autoridad para x50 de ganancia. Si el offset
+    crece x50 y la autoridad x12,6, el caso dificil es PGA ALTO, cuatro veces
+    peor que el bajo.
+
+    Salvo que hay una trampa que impide cerrarlo por razonamiento: en 50x, un
+    recorrido de +-478 mV en la referencia serian +-24 V a la salida, muy fuera
+    de los rieles. O sea que esos 355 mV son RECORTE, no autoridad real, y ahi
+    el modo de falla es saturacion y no falta de rango. Son dos problemas
+    distintos y no se descartan uno al otro.
+
+    Como no se puede decidir sin medir, este orden NO apuesta a ninguna de las
+    dos hipotesis: recorre primero las CUATRO ESQUINAS -los dos extremos de cada
+    PGA cruzados entre si- y despues va cerrando hacia el centro. Asi las
+    primeras cuatro combinaciones ya cubren el peor caso sea cual sea de los dos,
+    que es lo que se quiere de una campana que puede quedar a medias.
     """
+    n = len(GAIN_CODES)
     combos = []
-    for i_pga, pga in enumerate(GAIN_CODES):
-        for i_out, out in enumerate(GAIN_CODES):
-            # dificultad: PGA chico pesa, PGAout grande pesa
-            dificultad = (len(GAIN_CODES) - 1 - i_pga) + i_out
-            combos.append((dificultad, i_pga, i_out))
-    combos.sort(key=lambda c: -c[0])
-    return [(p, o) for _, p, o in combos]
+    for i_pga in range(n):
+        for i_out in range(n):
+            # Distancia al centro de cada eje: 0 en el medio, maxima en los
+            # extremos. Se ordena por la MAYOR de las dos, asi las esquinas
+            # -donde las dos son maximas- salen primero.
+            d_pga = abs(i_pga - (n - 1) / 2.0)
+            d_out = abs(i_out - (n - 1) / 2.0)
+            combos.append((min(d_pga, d_out), d_pga + d_out, i_pga, i_out))
+    # min() primero privilegia las esquinas sobre los bordes; la suma desempata.
+    combos.sort(key=lambda c: (-c[0], -c[1]))
+    return [(p, o) for _, _, p, o in combos]
 
 
 def exp_campana(lab: Lab, cons, espera_s: float, max_combos: int,
