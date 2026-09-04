@@ -56,6 +56,7 @@ def uv_a_mv(uv: float | None) -> float:
 def tabla_escalon(d: dict) -> list[dict]:
     """Ganancia directa, ganancias cruzadas y tau de cada par (etapa, tap)."""
     filas = []
+    amplitud = d.get("amplitud", 0) or 0
     for ens in d.get("ensayos", []):
         etapa, destino = ens["etapa"], ens["destino"]
         base = ens.get("base_uv", {})
@@ -64,7 +65,11 @@ def tabla_escalon(d: dict) -> list[dict]:
             if aj is None:
                 continue
             b = base.get(str(ch), base.get(ch))
-            salto_codigos = destino - 0 if destino != 0 else -0
+            # El tramo de ida va de 0 al destino; el de VUELTA va del destino
+            # anterior a 0, o sea que el salto es -amplitud. Antes se calculaba
+            # como `destino - 0`, que en la vuelta da cero y dividia por cero:
+            # de ahi los nan en media tabla.
+            salto_codigos = destino if destino != 0 else -amplitud
             filas.append({
                 "etapa": etapa,
                 "tap": ch,
@@ -75,6 +80,12 @@ def tabla_escalon(d: dict) -> list[dict]:
                 "amplitud_mv": aj["amplitud_uv"] / 1000.0,
                 "tau_s": aj["tau_s"],
                 "plano": aj["plano"],
+                # Un ajuste exponencial sobre ruido devuelve un tau enorme y sin
+                # sentido: la exponencial degenera en una recta y la grilla se va
+                # al extremo. Solo se cree el tau si la amplitud le gana claro al
+                # residuo. Sin esto la etapa 2 informaba tau = 1548 s.
+                "creible": (not aj["plano"]
+                            and abs(aj["amplitud_uv"]) > 10.0 * max(aj["rms_uv"], 1.0)),
                 "rms_uv": aj["rms_uv"],
                 # uV en el tap por codigo de IDAC: la ganancia que el firmware
                 # necesita para convertir error en pasos.
@@ -91,7 +102,7 @@ def imprimir_escalon(d: dict) -> None:
     print(f"{'etapa':>6} {'tap':>5} {'tipo':>13} {'A [mV]':>9} {'tau [s]':>9} "
           f"{'uV/codigo':>11} {'rms':>7}")
     for f in tabla_escalon(d):
-        tau = "-" if (f["plano"] or math.isnan(f["tau_s"])) else f"{f['tau_s']:.2f}"
+        tau = f"{f['tau_s']:.2f}" if f.get("creible") else "-"
         print(f"{f['etapa']:>6} {f['tap']:>5} {f['tipo']:>13} "
               f"{f['amplitud_mv']:>9.3f} {tau:>9} "
               f"{f['uv_por_codigo']:>11.1f} {f['rms_uv']:>7.0f}")
@@ -100,7 +111,8 @@ def imprimir_escalon(d: dict) -> None:
     print("\n  tau que enfrenta cada etapa (el mas lento de los que la afectan):")
     for etapa in range(4):
         taus = [f["tau_s"] for f in tabla_escalon(d)
-                if f["tap"] == etapa and not f["plano"] and not math.isnan(f["tau_s"])]
+                if f["tap"] == etapa and f.get("creible")
+                and not math.isnan(f["tau_s"])]
         if taus:
             print(f"    etapa {etapa} ({NOMBRE_TAP[etapa]:<5}): "
                   f"tau_max = {max(taus):.2f} s   -> 3 tau = {3*max(taus):.0f} s")
