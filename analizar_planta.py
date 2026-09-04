@@ -134,7 +134,18 @@ def analizar_curva(d: dict) -> dict:
         if x1 != x0:
             locales.append(((x0 + x1) / 2.0, (y1 - y0) / (x1 - x0)))
     ls = [s for _, s in locales]
-    razon = (max(ls) / min(ls)) if ls and min(ls) > 0 else float("nan")
+    # Criterio robusto. La version anterior hacia max/min y devolvia nan en
+    # cuanto una pendiente local salia negativa, que es justo el caso mas
+    # interesante: pendiente que se da vuelta = RECORTE, no no-linealidad.
+    # Se separan las dos cosas, que se arreglan distinto:
+    #   recorte        -> hay que acotar el rango util del IDAC
+    #   no linealidad  -> hace falta curva a trozos, como ya tiene el LP
+    recorta = any(x <= 0.0 for x in ls)
+    orden = sorted(ls)
+    # percentiles 10/90 en vez de min/max: un solo punto ruidoso no decide
+    p10 = orden[max(0, int(0.10 * (len(orden) - 1)))]
+    p90 = orden[min(len(orden) - 1, int(0.90 * (len(orden) - 1)))]
+    razon = (p90 / p10) if p10 > 0 else float("inf")
 
     return {
         "etapa": etapa, "puntos": n,
@@ -144,7 +155,7 @@ def analizar_curva(d: dict) -> dict:
         "residuo_rms_mv": rms / 1000.0,
         "pendiente_min": min(ls) if ls else float("nan"),
         "pendiente_max": max(ls) if ls else float("nan"),
-        "razon_no_linealidad": razon,
+        "razon_no_linealidad": razon, "recorta": recorta,
         "recorrido_mv": (max(ys) - min(ys)) / 1000.0,
         "locales": locales,
     }
@@ -161,8 +172,13 @@ def imprimir_curva(d: dict) -> None:
     print(f"  pendiente global  {a['pendiente_uv_por_codigo']:.2f} uV/codigo "
           f"(ganancia x1000 = {a['ganancia_x1000']:.0f})")
     print(f"  pendiente local   {a['pendiente_min']:.2f} .. {a['pendiente_max']:.2f} uV/codigo")
-    print(f"  razon max/min     {a['razon_no_linealidad']:.2f}")
+    print(f"  razon p90/p10     {a['razon_no_linealidad']:.2f}")
     print(f"  residuo vs recta  {a['residuo_rms_mv']:.3f} mV rms")
+    if a["recorta"]:
+        print(f"  -> RECORTA: hay pendientes locales <= 0, o sea que la cadena "
+              f"pega contra un tope. No es no-linealidad: hay que ACOTAR el "
+              f"rango util del IDAC, porque mas alla del tope el lazo no ve "
+              f"efecto y sigue empujando hasta el riel.")
     if a["razon_no_linealidad"] > 1.25:
         print(f"  -> NO ES LINEAL. Una constante de ganancia no alcanza para esta "
               f"etapa; necesita curva a trozos como ya tiene el LP.")

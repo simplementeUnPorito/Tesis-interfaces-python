@@ -250,8 +250,20 @@ def exp_escalon(lab: Lab, etapas: list[int], amplitud: int,
 # --------------------------------------------------------------------------
 
 def exp_curva(lab: Lab, etapa: int, lo: int, hi: int, paso: int,
-              settle_sel: int, pga: int, pgaout: int, todos: bool) -> dict:
-    """Curva del IDAC contra los taps, sin suponer linealidad."""
+              settle_sel: int, pga: int, pgaout: int, todos: bool,
+              dwell_s: float = 0.0) -> dict:
+    """Curva del IDAC contra los taps, sin suponer linealidad.
+
+    `dwell_s` es la espera de PLANTA entre mover el IDAC y medir, y no tiene
+    nada que ver con `settle_sel`, que es el asentamiento del mux/FIR. Hace
+    falta porque el acople medido tiene tau ~ 29 s: con los 500 ms de D2 cada
+    punto se toma sobre un transitorio.
+
+    No alcanza para llegar a regimen -serian 5 tau = 150 s por punto, o sea
+    horas por etapa- pero con pasos iguales el residuo e^(-T/tau) es
+    aproximadamente constante, asi que sesga la pendiente global y NO la forma
+    de la curva, que es lo que se quiere ver aca.
+    """
     canales = CANALES if todos else (etapa,)
     print(f"\n=== CURVA etapa {etapa} ({describe_stage(etapa)})  "
           f"PGA={GAIN_CODES[pga]}x PGAout={GAIN_CODES[pgaout]}x  "
@@ -264,6 +276,8 @@ def exp_curva(lab: Lab, etapa: int, lo: int, hi: int, paso: int,
         if not lab.set_idac(etapa, code):
             print(f"  codigo {code:>4}  FALLO set_idac")
             continue
+        if dwell_s > 0.0:
+            time.sleep(dwell_s)
         fila = {"code": code}
         for ch in canales:
             p = lab.measure_dc(ch, settle_sel)
@@ -274,7 +288,7 @@ def exp_curva(lab: Lab, etapa: int, lo: int, hi: int, paso: int,
     lab.set_idac(etapa, 0)
 
     return {"experimento": "curva", "etapa": etapa, "lo": lo, "hi": hi,
-            "paso": paso, "settle_sel": settle_sel,
+            "paso": paso, "settle_sel": settle_sel, "dwell_s": dwell_s,
             "settle_ms": SETTLE_MS[settle_sel], "canales": list(canales),
             "pga_code": pga, "pgaout_code": pgaout,
             "pga_x": GAIN_CODES[pga], "pgaout_x": GAIN_CODES[pgaout],
@@ -436,6 +450,8 @@ def main() -> int:
     c.add_argument("--pgaout", type=int, default=0)
     c.add_argument("--todos", action="store_true",
                    help="medir los cuatro taps, no solo el propio")
+    c.add_argument("--dwell", type=float, default=0.0,
+                   help="espera de PLANTA por punto, en segundos (tau ~ 29 s)")
 
     k = sub.add_parser("campana", help="las 81 combinaciones, de la mas dificil "
                                       "a la mas facil, desatendida y reanudable")
@@ -458,7 +474,8 @@ def main() -> int:
             guardar(f"escalon_pga{args.pga}_out{args.pgaout}_{stamp}.json", d)
         elif args.cmd == "curva":
             d = exp_curva(lab, args.etapa, args.lo, args.hi, args.paso,
-                          args.settle, args.pga, args.pgaout, args.todos)
+                          args.settle, args.pga, args.pgaout, args.todos,
+                          args.dwell)
             guardar(f"curva_e{args.etapa}_pga{args.pga}_out{args.pgaout}_{stamp}.json", d)
         elif args.cmd == "campana":
             exp_campana(lab, cons, args.espera, args.max, stamp)
