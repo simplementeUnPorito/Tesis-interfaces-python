@@ -90,19 +90,49 @@ def leer(lab: Lab, chs=CANALES) -> dict[int, float | None]:
     return out
 
 
-def centrar_tap(lab: Lab, tap: int, etapa: int, espera: float, log) -> int | None:
-    """Bisección del IDAC de `etapa` para llevar `tap` al centro de su excursión.
+def centrar_tap(lab: Lab, tap: int, etapa: int, espera: float, log,
+                objetivo: float | None = None) -> int | None:
+    """Bisección del IDAC de `etapa` para llevar `tap` a `objetivo`.
 
-    Devuelve el código elegido, o None si esa etapa no puede mover ese tap fuera
-    del riel. No usa la matriz: descubre hasta el signo probando los extremos.
+    Por omisión apunta al centro de la excursión, que es lo que se quiere cuando
+    sólo se busca alejar del riel. Para el tap del LP se le pasa el objetivo de
+    la calibración, porque ahí sí importa dónde queda.
+
+    Devuelve el código elegido, o None si esa etapa no puede mover ese tap. No
+    usa la matriz: descubre hasta el signo probando los extremos.
     """
-    obj = centro(tap)
+    obj = centro(tap) if objetivo is None else objetivo
     lab.set_idac(etapa, -255); time.sleep(espera)
     v_lo = leer(lab, (tap,))[tap]
     lab.set_idac(etapa, 255); time.sleep(espera)
     v_hi = leer(lab, (tap,))[tap]
     log(f"      etapa {etapa} -> tap {tap}: extremos {v_lo} / {v_hi} mV")
-    if en_riel(tap, v_lo) and en_riel(tap, v_hi):
+    # RECHAZAR SOLO SI LOS DOS EXTREMOS ESTAN EN EL MISMO RIEL.
+    #
+    # La primera version rechazaba cuando los dos estaban "en riel", sin mirar en
+    # CUAL. Eso descartaba justamente el caso bueno: con PGA x50 el ADDER deja al
+    # LP en 1122,5 mV con -255 y en 746,4 mV con +255, o sea contra los DOS
+    # rieles opuestos. Que cruce de un riel al otro significa que **hay autoridad
+    # de sobra** y que el punto util esta en el medio; es exactamente lo que la
+    # biseccion sabe encontrar. Rechazarlo hacia concluir "no hay punto valido"
+    # sobre una combinacion perfectamente calibrable.
+    #
+    # No hay autoridad solo si los dos extremos caen del MISMO lado.
+    def _lado(v):
+        if v is None:
+            return None
+        if v <= RIEL_BAJO[tap] + MARGEN:
+            return "bajo"
+        if v >= RIEL_ALTO[tap] - MARGEN:
+            return "alto"
+        return "medio"
+
+    lado_lo, lado_hi = _lado(v_lo), _lado(v_hi)
+    if lado_lo is None or lado_hi is None:
+        return None
+    if lado_lo != "medio" and lado_lo == lado_hi:
+        log(f"      etapa {etapa} -> tap {tap}: los dos extremos en el riel "
+            f"{lado_lo}; no hay autoridad")
         return None
     creciente = (v_hi or 0) > (v_lo or 0)
     lo, hi, mid, v = -255, 255, 0, None
@@ -183,7 +213,11 @@ def gruesa(lab: Lab, espera: float, log) -> dict[int, int] | None:
 
     # 2. El tap del LP, desde el ADDER. Es el tap que importa: es el que se
     #    captura, y el unico cuyo error entra en el criterio de Elias.
-    cod = centrar_tap(lab, 3, 2, espera, log)
+    #    Se apunta directo al OBJETIVO y no al centro de la excursion, para que
+    #    a la etapa 3 le quede solo recortar unos milivoltios y no recorrer
+    #    decenas: su escalon es de 0,525 mV, asi que recorrer 60 mV le costaria
+    #    115 de sus 255 codigos por nada.
+    cod = centrar_tap(lab, 3, 2, espera, log, objetivo=OBJETIVO_MV)
     if cod is None:
         log("      el ADDER tampoco saca al LP del riel: no hay punto valido")
         return None
@@ -216,7 +250,24 @@ def refinar(lab: Lab, dac: dict[int, int], espera: float, vueltas: int, log) -> 
     uV/codigo alcanzan de sobra -son +-134 mV- y tiene la resolucion que el
     ADDER, con 3823 uV/codigo, no tiene.
     """
-    PARES = ((0, 0), (1, 1), (3, 3))
+    # SOLO EL TAP 3, Y ESTO SE APRENDIO ROMPIENDOLO.
+    #
+    # La version anterior refinaba tambien los taps 0 y 1 hacia el objetivo
+    # nominal. Con PGA x50 eso movio la etapa 0 catorce codigos para llevar ch0
+    # de 958 a 997 mV, y como el acople de esa etapa hacia ch3 es de unos
+    # 1026 uV/codigo multiplicado por la ganancia -o sea ~51.300 uV/codigo- esos
+    # catorce codigos le metieron al LP **718 mV**. Los taps terminaron en
+    # [997,9  998,3  764,0  1122,0]: los dos de abajo contra el riel. La
+    # "correccion" destruyo lo que la busqueda gruesa habia logrado.
+    #
+    # Y perseguir ch0 no servia para nada: estaba en 958 mV, a 155 mV de su
+    # riel, perfectamente sano. El criterio de Elias es sobre el LP -"lo que
+    # importa es que no saturen, lo ideal es que LP este chico y las otras al
+    # minimo"-, no sobre que cada tap de exactamente 1000 mV.
+    #
+    # Regla: aguas arriba solo se corrige lo que esta por saturar, y eso ya lo
+    # hace la busqueda gruesa. El refinamiento es del LP y nada mas.
+    PARES = ((3, 3),)
     for vuelta in range(vueltas):
         for tap, etapa in PARES:
             v0 = leer(lab, (tap,))[tap]
