@@ -57,6 +57,23 @@ SETTLE_DC = 3
 CANALES = (0, 1, 2, 3)
 
 
+def uv_valido(p) -> "int | None":
+    """µV del punto, o None si no hay respuesta O si el firmware la marco mala.
+
+    NO ALCANZA CON COMPROBAR QUE LA RESPUESTA EXISTA, y esto ya ensucio datos: el
+    barrido del ADDER del 2026-09-05 guardo `ch3 = 0,000 mV` en el codigo +81 con
+    el resto de la curva pegada al riel en 746 mV. Era una medida fallida que
+    llego con ok=0 y se guardo igual, porque se miraba solo `if p`.
+
+    Un cero silencioso es la peor forma de fallar: el ajuste posterior lo toma
+    como punto bueno y tuerce la pendiente sin que nadie se entere. Mejor un
+    hueco declarado que un numero inventado.
+    """
+    if p is None or not getattr(p, "ok", True):
+        return None
+    return p.mean_uv
+
+
 # --------------------------------------------------------------------------
 # banco
 # --------------------------------------------------------------------------
@@ -183,7 +200,7 @@ def serie_taps(lab: Lab, duracion_s: float, t0: float) -> list[dict]:
             if p is None:
                 continue
             puntos.append({"t": round(time.monotonic() - t0, 3),
-                           "ch": ch, "uv": p.mean_uv})
+                           "ch": ch, "uv": uv_valido(p)})
     return puntos
 
 
@@ -204,7 +221,7 @@ def exp_escalon(lab: Lab, etapas: list[int], amplitud: int,
             etiqueta = f"etapa {etapa} -> {destino:+d}"
             print(f"\n  {etiqueta}  ({describe_stage(etapa)})")
             base = {ch: lab.measure_dc(ch, SETTLE_DC) for ch in CANALES}
-            base_uv = {ch: (p.mean_uv if p else None) for ch, p in base.items()}
+            base_uv = {ch: uv_valido(p) for ch, p in base.items()}
             print("    antes:  " + "  ".join(
                 f"ch{ch} {(base_uv[ch] or 0)/1000.0:8.3f} mV" for ch in CANALES))
 
@@ -281,7 +298,7 @@ def exp_curva(lab: Lab, etapa: int, lo: int, hi: int, paso: int,
         fila = {"code": code}
         for ch in canales:
             p = lab.measure_dc(ch, settle_sel)
-            fila[f"ch{ch}"] = p.mean_uv if p else None
+            fila[f"ch{ch}"] = uv_valido(p)
         puntos.append(fila)
         print("  codigo {:>4}  ".format(code) + "  ".join(
             f"ch{ch} {(fila[f'ch{ch}'] or 0)/1000.0:9.3f} mV" for ch in canales))
@@ -311,7 +328,7 @@ def autoridad_y_offset(lab: Lab, espera_s: float) -> dict:
         lab.set_idac(st, 0)
     time.sleep(espera_s)
     reposo = {ch: (lab.measure_dc(ch, SETTLE_DC) or None) for ch in CANALES}
-    reposo_uv = {ch: (p.mean_uv if p else None) for ch, p in reposo.items()}
+    reposo_uv = {ch: uv_valido(p) for ch, p in reposo.items()}
 
     autoridad = {}
     for st in CANALES:
@@ -320,7 +337,7 @@ def autoridad_y_offset(lab: Lab, espera_s: float) -> dict:
             lab.set_idac(st, code)
             time.sleep(espera_s)
             p = lab.measure_dc(st, SETTLE_DC)
-            extremos[code] = p.mean_uv if p else None
+            extremos[code] = uv_valido(p)
         lab.set_idac(st, 0)
         autoridad[st] = extremos
     time.sleep(espera_s)
@@ -431,7 +448,7 @@ def solo_offset(lab: Lab, espera_s: float) -> dict:
     dc = {ch: lab.measure_dc(ch, SETTLE_DC) for ch in CANALES}
     ac = {ch: lab.measure_ac(ch, AC_N_SEL) for ch in CANALES}
     return {
-        "reposo_uv": {ch: (p.mean_uv if p else None) for ch, p in dc.items()},
+        "reposo_uv": {ch: uv_valido(p) for ch, p in dc.items()},
         "ac_n_sel": AC_N_SEL,
         "ac": {ch: (None if p is None else {
             "media_uv": p.mean_uv, "rms_uv": p.rms_uv,

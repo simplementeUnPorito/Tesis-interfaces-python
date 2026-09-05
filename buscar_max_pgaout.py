@@ -1,0 +1,354 @@
+"""Busca el PGAout MÁXIMO que todavía calibra, con el PGA de entrada fijo.
+
+EL OBJETIVO, planteado por Elías el 2026-09-05
+    "el segundo pga anda variando de 1 hasta 50 y te quedas en el máximo estable;
+     si fuese x1 sería como la placa que probé"
+
+O sea que no hace falta que anden las 81 combinaciones: hace falta saber **hasta
+dónde se puede subir PGAout** con el PGA de entrada en el valor que Elías ya
+validó en campo (×50). Y hay una red de seguridad: PGAout ×1 reproduce la placa
+que él ya probó y que funciona, así que el peor resultado posible de esta
+búsqueda sigue siendo un nodo utilizable.
+
+POR QUÉ ESTE PROGRAMA NO USA LA MATRIZ DE ACOPLE
+Porque la matriz demostró no valer fuera del punto donde se midió. La del
+2026-09-04 se tomó con PGA ×1 y PGAout ×1, y al usarla con otras ganancias la
+calibración conjunta saltó de un riel al otro: predijo 59 mV para un cambio que
+movió 371. Confiar en ella acá sería repetir el mismo error por tercera vez.
+
+En su lugar, **la pendiente se mide en el punto de operación, cada vez**. Es un
+Newton con derivada numérica: mover ±8 códigos, ver cuánto se movió el tap, y
+recién entonces calcular el salto. Cuesta dos esperas de planta más por etapa, y
+a cambio no supone absolutamente nada sobre el circuito.
+
+ESTRUCTURA DE CADA COMBINACIÓN
+    1. **Búsqueda gruesa por bisección**, etapa por etapa y de aguas arriba
+       hacia abajo, hasta sacar los cuatro taps del riel. No necesita conocer la
+       ganancia, sólo su signo, y hasta el signo se descubre probando los dos
+       extremos. Es la parte robusta.
+    2. **Refinamiento local**, midiendo la pendiente en el lugar y aplicando la
+       corrección. Es la parte precisa.
+    3. **Verificación** tras esperar de nuevo, que es lo único que cuenta.
+
+    python buscar_max_pgaout.py --port COM8 --pga 8
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from testbench.core import console as con             # noqa: E402
+from testbench.core.lab import GAIN_CODES, Lab        # noqa: E402
+from testbench.core.session import Session            # noqa: E402
+
+SALIDA = REPO / "lab" / "planta"
+CANALES = (0, 1, 2, 3)
+SETTLE_DC = 3
+TAU_S = 29.5
+OBJETIVO_MV = 1000.0
+
+#: Rieles medidos el 2026-09-05. Ver docs/MEDICIONES_2026-09-05.md §4.
+RIEL_BAJO = {0: 759.4, 1: 750.0, 2: 750.8, 3: 746.4}
+RIEL_ALTO = {0: 1114.4, 1: 1122.0, 2: 1121.6, 3: 1122.3}
+MARGEN = 15.0
+
+#: Escalón para medir la pendiente en el lugar.
+DELTA = 8
+#: Criterio de aceptación de Elías.
+TOLERANCIA_MV = 20.0
+
+
+def en_riel(ch: int, mv: float | None) -> bool:
+    if mv is None:
+        return True
+    return mv <= RIEL_BAJO[ch] + MARGEN or mv >= RIEL_ALTO[ch] - MARGEN
+
+
+def centro(ch: int) -> float:
+    """El centro de la excursión REAL del tap, no el objetivo nominal.
+
+    Los rieles medidos están en ~750 y ~1122 mV, o sea centrados en ~936 y no en
+    los 1000 mV del objetivo. Para la búsqueda gruesa lo que importa es alejarse
+    de los dos rieles por igual, así que se apunta al centro real; el objetivo
+    nominal se persigue después, en el refinamiento.
+    """
+    return (RIEL_BAJO[ch] + RIEL_ALTO[ch]) / 2.0
+
+
+def leer(lab: Lab, chs=CANALES) -> dict[int, float | None]:
+    out = {}
+    for ch in chs:
+        p = lab.measure_dc(ch, SETTLE_DC)
+        out[ch] = (p.mean_uv / 1000.0) if (p and p.ok) else None
+    return out
+
+
+def centrar_tap(lab: Lab, tap: int, etapa: int, espera: float, log) -> int | None:
+    """Bisección del IDAC de `etapa` para llevar `tap` al centro de su excursión.
+
+    Devuelve el código elegido, o None si esa etapa no puede mover ese tap fuera
+    del riel. No usa la matriz: descubre hasta el signo probando los extremos.
+    """
+    obj = centro(tap)
+    lab.set_idac(etapa, -255); time.sleep(espera)
+    v_lo = leer(lab, (tap,))[tap]
+    lab.set_idac(etapa, 255); time.sleep(espera)
+    v_hi = leer(lab, (tap,))[tap]
+    log(f"      etapa {etapa} -> tap {tap}: extremos {v_lo} / {v_hi} mV")
+    if en_riel(tap, v_lo) and en_riel(tap, v_hi):
+        return None
+    creciente = (v_hi or 0) > (v_lo or 0)
+    lo, hi, mid, v = -255, 255, 0, None
+    for _ in range(7):
+        mid = (lo + hi) // 2
+        lab.set_idac(etapa, mid); time.sleep(espera)
+        v = leer(lab, (tap,))[tap]
+        if v is None:
+            return None
+        if abs(v - obj) < 25.0:
+            break
+        if (v < obj) == creciente:
+            lo = mid
+        else:
+            hi = mid
+    log(f"      etapa {etapa} -> tap {tap}: codigo {mid} deja el tap en {v:.1f} mV")
+    return mid
+
+
+def gruesa(lab: Lab, espera: float, log) -> dict[int, int] | None:
+    """Deja los cuatro taps CENTRADOS en su excursión, sin usar la matriz.
+
+    EL EMPAREJAMIENTO NO ES EL OBVIO, Y ESO SE DESCUBRIO MIDIENDO. La forma
+    natural sería que cada etapa controle su propio tap. Para el LP eso NO
+    FUNCIONA: el 2026-09-05, con PGA x50, el tap del LP quedó en el riel y ni
+    -255 ni +255 de su propio IDAC lo sacaron de ahi. Su autoridad son 525
+    uV/codigo, o sea +-134 mV, y lo que le mete el ADDER son 3823 uV/codigo:
+    **7,3 veces mas**. El LP no puede con lo que le hace el ADDER.
+
+    Entonces el tap del LP se centra desde el ADDER, que es quien tiene la
+    autoridad, y el IDAC del propio LP queda para el ajuste fino. El ADDER paga
+    el costo de descentrarse, y puede: su excursion es la misma pero su tap no es
+    el que se captura, asi que alcanza con que no llegue al riel.
+
+    Se centran TODOS los taps y no solo los que estan en riel. La primera version
+    solo tocaba los railados, y por eso dejo el ADDER en 1089,7 mV -a 32 mV del
+    riel, sin marcar como railado- y con eso el LP no tenia ninguna chance.
+    """
+    dac = {k: 0 for k in CANALES}
+    for k in CANALES:
+        lab.set_idac(k, 0)
+    time.sleep(espera)
+
+    # 1. Aguas arriba: cada etapa con su propio tap. Son las que nadie mas puede
+    #    corregir, porque la cadena es triangular.
+    for etapa in (0, 1):
+        v = leer(lab, (etapa,))[etapa]
+        if v is not None and abs(v - centro(etapa)) < 60.0:
+            log(f"      etapa {etapa}: ya centrada ({v:.1f} mV)")
+            continue
+        cod = centrar_tap(lab, etapa, etapa, espera, log)
+        if cod is None:
+            log(f"      etapa {etapa}: no se puede centrar su tap")
+            return None
+        dac[etapa] = cod
+
+    # 2. El tap del LP, desde el ADDER. Es el tap que importa: es el que se
+    #    captura, y el unico cuyo error entra en el criterio de Elias.
+    cod = centrar_tap(lab, 3, 2, espera, log)
+    if cod is None:
+        log("      el ADDER tampoco saca al LP del riel: no hay punto valido")
+        return None
+    dac[2] = cod
+
+    # 3. Comprobar que el ADDER no se haya railado al pagar ese costo.
+    v2 = leer(lab, (2,))[2]
+    if en_riel(2, v2):
+        log(f"      el ADDER quedo en el riel ({v2}) al centrar el LP: "
+            f"no hay punto donde los dos convivan")
+        return None
+    log(f"      ADDER en {v2:.1f} mV tras centrar el LP: aceptable")
+    return dac
+
+
+def refinar(lab: Lab, dac: dict[int, int], espera: float, vueltas: int, log) -> dict[int, int]:
+    """Newton con derivada medida en el lugar.
+
+    EMPAREJAMIENTO (tap, etapa), y no es la diagonal:
+
+        tap 0 <- etapa 0     tap 1 <- etapa 1     tap 3 <- etapa 3
+
+    **El tap 2 no se persigue.** Al ADDER se lo usa en la busqueda gruesa para
+    centrar el LP, que es el tap que se captura y el unico que entra en el
+    criterio de Elias; despues de eso el ADDER queda donde quedo, y esta bien:
+    alcanza con que no llegue al riel. Perseguir su objetivo nominal seria
+    deshacer justamente lo que se hizo para salvar al LP.
+
+    El tap 3 SI se refina con su propia etapa: para el ajuste fino sus 525
+    uV/codigo alcanzan de sobra -son +-134 mV- y tiene la resolucion que el
+    ADDER, con 3823 uV/codigo, no tiene.
+    """
+    PARES = ((0, 0), (1, 1), (3, 3))
+    for vuelta in range(vueltas):
+        for tap, etapa in PARES:
+            v0 = leer(lab, (tap,))[tap]
+            if v0 is None or en_riel(tap, v0):
+                continue
+            err = OBJETIVO_MV - v0
+            if abs(err) < 2.0:
+                continue
+            # Derivada numerica AQUI, no supuesta.
+            prueba = max(-255, min(255, dac[etapa] + DELTA))
+            if prueba == dac[etapa]:
+                prueba = dac[etapa] - DELTA
+            lab.set_idac(etapa, prueba); time.sleep(espera)
+            v1 = leer(lab, (tap,))[tap]
+            lab.set_idac(etapa, dac[etapa])
+            if v1 is None or en_riel(tap, v1) or prueba == dac[etapa]:
+                continue
+            pend = (v1 - v0) / (prueba - dac[etapa])       # mV por codigo
+            if abs(pend) < 1e-4:
+                continue
+            paso = int(round(err / pend))
+            nuevo = max(-255, min(255, dac[etapa] + paso))
+            lab.set_idac(etapa, nuevo)
+            time.sleep(espera)
+            dac[etapa] = nuevo
+            v2 = leer(lab, (tap,))[tap]
+            log(f"      v{vuelta} tap {tap} via etapa {etapa}: {v0:.1f} -> {v2} mV "
+                f"(pend {1000 * pend:.0f} uV/cod, paso {paso:+d}, cod {nuevo})")
+    return dac
+
+
+def una_combinacion(lab: Lab, pga_code: int, out_code: int, espera_busq: float,
+                    espera_med: float, vueltas: int) -> dict:
+    t0 = time.time()
+    lineas: list[str] = []
+
+    def log(txt: str) -> None:
+        print(txt, flush=True)
+        lineas.append(txt)
+
+    lab.set_gain("pga", pga_code)
+    lab.set_gain("pgaout", out_code)
+    log(f"    busqueda gruesa (espera {espera_busq:.0f} s por paso)")
+    dac = gruesa(lab, espera_busq, log)
+    if dac is None:
+        return {"pga_x": GAIN_CODES[pga_code], "pgaout_x": GAIN_CODES[out_code],
+                "resultado": "sin punto valido", "cumple": False,
+                "t_s": time.time() - t0, "log": lineas}
+
+    log(f"    refinamiento (espera {espera_med:.0f} s por paso)")
+    dac = refinar(lab, dac, espera_med, vueltas, log)
+
+    log(f"    verificacion: esperando {espera_med:.0f} s")
+    time.sleep(espera_med)
+    v = leer(lab)
+    err = {ch: (None if v[ch] is None else v[ch] - OBJETIVO_MV) for ch in CANALES}
+    railados = [ch for ch in CANALES if en_riel(ch, v[ch])]
+    peor = max((abs(e) for e in err.values() if e is not None), default=None)
+    cumple = (not railados) and (err.get(3) is not None) and abs(err[3]) <= TOLERANCIA_MV
+    log(f"    taps {[None if v[c] is None else round(v[c], 1) for c in CANALES]}  "
+        f"LP {err.get(3)}  peor {peor}  {'CUMPLE' if cumple else 'NO CUMPLE'}")
+    return {"pga_code": pga_code, "pgaout_code": out_code,
+            "pga_x": GAIN_CODES[pga_code], "pgaout_x": GAIN_CODES[out_code],
+            "dac": dac, "taps_mv": v, "error_mv": err,
+            "error_lp_mv": err.get(3), "error_peor_mv": peor,
+            "en_riel": railados, "cumple": cumple,
+            "t_s": time.time() - t0, "log": lineas}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--port", default=None)
+    ap.add_argument("--pga", type=int, default=8, help="codigo del PGA de entrada, 0-8")
+    ap.add_argument("--outs", default="0,1,2,3,4,5,6,7,8",
+                    help="codigos de PGAout a probar, en orden, con --pga fijo")
+    ap.add_argument("--pares", default=None,
+                    help="lista pga:pgaout en CODIGOS, separada por comas. Si se "
+                         "da, ignora --pga y --outs. Es para la segunda pregunta "
+                         "de Elias: si conviene concentrar la ganancia en el "
+                         "primer PGA o repartirla entre los dos")
+    ap.add_argument("--tau-busqueda", type=float, default=1.0)
+    ap.add_argument("--tau-medicion", type=float, default=2.0)
+    ap.add_argument("--vueltas", type=int, default=2)
+    a = ap.parse_args()
+
+    # POR QUE HAY QUE PROBAR EL REPARTO Y NO ALCANZA CON LA GANANCIA TOTAL.
+    # Elias planteo que si PGAout aguanta hasta x24 con el PGA en x50 -o sea x1200
+    # en total- entonces x32 con x32, que son x1024, deberia aguantar tambien.
+    # Puede ser falso, y por una razon concreta: el offset a la salida no depende
+    # solo de la ganancia total sino de DONDE ENTRA cada offset.
+    #
+    #     offset_salida ~ A*Gp*Go + B*Go + C
+    #
+    # con A el offset referido a la entrada, B uno que entre entre las dos etapas
+    # y C uno de la ultima. Con (50,24) eso es 1200A + 24B + C y con (32,32) es
+    # 1024A + 32B + C. Si domina B, el reparto parejo es PEOR pese a tener menos
+    # ganancia total. Por eso se mide en vez de deducirse.
+    if a.pares:
+        pares = []
+        for par in a.pares.split(","):
+            p_, o_ = par.split(":")
+            pares.append((int(p_), int(o_)))
+    else:
+        pares = [(a.pga, int(x)) for x in a.outs.split(",")]
+    eb, em = a.tau_busqueda * TAU_S, a.tau_medicion * TAU_S
+
+    c = con.Console(a.port) if a.port else con.Console()
+    print(f"Abriendo {c.port}...", flush=True)
+    c.open(); time.sleep(1.0)
+    lab = Lab(Session(c))
+    filas = []
+    SALIDA.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ruta = SALIDA / f"max_pgaout_pga{a.pga}_{stamp}.json"
+    try:
+        for pc, oc in pares:
+            print(f"\n=== PGA x{GAIN_CODES[pc]}  PGAout x{GAIN_CODES[oc]}  "
+                  f"(total x{GAIN_CODES[pc] * GAIN_CODES[oc]}) ===", flush=True)
+            r = una_combinacion(lab, pc, oc, eb, em, a.vueltas)
+            filas.append(r)
+            # Se guarda despues de CADA combinacion: una tanda de horas no se
+            # puede perder por un corte a la mitad.
+            ruta.write_text(json.dumps({"pga_code": a.pga, "pares": a.pares,
+                                        "filas": filas}, indent=1),
+                            encoding="utf-8")
+    finally:
+        c.close()
+
+    print("\n" + "=" * 60)
+    print("RESUMEN")
+    print(f"{'PGA':>6} {'PGAout':>7} {'total':>7} {'LP mV':>9} {'peor mV':>9} "
+          f"{'t s':>6}  veredicto")
+    maximo = None
+    for r in filas:
+        lp = r.get("error_lp_mv")
+        pe = r.get("error_peor_mv")
+        print(f"{'x' + str(r['pga_x']):>6} {'x' + str(r['pgaout_x']):>7} "
+              f"{'x' + str(r['pga_x'] * r['pgaout_x']):>7} "
+              f"{(f'{lp:9.2f}' if lp is not None else '        -')} "
+              f"{(f'{pe:9.2f}' if pe is not None else '        -')} "
+              f"{r['t_s']:6.0f}  {'CUMPLE' if r['cumple'] else r.get('resultado', 'no cumple')}")
+        if r["cumple"]:
+            maximo = r["pgaout_x"]
+    print()
+    if maximo is None:
+        print("Ninguna combinacion cumplio. Con PGAout x1 la cadena es la que "
+              "Elias ya valido en campo, asi que hay que revisar el procedimiento "
+              "antes que el hardware.")
+    else:
+        print(f"MAXIMO PGAout ESTABLE: x{maximo}")
+    print(f"crudo -> {ruta}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

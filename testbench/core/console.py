@@ -136,7 +136,24 @@ class Console:
         Abrir resetea el ESP, así que con ``wait_ready`` se espera el banner de
         ``setup()``. Sin él, los primeros comandos se pierden en el arranque.
         """
-        self._ser = serial.Serial(self.port, self.baud, timeout=0)
+        # REINTENTO AL ABRIR. Windows no libera el COM en el instante en que
+        # muere el proceso que lo tenia: si se encadena una medicion detras de
+        # otra, o si se mata una a mano, la siguiente se encuentra con
+        # PermissionError(13) aunque ya no quede ningun proceso vivo. Perder una
+        # tanda de horas por eso no tiene sentido; cinco reintentos de 3 s
+        # cubren de sobra el caso y no tapan un puerto realmente ocupado, que
+        # sigue fallando igual al final.
+        ultimo = None
+        for intento in range(5):
+            try:
+                self._ser = serial.Serial(self.port, self.baud, timeout=0)
+                break
+            except Exception as exc:          # noqa: BLE001
+                ultimo = exc
+                self._note(f"{self.port} ocupado ({exc}); reintento {intento + 1}/5")
+                time.sleep(3.0)
+        else:
+            raise ultimo
         self._ser.dtr = False
         self._ser.rts = False
         self._note(f"abierto {self.port} @ {self.baud} (DTR/RTS en False)")
