@@ -393,19 +393,51 @@ def combos_por_dificultad() -> list[tuple[int, int]]:
     return [(p, o) for _, _, p, o in combos]
 
 
+#: Selector de cantidad de muestras para la medida de AC. 4 = 4096 muestras a
+#: 2604 Hz = 1,57 s por canal. Con cuatro canales por combinación son ~6 s, que
+#: contra una espera de planta de 60 s es ruido en el presupuesto de tiempo.
+AC_N_SEL = 4
+
+
 def solo_offset(lab: Lab, espera_s: float) -> dict:
-    """Sólo el reposo: los cuatro IDAC en 0 y leer los cuatro taps.
+    """El reposo de la combinación: DC de los cuatro taps y ruido de los cuatro.
 
     Diez veces más rápido que `autoridad_y_offset` porque paga UNA espera de
     planta en vez de diez. La autoridad no hace falta medirla en cada
     combinación: sale de la ganancia de la etapa, que ya está medida, y se
     verifica en unos pocos puntos en vez de en los 81.
+
+    Además del DC se toma el **AC de los cuatro taps**, y eso no es un extra
+    gratuito sino que contesta tres preguntas de una sola campaña:
+
+    - **Ganancias del camino de SEÑAL.** El geófono entrega ruido ambiente de
+      banda ancha, o sea la misma excitación en todos los taps al mismo tiempo.
+      El cociente de RMS entre taps consecutivos ES la ganancia de la etapa que
+      hay en el medio, medida sobre la señal real. Eso no se puede sacar de la
+      matriz de acople, que es referencia→tap y no entrada→tap.
+    - **Los pesos de la optimización conjunta.** Elías pidió ponderar por
+      ganancia acumulada, porque las etapas con más ganancia son las que
+      saturan. La ganancia acumulada hasta el tap j es justamente RMS_j/RMS_0.
+    - **El ranking de combinaciones.** Cuál par de ganancias entrega mejor señal
+      antes de recortar.
+
+    OJO con interpretar el RMS a ganancia alta: si el DC se fue lejos del
+    centro, el tap puede estar recortando y entonces el RMS miente por abajo.
+    Por eso se guarda el DC junto al AC y hay que mirarlos juntos.
     """
     for st in CANALES:
         lab.set_idac(st, 0)
     time.sleep(espera_s)
-    r = {ch: lab.measure_dc(ch, SETTLE_DC) for ch in CANALES}
-    return {"reposo_uv": {ch: (p.mean_uv if p else None) for ch, p in r.items()}}
+    dc = {ch: lab.measure_dc(ch, SETTLE_DC) for ch in CANALES}
+    ac = {ch: lab.measure_ac(ch, AC_N_SEL) for ch in CANALES}
+    return {
+        "reposo_uv": {ch: (p.mean_uv if p else None) for ch, p in dc.items()},
+        "ac_n_sel": AC_N_SEL,
+        "ac": {ch: (None if p is None else {
+            "media_uv": p.mean_uv, "rms_uv": p.rms_uv,
+            "pp_uv": p.pp_uv, "hz50_uv": p.hz50_uv, "ok": p.ok,
+        }) for ch, p in ac.items()},
+    }
 
 
 def exp_campana(lab: Lab, cons, espera_s: float, max_combos: int,

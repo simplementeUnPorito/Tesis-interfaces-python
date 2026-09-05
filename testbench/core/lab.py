@@ -197,7 +197,15 @@ class Lab:
             m = RE_AC.match(linea)
             return bool(m) and int(m.group(1)) == ch
 
-        for linea in self.s.raw(f"ac {ch} {n_sel}", idle=1.0, timeout=plazo,
+        # idle 1,0 s era CORTO y perdia medidas en silencio: en la campana del
+        # 2026-09-05 los canales 2 y 3 volvian None mientras el 0 y el 1 salian
+        # bien, o sea que el error dependia del orden y no del canal. `raw`
+        # devuelve cuando pasa `idle` sin recibir nada, aunque `until` no se haya
+        # cumplido todavia, asi que una respuesta que tarda mas que `idle` se
+        # pierde y el llamador recibe None como si el PSoC no hubiera contestado.
+        # Se pone en 6 s, holgado contra el peor caso real. El `until` sigue
+        # cortando apenas llega la linea, asi que no cuesta tiempo cuando anda.
+        for linea in self.s.raw(f"ac {ch} {n_sel}", idle=6.0, timeout=plazo,
                                 until=es_mia):
             if es_mia(linea):
                 m = RE_AC.match(linea)
