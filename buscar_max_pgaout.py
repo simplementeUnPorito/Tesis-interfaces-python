@@ -135,21 +135,49 @@ def centrar_tap(lab: Lab, tap: int, etapa: int, espera: float, log,
             f"{lado_lo}; no hay autoridad")
         return None
     creciente = (v_hi or 0) > (v_lo or 0)
-    lo, hi, mid, v = -255, 255, 0, None
-    for _ in range(7):
+    lo, hi = -255, 255
+
+    # SE DEVUELVE EL MEJOR PUNTO VISTO, NO EL ULTIMO PROBADO.
+    #
+    # La version anterior devolvia `mid` de la ultima iteracion, que es
+    # simplemente donde quedo la busqueda al agotarse, y puede ser un punto
+    # PEOR que otro ya visitado. Se vio en PGA x1 con PGAout x50: devolvio el
+    # codigo -4 con el tap en 1122,2 mV, o sea contra el riel, habiendo pasado
+    # antes por puntos mejores.
+    #
+    # Y 10 iteraciones en vez de 7: sobre un rango de 510 codigos, 7 pasos dejan
+    # una resolucion de 4 codigos, y con PGAout alto la ventana util del ADDER es
+    # de ese orden o menor. Con 10 la resolucion es de menos de un codigo, que es
+    # el limite fisico. Cuesta tres esperas mas -90 s- y es lo que separa
+    # "no hay ventana" de "no la encontre".
+    mejor_cod, mejor_err, mejor_v = None, None, None
+    for _ in range(10):
         mid = (lo + hi) // 2
         lab.set_idac(etapa, mid); time.sleep(espera)
         v = leer(lab, (tap,))[tap]
         if v is None:
             return None
-        if abs(v - obj) < 25.0:
-            break
+        if not en_riel(tap, v):
+            err = abs(v - obj)
+            if mejor_err is None or err < mejor_err:
+                mejor_cod, mejor_err, mejor_v = mid, err, v
+            if err < 8.0:
+                break
         if (v < obj) == creciente:
             lo = mid
         else:
             hi = mid
-    log(f"      etapa {etapa} -> tap {tap}: codigo {mid} deja el tap en {v:.1f} mV")
-    return mid
+        if hi - lo <= 1:
+            break
+
+    if mejor_cod is None:
+        log(f"      etapa {etapa} -> tap {tap}: la biseccion nunca encontro un "
+            f"punto fuera del riel; la ventana util es mas angosta que un codigo")
+        return None
+    lab.set_idac(etapa, mejor_cod)
+    log(f"      etapa {etapa} -> tap {tap}: codigo {mejor_cod} deja el tap en "
+        f"{mejor_v:.1f} mV")
+    return mejor_cod
 
 
 def gruesa(lab: Lab, espera: float, log) -> dict[int, int] | None:
