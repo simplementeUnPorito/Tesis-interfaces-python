@@ -52,12 +52,81 @@ SALIDA = REPO / "lab" / "planta"
 CANALES = (0, 1, 2, 3)
 SETTLE_DC = 3
 TAU_S = 29.5
-OBJETIVO_MV = 1000.0
 
-#: Rieles medidos el 2026-09-05. Ver docs/MEDICIONES_2026-09-05.md §4.
-RIEL_BAJO = {0: 759.4, 1: 750.0, 2: 750.8, 3: 746.4}
-RIEL_ALTO = {0: 1114.4, 1: 1122.0, 2: 1121.6, 3: 1122.3}
-MARGEN = 15.0
+# --------------------------------------------------------------------------
+# EL SETPOINT, YA CON LA ESCALA MEDIDA CON TESTER (2026-09-05)
+#
+# Elias midio con tester dos puntos del mismo tap, separados a proposito:
+#     banco 1000,32  ->  LPo = 2,388 V
+#     banco 1099,94  ->  LPo = 4,372 V
+# y ademas Vdda = 4,826 V y Vref = 2,415 V.
+#
+# De ahi sale la recta   LPo[mV] = 19,9157 * banco - 17533,5   o sea que UN
+# MILIVOLTIO DE BANCO SON 19,92 mV REALES, y:
+#
+#     banco  880,4  =  0 V
+#     banco 1001,5  =  Vref = 2,413 V      <- el objetivo
+#     banco 1122,7  =  Vdda = 4,826 V
+#
+# Tres verificaciones independientes: la saturacion alta medida fue 1123,01 en
+# ch3 y 1123,24 en ch2 contra 1122,7 predicho; el punto medio 1001,55 es
+# exactamente donde se sienta la cadena en reposo; y ch0 en banco 1000,90
+# predice 2,400 V contra 2,419 medidos.
+#
+# DOS CORRECCIONES A LO QUE HABIA ANTES:
+#
+# 1. El setpoint estuvo en 936 un rato, sacado del "centro de la excursion".
+#    ERA UN ARTEFACTO: ese centro se calculo promediando un "riel bajo" de 746,
+#    que segun la recta corresponde a -2,6 V, o sea IMPOSIBLE. Las lecturas por
+#    debajo de banco 880 no son valores bajos: son el ADC fuera de rango
+#    devolviendo basura. La conclusion "esta saturado abajo" era correcta; el
+#    numero no.
+#
+# 2. El criterio original de 1000 mV, que se venia usando sin justificar, estaba
+#    bien por casualidad: banco 1000 es Vref con 1,5 mV de error. Se corrige a
+#    1001,5, que son 30 mV reales de mejora.
+# --------------------------------------------------------------------------
+OBJETIVO_MV = 1001.5
+
+#: Piso de validez de la lectura. Por debajo de esto el ADC esta fuera de rango
+#: y el numero que devuelve no significa nada: hay que tratarlo como "saturado
+#: abajo", nunca como un valor.
+BANCO_MINIMO_VALIDO_MV = 880.4
+
+
+def banco_a_voltios(banco_mv):
+    """Convierte una lectura del banco a voltios reales contra masa."""
+    if banco_mv is None:
+        return None
+    return (19.9157 * banco_mv - 17533.5) / 1000.0
+
+# --------------------------------------------------------------------------
+# LOS RIELES, CORREGIDOS CON LA ESCALA MEDIDA CON TESTER
+#
+# ANTES estaban en 746..1122 de banco, tomados de "donde el tap deja de
+# responder". El de arriba estaba bien; **el de abajo era basura**: banco 746
+# equivale a -2,6 V contra masa, que es imposible. Lo que pasa por debajo de
+# banco 880,4 es que el ADC se sale de rango y devuelve un numero sin sentido.
+#
+# La consecuencia era grave y silenciosa: un tap leyendo 900 se consideraba
+# "sano, a 154 mV del riel" cuando en realidad esta en **0,39 V**, o sea casi
+# contra masa. Varias combinaciones se declararon validas estando railadas, y
+# otras se descartaron por criterios calculados sobre ese piso falso.
+#
+# Ahora los limites son fisicos y comunes a los cuatro taps, porque lo que los
+# fija es la alimentacion y el rango del ADC, no cada etapa:
+#     banco  880,4 = 0 V
+#     banco 1122,7 = Vdda = 4,826 V
+#
+# Ver src/interfaces/python/escala_banco.py, que tiene la recta y sus tres
+# verificaciones independientes.
+# --------------------------------------------------------------------------
+RIEL_BAJO = {c: 880.4 for c in range(4)}
+RIEL_ALTO = {c: 1122.7 for c in range(4)}
+#: Margen exigido contra cada riel, en mV de banco. 25 son ~0,5 V reales sobre
+#: una excursion util de 4,83 V, o sea un 10 % de guarda a cada lado para que la
+#: senal quepa encima del punto de continua sin recortar.
+MARGEN = 25.0
 
 #: Escalón para medir la pendiente en el lugar.
 DELTA = 8
