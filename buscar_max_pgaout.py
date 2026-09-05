@@ -146,16 +146,38 @@ def gruesa(lab: Lab, espera: float, log) -> dict[int, int] | None:
         lab.set_idac(k, 0)
     time.sleep(espera)
 
-    # 1. Aguas arriba: cada etapa con su propio tap. Son las que nadie mas puede
-    #    corregir, porque la cadena es triangular.
+    # 1. Aguas arriba, y con la mano MUY liviana.
+    #
+    #    ESTO YA ME SALIO MAL UNA VEZ Y LA LECCION ES CARA. La primera version
+    #    centraba las etapas 0 y 1 en el centro de su excursion siempre que
+    #    estuvieran a mas de 60 mV de el. Con PGA x50 eso llevo la etapa 1 al
+    #    codigo -252, y como esa etapa mueve el tap del LP unos 1002 uV por
+    #    codigo, esos 252 codigos le metieron al LP ~252 mV: o sea que **la
+    #    propia correccion metio al LP contra el riel**, y el programa concluyo
+    #    que no habia punto valido cuando el que lo habia arruinado era el.
+    #
+    #    El tap 1 estaba en 1016,5 mV, a 106 mV de su riel: perfectamente sano.
+    #    No habia nada que corregir.
+    #
+    #    Regla nueva, y sale de la estructura triangular: **aguas arriba solo se
+    #    toca lo que esta por saturar, y solo lo justo para alejarlo**. Todo el
+    #    margen que quede se reserva para el LP, que es el tap que se captura y
+    #    el unico que entra en el criterio.
+    MARGEN_SEGURO_MV = 60.0     # distancia al riel que se considera suficiente
     for etapa in (0, 1):
         v = leer(lab, (etapa,))[etapa]
-        if v is not None and abs(v - centro(etapa)) < 60.0:
-            log(f"      etapa {etapa}: ya centrada ({v:.1f} mV)")
+        if v is None:
+            return None
+        margen = min(v - RIEL_BAJO[etapa], RIEL_ALTO[etapa] - v)
+        if margen > MARGEN_SEGURO_MV:
+            log(f"      etapa {etapa}: {v:.1f} mV, a {margen:.0f} mV del riel; "
+                f"NO se toca (el margen es para el LP)")
             continue
+        log(f"      etapa {etapa}: {v:.1f} mV, a solo {margen:.0f} mV del riel; "
+            f"hay que alejarla")
         cod = centrar_tap(lab, etapa, etapa, espera, log)
         if cod is None:
-            log(f"      etapa {etapa}: no se puede centrar su tap")
+            log(f"      etapa {etapa}: no se puede alejar del riel")
             return None
         dac[etapa] = cod
 
