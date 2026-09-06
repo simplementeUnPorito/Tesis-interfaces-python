@@ -304,22 +304,41 @@ def main():
         rms = [r["rms_uv"] for _, r in ruidos]
         hz50 = [r["hz50_uv"] for _, r in ruidos]
         print()
+        # LA MEDIANA, NO EL PROMEDIO. Un solo pico -8010 uV a las 5,2 h, veinte
+        # veces el resto, casi seguro alguien caminando cerca- corre el promedio
+        # de 400 a 493 uV, un 23 %. El ruido de la CADENA es lo que se quiere
+        # medir, y ese numero no puede depender de si paso un auto.
+        def mediana(v):
+            o = sorted(v)
+            n = len(o)
+            return o[n // 2] if n % 2 else (o[n // 2 - 1] + o[n // 2]) / 2.0
+
+        med_rms, med_hz = mediana(rms), mediana(hz50)
+        # Cuantas se salen mucho de la mediana: son ambiente, no cadena.
+        picos = [r for r in rms if r > 2.0 * med_rms]
+
         print("EXP4d - EL RUIDO DEL TAP DEL LP, con la cadena calibrada y quieta")
         print("  %d medidas a lo largo de %.1f h" % (len(ruidos), horas))
-        print("  RMS      %6.0f uV de banco  (min %.0f, max %.0f)"
-              % (sum(rms) / len(rms), min(rms), max(rms)))
-        print("  a 50 Hz  %6.0f uV de banco  (min %.0f, max %.0f)"
-              % (sum(hz50) / len(hz50), min(hz50), max(hz50)))
-        deriva_rms = rms[-1] - rms[0]
+        print("  RMS      %6.0f uV de banco (mediana)   min %.0f" % (med_rms, min(rms)))
+        print("  a 50 Hz  %6.0f uV de banco (mediana)" % med_hz)
+        if picos:
+            print("  %d medida%s por encima del doble de la mediana (hasta %.0f uV):"
+                  % (len(picos), "s" if len(picos) > 1 else "", max(rms)))
+            print("     son ruido AMBIENTE -alguien caminando, un auto en la lomada-,")
+            print("     no de la cadena. Por eso se informa la mediana y no el promedio,")
+            print("     que con esos picos se corre un %.0f %%."
+                  % (100 * (sum(rms) / len(rms) - med_rms) / med_rms))
+        deriva_rms = mediana(rms[len(rms) // 2:]) - mediana(rms[:len(rms) // 2])
         print()
-        if abs(deriva_rms) < 0.25 * (sum(rms) / len(rms) or 1):
+        # Se comparan las medianas de las dos mitades, por lo mismo.
+        if abs(deriva_rms) < 0.25 * (med_rms or 1):
             print("  El ruido NO crece con el tiempo: la cadena calibrada no se")
             print("  degrada por estar calibrada. Cierra la objecion obvia al")
             print("  sistema, que es que corregir el offset meta ruido.")
         else:
-            print("  OJO: el RMS cambio %+.0f uV entre la primera y la ultima" % deriva_rms)
-            print("  medida. Hay que mirar si acompana a la deriva del punto o si")
-            print("  es ruido ambiente -de dia hay gente y autos-.")
+            print("  OJO: la mediana del RMS cambio %+.0f uV entre la primera" % deriva_rms)
+            print("  mitad del registro y la segunda. Hay que mirar si acompana al")
+            print("  movimiento del punto o si es ruido ambiente.")
 
     # La figura, si hay matplotlib. No es obligatoria para el veredicto.
     try:

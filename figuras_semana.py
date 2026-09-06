@@ -277,6 +277,15 @@ def numeros_para_el_informe():
     rms = [r["rms_uv"] for r in ruidos] or [0]
     hz50 = [r["hz50_uv"] for r in ruidos] or [0]
 
+    # MEDIANA Y NO PROMEDIO, por lo mismo que la figura recorta la escala: un
+    # solo pico de ruido ambiente -8010 uV a las 5,2 h- corre el promedio un
+    # 23 %. Lo que el informe afirma es el ruido de la CADENA, y ese numero no
+    # puede depender de si paso un auto por la lomada.
+    def _mediana(v):
+        o = sorted(v)
+        n = len(o)
+        return o[n // 2] if n % 2 else (o[n // 2 - 1] + o[n // 2]) / 2.0
+
     def coma(x, dec=0):
         return ("%.*f" % (dec, x)).replace(".", ",")
 
@@ -328,8 +337,9 @@ def numeros_para_el_informe():
         "derivaResiduo":   coma(residuo),
         "derivaCome":      coma(34.0 / abs(pend), 1) if pend else "--",
         "ruidoN":          "%d" % len(ruidos),
-        "ruidoRms":        coma(sum(rms) / len(rms)),
-        "ruidoHz":         coma(sum(hz50) / len(hz50)),
+        "ruidoRms":        coma(_mediana(rms)),
+        "ruidoHz":         coma(_mediana(hz50)),
+        "ruidoPicos":      "%d" % sum(1 for r in rms if r > 2.0 * _mediana(rms)),
     }
     # src/interfaces/python -> hay que subir CUATRO niveles para llegar a la
     # raiz del repo, no tres: python, interfaces, src, y ahi si.
