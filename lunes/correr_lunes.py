@@ -22,6 +22,9 @@ EL ORDEN NO ES ARBITRARIO
      una hora de bateria.
   T1 despues porque caracteriza el actuador que se cambio y dice si el cambio
      hizo lo que se esperaba, en volts por codigo.
+  T4 pegado a T1 porque cruza sus dos salidas y no toca la placa: cuesta
+     segundos y avisa si el par grueso+fino dejo huecos, que es la trampa
+     clasica al achicar la resistencia del fino.
   T3 antes que T2 porque es el criterio de aceptacion: si el nodo se calibra
      solo, lo demas es caracterizacion; si no, T2 dice desde donde partia.
   T2 al final porque es el mas largo y el que menos depende del resultado de
@@ -36,16 +39,19 @@ import time
 import traceback
 from datetime import datetime
 
-from . import t0_linea_base, t1_autoridad, t2_sin_calibrar, t3_cal_firmware
+from . import (t0_linea_base, t1_autoridad, t2_sin_calibrar,
+               t3_cal_firmware, t4_encadenado)
 
 PLANES = {
     "antes":   [("T0 linea base", lambda log: t0_linea_base.correr(log=log))],
     "despues": [("T0 linea base", lambda log: t0_linea_base.correr(log=log)),
                 ("T1 autoridad del ADDER", lambda log: t1_autoridad.correr(2, 3, log=log)),
-                ("T1 autoridad del LP", lambda log: t1_autoridad.correr(3, 3, log=log))],
+                ("T1 autoridad del LP", lambda log: t1_autoridad.correr(3, 3, log=log)),
+                ("T4 encadenado", lambda log: t4_encadenado.correr(log=log))],
     "completo": [("T0 linea base", lambda log: t0_linea_base.correr(log=log)),
                  ("T1 autoridad del ADDER", lambda log: t1_autoridad.correr(2, 3, log=log)),
                  ("T1 autoridad del LP", lambda log: t1_autoridad.correr(3, 3, log=log)),
+                 ("T4 encadenado", lambda log: t4_encadenado.correr(log=log)),
                  ("T3 se calibra solo", lambda log: t3_cal_firmware.correr(log=log)),
                  ("T2 sin calibrar", lambda log: t2_sin_calibrar.correr(log=log))],
 }
