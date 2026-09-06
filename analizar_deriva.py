@@ -33,11 +33,18 @@ LAB = r'C:\Github\Tesis\lab\planta'
 
 
 def cargar(ruta=None):
+    """El registro mas reciente POR FECHA DE ARCHIVO, no por nombre.
+
+    Ordenar por nombre parecia alcanzar mientras todos se llamaban con fecha,
+    pero `deriva_nocturna.json` gana alfabeticamente contra
+    `deriva_20260906_0954.json` -la 'n' va despues del '2'- y el analisis salia
+    sobre el registro viejo sin que nada avisara. El nombre no es una fecha.
+    """
     if ruta is None:
-        cands = sorted(glob.glob(os.path.join(LAB, 'deriva_*.json')))
+        cands = glob.glob(os.path.join(LAB, 'deriva_*.json'))
         if not cands:
             raise SystemExit("no hay ningun deriva_*.json en %s" % LAB)
-        ruta = cands[-1]
+        ruta = max(cands, key=os.path.getmtime)
     return ruta, json.load(open(ruta, encoding='utf-8'))
 
 
@@ -47,7 +54,7 @@ def main():
     print("archivo   : %s" % os.path.basename(ruta))
     print("desde     : %s" % d.get("inicio"))
     print("ganancias : PGA x%s, PGAout x%s" % (d.get("pga_x"), d.get("pgaout_x")))
-    print("punto fijo: IDAC %s" % d.get("dac"))
+    print("calibrado : %s" % d.get("calibrado_por", d.get("dac", "?")))
     print("muestras  : %d" % len(m))
     if d.get("lecturas_fallidas"):
         print("            (%d lecturas perdidas, ignoradas)" % d["lecturas_fallidas"])
@@ -103,25 +110,75 @@ def main():
     print("  margen al riel    : %.0f mV al cierre" % margen)
     print()
 
-    # El veredicto. Un trim de fabrica sirve si, y solo si, lo que el punto se
-    # mueve solo es chico comparado con lo que la calibracion consigue.
+    # ------------------------------------------------------------------
+    # EL VEREDICTO, Y CUANDO NO CORRESPONDE DARLO
+    #
+    # Dos horas es el minimo para decir algo. Por debajo de eso lo que se ve
+    # NO es deriva termica: es la cola del transitorio de la propia
+    # calibracion -tau son 29,5 s, y despues de mover las referencias la
+    # cadena sigue acomodandose un buen rato- mezclada con el ruido ambiente.
+    # Una version anterior de esto dictaminaba sobre doce minutos y decia "la
+    # deriva es CHICA" con 41 mV, que extrapolados son 257 mV/h, o sea
+    # cualquier cosa menos chica.
+    #
+    # Y el criterio es la TASA, no el total: 41 mV en doce minutos y 41 mV en
+    # ocho horas son dos mundos distintos, y el numero suelto no los separa.
+    # La vara son 10 mV/h, que es el orden del error que la calibracion
+    # consigue -34 mV- repartido en un turno de campo.
+    # ------------------------------------------------------------------
+    HORAS_MINIMAS = 2.0
+    TASA_VARA_MV_H = 10.0
+    tasa = abs(der) / horas if horas else 0.0
+
     print("QUE DICE ESTO DE UN TRIM DE FABRICA")
-    if abs(der) < 50:
-        print("  La deriva es de %.0f mV en %.1f h. Es CHICA: un ajuste fijo" % (abs(der), horas))
-        print("  aguantaria una noche sin sacar la cadena de rango, y la")
-        print("  justificacion de que la calibracion sea automatica NO puede")
-        print("  apoyarse en la deriva de esta noche. Hay que buscarla en otro")
-        print("  lado -excursion termica mas grande, o el envejecimiento- o")
-        print("  aceptar que para este nodo alcanza con calibrar al desplegar.")
+    if horas < HORAS_MINIMAS:
+        print("  TODAVIA NO SE PUEDE DECIR. Van %.1f h y hacen falta %.0f." % (horas, HORAS_MINIMAS))
+        print("  Por debajo de eso lo que se ve no es deriva termica sino la cola")
+        print("  del transitorio de la propia calibracion mezclada con el ruido")
+        print("  ambiente. Por ahora la tasa va en %.0f mV/h, para referencia." % tasa)
+    elif tasa < TASA_VARA_MV_H:
+        print("  La deriva va a %.0f mV/h sobre %.1f h. Es CHICA comparada con los" % (tasa, horas))
+        print("  34 mV que la calibracion consigue: un ajuste fijo aguantaria un")
+        print("  turno de campo sin sacar la cadena de rango.")
+        print("")
+        print("  Entonces la justificacion de que la calibracion sea AUTOMATICA no")
+        print("  puede apoyarse en la deriva. Hay que buscarla en otro lado -una")
+        print("  excursion termica mayor, el envejecimiento, la dispersion entre")
+        print("  placas- o aceptar que para este nodo alcanza con calibrar al")
+        print("  desplegar. Es un resultado y hay que escribirlo como tal.")
     else:
-        print("  La deriva es de %.0f mV en %.1f h, o sea %.0f mV/h."
-              % (abs(der), horas, abs(der) / horas if horas else 0))
-        print("  Un trim de fabrica NO alcanza: el punto se va solo, sin que")
-        print("  nadie toque nada, y el que lo devuelve es el lazo. Eso es lo")
-        print("  que justifica que la calibracion sea automatica y corra en")
-        print("  campo, no una vez en el banco.")
+        print("  La deriva va a %.0f mV/h sobre %.1f h, contra los 34 mV que la" % (tasa, horas))
+        print("  calibracion consigue: en %.1f h se come toda la correccion." % (34.0 / tasa))
+        print("")
+        print("  Un trim de fabrica NO alcanza: el punto se va solo, sin que nadie")
+        print("  toque nada, y el que lo devuelve es el lazo. ESO es lo que")
+        print("  justifica que la calibracion sea automatica y corra en campo.")
         if margen > 0:
-            print("  Al ritmo medido, tocaria el riel en %.1f h." % (margen / (abs(der) / horas)))
+            print("  Al ritmo medido tocaria el riel en %.1f h." % (margen / tasa))
+
+    # ---- EXP4d: el ruido, que viaja en el mismo registro -------------------
+    ruidos = [(datetime.fromisoformat(x["t"]), x["ruido_ch3"])
+              for x in m if "ruido_ch3" in x]
+    if len(ruidos) >= 2:
+        rms = [r["rms_uv"] for _, r in ruidos]
+        hz50 = [r["hz50_uv"] for _, r in ruidos]
+        print()
+        print("EXP4d - EL RUIDO DEL TAP DEL LP, con la cadena calibrada y quieta")
+        print("  %d medidas a lo largo de %.1f h" % (len(ruidos), horas))
+        print("  RMS      %6.0f uV de banco  (min %.0f, max %.0f)"
+              % (sum(rms) / len(rms), min(rms), max(rms)))
+        print("  a 50 Hz  %6.0f uV de banco  (min %.0f, max %.0f)"
+              % (sum(hz50) / len(hz50), min(hz50), max(hz50)))
+        deriva_rms = rms[-1] - rms[0]
+        print()
+        if abs(deriva_rms) < 0.25 * (sum(rms) / len(rms) or 1):
+            print("  El ruido NO crece con el tiempo: la cadena calibrada no se")
+            print("  degrada por estar calibrada. Cierra la objecion obvia al")
+            print("  sistema, que es que corregir el offset meta ruido.")
+        else:
+            print("  OJO: el RMS cambio %+.0f uV entre la primera y la ultima" % deriva_rms)
+            print("  medida. Hay que mirar si acompana a la deriva del punto o si")
+            print("  es ruido ambiente -de dia hay gente y autos-.")
 
     # La figura, si hay matplotlib. No es obligatoria para el veredicto.
     try:
