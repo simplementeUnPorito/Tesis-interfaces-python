@@ -144,9 +144,15 @@ def describir_taps(v, canales=(0, 1, 2, 3)):
 
 
 def guardar(nombre, datos):
-    """Un JSON por ensayo, con fecha en el nombre. Devuelve la ruta."""
+    """Un JSON por ensayo, con fecha y hora al SEGUNDO. Devuelve la ruta.
+
+    Los segundos no son decoracion: T4 tarda menos de un segundo y se corre
+    varias veces seguidas comparando pares de curvas. Con resolucion de minuto,
+    tres corridas se pisaban entre si y quedaba una sola, sin que nada avisara.
+    Encontrado probando T4 con datos sinteticos el 2026-09-06.
+    """
     os.makedirs(SALIDA, exist_ok=True)
-    ruta = os.path.join(SALIDA, "%s_%s.json" % (nombre, datetime.now().strftime("%Y%m%d_%H%M")))
+    ruta = os.path.join(SALIDA, "%s_%s.json" % (nombre, datetime.now().strftime("%Y%m%d_%H%M%S")))
     datos.setdefault("cuando", datetime.now().isoformat(timespec="seconds"))
     with open(ruta, "w", encoding="utf-8") as f:
         json.dump(datos, f, indent=1, ensure_ascii=False)
