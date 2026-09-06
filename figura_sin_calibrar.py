@@ -8,11 +8,18 @@ cuatro IDAC estan en cero -o sea, el nodo sin sistema de calibracion-.
 POR QUE ESTE GRAFICO Y NO OTRO
 Lo que decide si el nodo captura o no es si ALGUNA etapa esta contra el riel: una
 etapa saturada no transmite, y no importa cuan bien esten las otras tres. Por eso
-la barra es el PEOR tap, no el promedio, y por eso las que tocan riel se dibujan
-distinto: no son "peores", son cualitativamente otra cosa.
+la barra es el PEOR tap y no el promedio.
 
-La linea de Vref esta en cero y los rieles marcados: la distancia de la barra a
-la banda gris es lo que la calibracion tiene que recuperar.
+Y POR QUE LAS RAILADAS NO LLEVAN NUMERO
+Porque no lo tienen. Por debajo de 880 de banco la lectura no mide el tap -da
+-2,6 V, que es imposible, y sin que el ADC este saturado-, asi que convertirla a
+milivolts produce una cifra con aspecto de medida que no lo es. Poner "5058 mV"
+en una tesis seria inventar precision sobre una zona ciega.
+
+Lo que si esta medido, y es lo que el argumento necesita, es el VEREDICTO: esa
+combinacion arranca con una etapa que no transmite. Las railadas van a altura
+fija y en otro color; el numero queda solo para las que caen donde la recta
+banco->real fue verificada con tester.
 
 Uso:  python figura_sin_calibrar.py [ruta.json]
 """
@@ -20,7 +27,7 @@ from __future__ import annotations
 import sys, json, glob, os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from escala_banco import a_voltios, VREF_V
+from escala_banco import a_voltios
 
 LAB = r'C:\Github\Tesis\lab\planta'
 
@@ -49,9 +56,12 @@ def main():
 
     print("%-22s %14s %12s %s" % ("combinacion", "peor tap", "asentada", "veredicto"))
     for f in unicas:
-        print("%-22s %11.0f mV %12s %s" % (
+        # Sin numero para las railadas: la lectura de esa zona no es una medida.
+        peor = ("%11.0f mV" % f["peor_mv_reales"]) if (
+            not f["en_riel"] and f["peor_mv_reales"] is not None) else "%14s" % "-"
+        print("%-22s %s %12s %s" % (
             "PGA x%d  PGAout x%d" % (f["pga_x"], f["pgaout_x"]),
-            f["peor_mv_reales"] or 0,
+            peor,
             "si" if f.get("asentada", True) else "NO",
             ("EN RIEL %s" % f["en_riel"]) if f["en_riel"] else "en rango"))
     n_riel = sum(1 for f in unicas if f["en_riel"])
@@ -68,31 +78,33 @@ def main():
         return
 
     etiquetas = ["%d x %d" % (f["pga_x"], f["pgaout_x"]) for f in unicas]
-    valores = [abs(f["peor_mv_reales"] or 0) for f in unicas]
     railada = [bool(f["en_riel"]) for f in unicas]
+    # Las que quedan en rango llevan su desvio MEDIDO. Las railadas llevan altura
+    # fija: su "desvio" saldria de extrapolar la recta banco->real a una zona
+    # donde no vale, y eso da una cifra con aspecto de medida que no lo es.
+    en_rango = [abs(f["peor_mv_reales"] or 0) for f, r in zip(unicas, railada) if not r]
+    TOPE = max(en_rango + [500.0]) * 1.9
+    valores = [TOPE if r else abs(f["peor_mv_reales"] or 0)
+               for f, r in zip(unicas, railada)]
 
     fig, ax = plt.subplots(figsize=(10, 5))
     colores = ["#c0392b" if r else "#2c7fb8" for r in railada]
     barras = ax.bar(range(len(unicas)), valores, color=colores)
-
-    # El margen hasta el riel, en mV reales desde Vref: hacia abajo Vref-0 y
-    # hacia arriba Vdda-Vref. La banda gris es donde la etapa todavia transmite.
-    ax.axhspan(0, VREF_V * 1000, color="#dddddd", zorder=0)
-    ax.axhline(VREF_V * 1000, color="#666666", linestyle="--", linewidth=1)
-    ax.text(len(unicas) - 0.5, VREF_V * 1000 * 1.02, "riel", ha="right",
-            va="bottom", color="#666666", fontsize=9)
+    ax.set_ylim(0, TOPE * 1.18)
 
     ax.set_xticks(range(len(unicas)))
     ax.set_xticklabels(etiquetas, rotation=45, ha="right")
     ax.set_xlabel("PGA entrada x  PGAout")
     ax.set_ylabel("desvio del PEOR tap respecto de Vref [mV reales]")
     ax.set_title("Sin calibrar: los cuatro IDAC en cero\n"
-                 "rojo = al menos una etapa contra el riel, o sea que el nodo no captura")
+                 "rojo = alguna etapa contra el riel: el nodo no captura, "
+                 "y el desvio ya no es medible")
     ax.grid(axis="y", alpha=0.3)
-    for b, r in zip(barras, railada):
-        if r:
-            ax.text(b.get_x() + b.get_width() / 2, b.get_height(), "riel",
-                    ha="center", va="bottom", fontsize=8, color="#c0392b")
+    for b, r, f in zip(barras, railada, unicas):
+        etq = "EN RIEL" if r else "%.0f mV" % abs(f["peor_mv_reales"] or 0)
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height(), etq,
+                ha="center", va="bottom", fontsize=8,
+                color="#c0392b" if r else "#2c7fb8")
 
     salida = os.path.join(LAB, "figuras", os.path.basename(ruta).replace(".json", ".png"))
     os.makedirs(os.path.dirname(salida), exist_ok=True)
