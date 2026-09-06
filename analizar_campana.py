@@ -40,11 +40,22 @@ from modelo_cadena import (  # noqa: E402
 )
 import modelo_cadena as M  # noqa: E402
 
-#: Margen contra el riel, en mV, por debajo del cual se considera que el tap ya
-#: está recortando. No es cero porque cerca del riel la etapa ya no es lineal
-#: aunque todavía se mueva: la curva de la etapa 2 mostró pendientes locales que
-#: caen a 0,4 µV/código antes de aplanarse del todo.
-MARGEN_RIEL_MV = 8.0
+# RIELES Y ESCALA CORREGIDOS el 2026-09-05 con la medicion de tester. Antes se
+# importaban de modelo_cadena, donde el riel bajo era 746 -que equivale a -2,6 V
+# y por lo tanto es imposible-. Con ese piso falso, un tap en 900 se daba por
+# sano cuando esta en 0,39 V, casi contra masa: la campana declaraba usables
+# combinaciones que estaban railadas.
+from escala_banco import (                       # noqa: E402
+    BANCO_MIN_VALIDO_MV, BANCO_MAX_VALIDO_MV, BANCO_VREF_MV, a_voltios,
+)
+RIEL_BAJO = {c: BANCO_MIN_VALIDO_MV for c in range(4)}
+RIEL_ALTO = {c: BANCO_MAX_VALIDO_MV for c in range(4)}
+OBJETIVO_MV = BANCO_VREF_MV
+
+#: Margen contra el riel, en mV de banco. 25 son ~0,5 V reales sobre una
+#: excursion util de 4,83 V: un 10 % de guarda a cada lado para que la senal
+#: quepa encima del punto de continua sin recortar.
+MARGEN_RIEL_MV = 25.0
 
 NOMBRE_TAP = {0: "ch0 PGA", 1: "ch1 BP", 2: "ch2 ADDER", 3: "ch3 LP"}
 

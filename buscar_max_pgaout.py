@@ -130,8 +130,50 @@ MARGEN = 25.0
 
 #: Escalón para medir la pendiente en el lugar.
 DELTA = 8
-#: Criterio de aceptación de Elías.
-TOLERANCIA_MV = 20.0
+# --------------------------------------------------------------------------
+# EL CRITERIO, EN SU FORMA FINAL (Elias, 2026-09-05)
+#
+#   "dejalo mas libre, consegui lo mejor que se pueda nomas, no debe saturar y
+#    listo"
+#
+# y antes, sobre las prioridades:
+#
+#   "quiero 100 o 200 mV de deriva FISICOS respecto de 2,5 V para todos los
+#    estados menos LP; ese reducilo al minimo [...] y priorizá en PGAout luego
+#    de LP porque es el que tiene mas chance de saturar"
+#
+# O sea: UNA restriccion dura y un objetivo.
+#
+#   DURO      ninguna etapa satura, nunca. Es la unica condicion de aceptacion.
+#   OBJETIVO  minimizar el desvio respecto de Vref, en este orden:
+#               1. ch3 (LP)     - es el tap que se captura
+#               2. ch2 (PGAout) - es el que mas chance tiene de saturar
+#               3. ch0 y ch1    - lo que se consiga
+#
+# POR QUE NO HAY TECHO DURO PARA LAS INTERMEDIAS, y esta medido: a PGA x50 el
+# tap del PGA se sienta 877 mV por debajo de Vref, y corregirlo es INFACTIBLE
+# con las resistencias de hoy. Se midio el 2026-09-05 en el punto real: mover el
+# PGA 4 codigos manda ch3 al riel, o sea que la pendiente PGA->ch3 es
+# >= 605 mV/codigo contra 64,8 mV/codigo sobre su propio tap. Corregir los
+# 877 mV costaria >= 8,2 V en el LP y al ADDER le quedan 4,8.
+#
+# Pero 877 mV de desvio NO ES SATURACION: el tap queda en 1,54 V con los rieles
+# en 0 y 4,83, o sea con 1,54 V de margen para abajo. Es asimetrico, no esta
+# recortando. Por eso pasa el criterio duro aunque no sea bonito.
+# --------------------------------------------------------------------------
+
+#: Margen minimo contra cada riel, en mV de banco. 25 son ~500 mV fisicos sobre
+#: una excursion de 4,83 V: la guarda para que la senal quepa encima del punto
+#: de continua sin recortar. ES LA UNICA CONDICION DURA.
+GUARDA_ANTISATURACION_MV = 25.0
+
+#: Orden en que se minimiza. Primero el que mas importa.
+PRIORIDAD_TAPS = (3, 2, 0, 1)
+
+#: Techo con el que se declara "bueno" el LP si no se consigue mejor. Se sigue
+#: minimizando por debajo: es un umbral de reporte, no una meta.
+TECHO_FISICO_LP_MV = 200.0
+TOLERANCIA_MV = TECHO_FISICO_LP_MV / 19.9157
 
 
 def en_riel(ch: int, mv: float | None) -> bool:
