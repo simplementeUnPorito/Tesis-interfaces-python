@@ -195,7 +195,29 @@ def ruido():
                  "el RMS no crece a lo largo de la corrida, y los 50 Hz son marginales")
     ax.legend(fontsize=9)
     ax.grid(alpha=0.3)
-    ax.set_ylim(0, max(rms) * 1.25)
+
+    # LA ESCALA LA FIJA EL GRUESO DE LOS DATOS, NO EL PEOR PUNTO.
+    #
+    # A las 5,2 h entro una medida de 8000 uV -veinte veces el resto-, casi
+    # seguro alguien caminando cerca o un auto en la lomada. Con la escala
+    # atada al maximo, esa sola muestra aplastaba las otras cincuenta contra el
+    # eje y la figura dejaba de mostrar lo unico que tiene que mostrar, que es
+    # que el ruido NO crece.
+    #
+    # No se borra el punto: se deja el eje en el grueso y se dice cuantas
+    # quedaron afuera. Recortar la escala es una decision de presentacion;
+    # borrar un dato seria otra cosa.
+    ordenados = sorted(rms)
+    p90 = ordenados[int(0.9 * (len(ordenados) - 1))]
+    tope = p90 * 1.6
+    afuera = sum(1 for r in rms if r > tope)
+    ax.set_ylim(0, tope)
+    if afuera:
+        aviso = ("%d medida%s por encima del eje (hasta %.0f uV):\n"
+                 "ruido ambiente, no de la cadena"
+                 % (afuera, "s" if afuera > 1 else "", max(rms)))
+        ax.text(0.99, 0.97, aviso, transform=ax.transAxes,
+                ha="right", va="top", fontsize=8, color=GRIS)
     return _guardar(fig, "ruido_exp4d.png")
 
 
@@ -281,7 +303,19 @@ def numeros_para_el_informe():
         k = max(3, int(len(ys) * frac))
         bandas.append((xs[k - 1], max(ys[:k]) - min(ys[:k])))
 
+    # El recorrido -de donde salio, hasta donde bajo, donde volvio- es lo que
+    # separa vagabundeo de asentamiento, y ninguna estadistica lo dice mejor
+    # que los tres numeros.
+    i_min = min(range(len(ys)), key=lambda i: ys[i])
+    i_max = max(range(len(ys)), key=lambda i: ys[i])
+    extremo = i_min if abs(ys[i_min] - ys[0]) > abs(ys[i_max] - ys[0]) else i_max
+
     macros = {
+        "derivaArranco":   ("%+.0f" % ys[0]).replace(".", ","),
+        "derivaExtremo":   ("%+.0f" % ys[extremo]).replace(".", ","),
+        "derivaExtremoH":  coma(xs[extremo], 1),
+        "derivaAhora":     ("%+.0f" % ys[-1]).replace(".", ","),
+        "derivaNeto":      ("%+.0f" % (ys[-1] - ys[0])).replace(".", ","),
         "derivaBandas":    " ".join("%s h: %s mV." % (coma(h, 1), coma(b)) for h, b in bandas),
         "derivaCrecio":    coma(bandas[-1][1] - bandas[-3][1]),
         "derivaVeces":     coma((max(ys) - min(ys)) / 34.0, 1),
