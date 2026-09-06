@@ -274,7 +274,17 @@ def numeros_para_el_informe():
         if pden:
             tramos.append(sum((x - pmx) * (y - pmy) for x, y in zip(px, py)) / pden)
 
+    # El crecimiento de la banda es lo que distingue una deriva que se va de un
+    # vagabundeo acotado, asi que va al informe.
+    bandas = []
+    for frac in (0.2, 0.4, 0.6, 0.8, 1.0):
+        k = max(3, int(len(ys) * frac))
+        bandas.append((xs[k - 1], max(ys[:k]) - min(ys[:k])))
+
     macros = {
+        "derivaBandas":    " ".join("%s h: %s mV." % (coma(h, 1), coma(b)) for h, b in bandas),
+        "derivaCrecio":    coma(bandas[-1][1] - bandas[-3][1]),
+        "derivaVeces":     coma((max(ys) - min(ys)) / 34.0, 1),
         "derivaTramos":    ", ".join(("%+.1f" % t).replace(".", ",") for t in tramos),
         "derivaRecta":     coma(abs(pend) * xs[-1]),
         "derivaHoras":     coma(xs[-1], 1),

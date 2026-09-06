@@ -176,6 +176,36 @@ def main():
     else:
         residuo = 0.0
 
+    # ------------------------------------------------------------------
+    # ¿LA BANDA CRECE O SE SATURA? Es el discriminador que faltaba.
+    #
+    # Comparar la recta contra su residuo NO distingue una rampa de un
+    # vagabundeo acotado, porque a un vagabundeo acotado tambien se le puede
+    # ajustar una recta y le da pendiente distinta de cero. Lo que los separa es
+    # otra cosa: si el punto se VA, la banda crece sin parar y la pendiente se
+    # mantiene; si VAGABUNDEA dentro de un rango, la banda se satura y la
+    # pendiente ajustada se achica sola a medida que entran muestras.
+    #
+    # Medido el 2026-09-06: la banda fue 53, 101, 123, 130 y 130 mV, y la
+    # pendiente -17,8, -30,5, -24,6, -20,6 y -14,6 mV/h. La banda se freno y la
+    # pendiente se viene achicando: es vagabundeo acotado, y llamarlo "deriva de
+    # 24 mV/h" habria sido una afirmacion sobre algo que no esta pasando.
+    # ------------------------------------------------------------------
+    bandas = []
+    for frac in (0.2, 0.4, 0.6, 0.8, 1.0):
+        k = max(3, int(len(ys) * frac))
+        bandas.append((xs[k - 1], max(ys[:k]) - min(ys[:k])))
+    # ¿Cuanto agrego el ultimo 40 % del registro a la banda?
+    crecio_al_final = bandas[-1][1] - bandas[-3][1]
+    se_saturo = (bandas[-1][1] > 0 and
+                 crecio_al_final < 0.10 * bandas[-1][1] and horas >= HORAS_MINIMAS)
+
+    print("CRECIMIENTO DE LA BANDA")
+    for h, b in bandas:
+        print("  hasta %5.1f h    %5.0f mV" % (h, b))
+    print("  el ultimo 40 %% del registro le agrego %.0f mV" % crecio_al_final)
+    print()
+
     print("FORMA DE LO QUE SE MUEVE")
     print("  banda recorrida   %.0f mV   (el tap anduvo entre %.0f y %.0f de Vref)"
           % (banda, min(ys), max(ys)))
@@ -202,6 +232,31 @@ def main():
         print("  calibracion consigue. Un trim fijo aguantaria: la justificacion")
         print("  de que sea AUTOMATICA no puede apoyarse en esto, y hay que")
         print("  escribirlo asi. Es un resultado, no un fracaso del experimento.")
+    elif se_saturo:
+        print("  NO ES UNA RAMPA SOSTENIDA. Que clase de movimiento es, todavia")
+        print("  no se puede decir con este registro.")
+        print("  La banda dejo de crecer -el ultimo 40 % del registro le agrego")
+        print("  %.0f mV sobre %.0f- y la pendiente ajustada se viene achicando"
+              % (crecio_al_final, bandas[-1][1]))
+        print("  sola: es lo que le pasa a una recta ajustada a algo que va y")
+        print("  viene. Llamarlo 'deriva de %.0f mV/h' seria afirmar algo que no"
+              % abs(tasa_global))
+        print("  esta pasando.")
+        print("")
+        print("  Pero quedan DOS explicaciones en pie y este registro no las separa:")
+        print("    - vagabundeo acotado, el punto yendo y viniendo en un rango;")
+        print("    - un asentamiento lento hacia una asintota, con constante de")
+        print("      HORAS -mucho mayor que los 29,5 s del polo conocido, pero")
+        print("      compatible con la absorcion dielectrica del electrolitico-.")
+        print("  Separarlas necesita mas horas y la temperatura anotada en")
+        print("  paralelo: si el punto la sigue, es lo segundo.")
+        print("")
+        print("  IGUAL UN TRIM DE FABRICA NO ALCANZA, en las dos:")
+        print("  el punto recorre %.0f mV, o sea %.1f veces los %.0f mV que la"
+              % (bandas[-1][1], bandas[-1][1] / ERROR_CALIBRACION_MV, ERROR_CALIBRACION_MV))
+        print("  calibracion consigue. Contra una rampa un valor fijo al menos se")
+        print("  puede dimensionar para el promedio del turno; contra vagabundeo")
+        print("  no hay valor al que apuntar, porque el punto no tiene uno.")
     elif abs(tasa_global) * horas > 2.0 * residuo:
         # La recta explica bastante mas de lo que queda de residuo: hay una
         # tendencia real, con vagabundeo encima. Que un tramo suelto cambie de
