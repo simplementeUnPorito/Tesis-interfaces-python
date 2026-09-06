@@ -30,6 +30,10 @@ Cuando viene de saturacion es mas lento, que es exactamente cuando corresponde.
 from __future__ import annotations
 import time
 
+# La ventana donde la lectura del banco es de verdad una medida del tap. Vive en
+# escala_banco.py para que haya un solo lugar que sepa donde vale la recta.
+from escala_banco import lectura_valida
+
 TAU_S = 29.5
 
 # Cuanto puede moverse entre dos miradas para considerarla quieta, en mV de
@@ -65,8 +69,29 @@ def esperar_quieto(lab, canales=(0, 1, 2, 3), quieto_mv=QUIETO_MV,
             v[ch] = (p.mean_uv / 1000.0) if (p and p.ok) else None
 
         if previo is not None:
+            # SOLO CUENTAN LOS CANALES QUE ESTAN MIDIENDO ALGO.
+            #
+            # Por debajo de 880 de banco la lectura no es una medida del tap: da
+            # tensiones negativas contra masa, que son imposibles, y sin que el
+            # ADC este saturado. Lo que devuelve ahi es ruido, y ese ruido no se
+            # asienta nunca.
+            #
+            # Sin esta exclusion, cualquier configuracion con una etapa railada
+            # -que son 12 de 14- agotaba el techo de 6 tau esperando a que se
+            # quedara quieto algo que no es una senal. Medido el 2026-09-06: con
+            # ch3 en la zona ciega el detector seguia viendo saltos de 6 a 26 mV
+            # de banco despues de tres minutos.
             saltos = [abs(v[ch] - previo[ch]) for ch in canales
-                      if v[ch] is not None and previo[ch] is not None]
+                      if v[ch] is not None and previo[ch] is not None
+                      and lectura_valida(v[ch]) and lectura_valida(previo[ch])]
+            # Si NINGUN canal esta en ventana no hay nada que observar: se espera
+            # el tiempo fijo de la planta y se devuelve marcado como no asentado,
+            # que es lo honesto.
+            if not saltos and time.time() - t0 >= 2.0 * TAU_S:
+                if log:
+                    log("      ningun tap esta en la ventana observable; se "
+                        "esperaron 2 tau a ciegas")
+                return v, time.time() - t0, False
             peor = max(saltos) if saltos else None
             if peor is not None and peor <= quieto_mv:
                 t = time.time() - t0

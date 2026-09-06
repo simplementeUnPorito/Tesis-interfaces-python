@@ -50,6 +50,7 @@ RE_MONEND = re.compile(r"^#MONEND (\d+)")
 RE_SWEEP = re.compile(r"^#SWEEP (\d+) (-?\d+) (\d+) (-?\d+) (-?\d+) (\d)")
 RE_SWEEPEND = re.compile(r"^#SWEEPEND (\d+) (-?\d+)")
 RE_GAIN = re.compile(r"^#GAIN (pga|pgaout) (\d+)")
+RE_ADCCFG = re.compile(r"^#ADC (\d+) (-?\d+) (-?\d+) (-?\d+) (\d)")
 
 
 @dataclass
@@ -213,6 +214,38 @@ class Lab:
                                int(m.group(4)), int(m.group(5)), int(m.group(6)),
                                m.group(7) == "1")
         return None
+
+    # CONFIGURACION DEL ADC, Y POR QUE HAY QUE PONERLA A PROPOSITO
+    #
+    # El ADC tiene cuatro configuraciones con rangos distintos y la seleccion es
+    # GLOBAL Y PERSISTENTE: la deja puesta el ultimo que la toco. Un experimento
+    # que la cambia y no la restaura envenena a todos los que vengan despues, y
+    # sin ningun sintoma que lo delate: las lecturas siguen llegando, con el bit
+    # de valido en 1, solo que significan otra cosa.
+    #
+    # Paso el 2026-09-06. Un ensayo de rangos dejo el ADC en +-0,625 V, y el
+    # experimento siguiente arranco leyendo los cuatro taps como
+    # [21,5  66,7  171,1  -510,4] en vez de [959  1008  1117  747]. Un tap por
+    # ARRIBA de Vref informando una tension NEGATIVA: los taps se sientan en
+    # ~1 V a la entrada del ADC, que supera el fondo de escala de las tres
+    # configuraciones angostas, y el valor da la vuelta.
+    #
+    # Por eso todo experimento empieza pidiendo explicitamente la que necesita,
+    # en vez de confiar en como quedo. Es una linea y ahorra una tarde.
+    def set_adc_config(self, cfg: int = 1, timeout: float = 12.0) -> bool:
+        """1 = +-2,5 V (la unica que cubre el rango de los taps), 2..4 angostas."""
+        if not 1 <= cfg <= 4:
+            raise ValueError("configuracion 1-4")
+
+        def es_mia(linea: str) -> bool:
+            m = RE_ADCCFG.match(linea)
+            return bool(m) and int(m.group(1)) == cfg
+
+        for linea in self.s.raw(f"adc {cfg}", idle=2.0, timeout=timeout,
+                                until=es_mia):
+            if es_mia(linea):
+                return RE_ADCCFG.match(linea).group(5) == "1"
+        return False
 
     def set_gain(self, which: str, code: int) -> bool:
         if which not in ("pga", "pgaout"):
