@@ -127,34 +127,120 @@ def main():
     # consigue -34 mV- repartido en un turno de campo.
     # ------------------------------------------------------------------
     HORAS_MINIMAS = 2.0
-    TASA_VARA_MV_H = 10.0
-    tasa = abs(der) / horas if horas else 0.0
+    #: Vara de comparacion: el error que la calibracion consigue cuando se la
+    #: corre. Todo se juzga contra esto, porque es lo que un trim fijo tendria
+    #: que sostener para reemplazarla.
+    ERROR_CALIBRACION_MV = 34.0
+
+    # ------------------------------------------------------------------
+    # DERIVA NO ES LO MISMO QUE VAGABUNDEO, y confundirlos cambia el argumento.
+    #
+    # Una RAMPA termica tiene signo constante y residuo chico contra una recta:
+    # el punto se va para un lado y se queda yendo. Un VAGABUNDEO va y viene,
+    # con la tasa cambiando de signo entre tramos. Y una COLA de transitorio
+    # decae: su tasa se achica monotonamente.
+    #
+    # Los tres justifican recalibrar, pero por razones distintas y con
+    # argumentos distintos, asi que hay que decir cual es. Una version anterior
+    # de esto informaba solo la tasa de la recta y habria llamado "deriva de
+    # 28 mV/h" a una serie cuyas tasas por tramo eran -36, +22, -47, -38 y +2.
+    # ------------------------------------------------------------------
+    N_TRAMOS = 5
+    xs = [(datetime.fromisoformat(s_["t"]) - t0).total_seconds() / 3600.0
+          for s_ in m if s_["taps_mv"].get("3") is not None]
+    ys = [(a_voltios(s_["taps_mv"]["3"]) - VREF_V) * 1000
+          for s_ in m if s_["taps_mv"].get("3") is not None]
+
+    def pendiente(px, py):
+        if len(px) < 3:
+            return None
+        mx_ = sum(px) / len(px)
+        my_ = sum(py) / len(py)
+        den_ = sum((x - mx_) ** 2 for x in px)
+        return (sum((x - mx_) * (y - my_) for x, y in zip(px, py)) / den_) if den_ else None
+
+    paso = max(1, len(xs) // N_TRAMOS)
+    tasas = []
+    for i in range(N_TRAMOS):
+        a_, b_ = i * paso, ((i + 1) * paso if i < N_TRAMOS - 1 else len(xs))
+        pe = pendiente(xs[a_:b_], ys[a_:b_])
+        if pe is not None:
+            tasas.append((xs[a_], xs[b_ - 1], pe))
+
+    tasa_global = pendiente(xs, ys) or 0.0
+    banda = max(ys) - min(ys)
+    if tasas:
+        res = [y - (sum(ys) / len(ys) + tasa_global * (x - sum(xs) / len(xs)))
+               for x, y in zip(xs, ys)]
+        residuo = (sum(r * r for r in res) / len(res)) ** 0.5
+    else:
+        residuo = 0.0
+
+    print("FORMA DE LO QUE SE MUEVE")
+    print("  banda recorrida   %.0f mV   (el tap anduvo entre %.0f y %.0f de Vref)"
+          % (banda, min(ys), max(ys)))
+    print("  recta             %.0f mV/h, con residuo RMS de %.0f mV"
+          % (tasa_global, residuo))
+    for a_, b_, pe in tasas:
+        print("    %.2f a %.2f h    %+7.1f mV/h" % (a_, b_, pe))
+    signos = set(1 if pe > 0 else -1 for _, _, pe in tasas)
+    decae = all(abs(tasas[i][2]) >= abs(tasas[i + 1][2]) for i in range(len(tasas) - 1))
+    print()
 
     print("QUE DICE ESTO DE UN TRIM DE FABRICA")
     if horas < HORAS_MINIMAS:
-        print("  TODAVIA NO SE PUEDE DECIR. Van %.1f h y hacen falta %.0f." % (horas, HORAS_MINIMAS))
-        print("  Por debajo de eso lo que se ve no es deriva termica sino la cola")
-        print("  del transitorio de la propia calibracion mezclada con el ruido")
-        print("  ambiente. Por ahora la tasa va en %.0f mV/h, para referencia." % tasa)
-    elif tasa < TASA_VARA_MV_H:
-        print("  La deriva va a %.0f mV/h sobre %.1f h. Es CHICA comparada con los" % (tasa, horas))
-        print("  34 mV que la calibracion consigue: un ajuste fijo aguantaria un")
-        print("  turno de campo sin sacar la cadena de rango.")
+        print("  TODAVIA NO SE PUEDE DECIR. Van %.1f h y hacen falta %.0f."
+              % (horas, HORAS_MINIMAS))
+        print("  Por debajo de eso lo que se ve no es deriva sino la cola del")
+        print("  transitorio de la propia calibracion mezclada con el ambiente.")
+    elif decae and len(tasas) >= 3:
+        print("  ES UNA COLA, NO UNA DERIVA: la tasa por tramo se achica")
+        print("  monotonamente. Hay que dejar correr mas antes de concluir.")
+    elif banda < ERROR_CALIBRACION_MV:
+        print("  El tap se movio %.0f mV en %.1f h, MENOS que los %.0f mV que la"
+              % (banda, horas, ERROR_CALIBRACION_MV))
+        print("  calibracion consigue. Un trim fijo aguantaria: la justificacion")
+        print("  de que sea AUTOMATICA no puede apoyarse en esto, y hay que")
+        print("  escribirlo asi. Es un resultado, no un fracaso del experimento.")
+    elif abs(tasa_global) * horas > 2.0 * residuo:
+        # La recta explica bastante mas de lo que queda de residuo: hay una
+        # tendencia real, con vagabundeo encima. Que un tramo suelto cambie de
+        # signo NO la refuta, porque con %.0f mV de residuo un tramo de media
+        # hora admite pendientes de cualquier signo.
+        print("  HAY UNA TENDENCIA, con vagabundeo encima.")
+        print("  La recta se lleva %.0f mV en %.1f h (%.0f mV/h) y encima queda un"
+              % (abs(tasa_global) * horas, horas, abs(tasa_global)))
+        print("  vagabundeo de %.0f mV RMS. Los dos juntos hacen la banda de %.0f mV."
+              % (residuo, banda))
+        if len(signos) > 1:
+            print("  (Que un tramo suelto salga con el signo contrario no refuta la")
+            print("   tendencia: con ese residuo, media hora admite cualquier signo.)")
         print("")
-        print("  Entonces la justificacion de que la calibracion sea AUTOMATICA no")
-        print("  puede apoyarse en la deriva. Hay que buscarla en otro lado -una")
-        print("  excursion termica mayor, el envejecimiento, la dispersion entre")
-        print("  placas- o aceptar que para este nodo alcanza con calibrar al")
-        print("  desplegar. Es un resultado y hay que escribirlo como tal.")
-    else:
-        print("  La deriva va a %.0f mV/h sobre %.1f h, contra los 34 mV que la" % (tasa, horas))
-        print("  calibracion consigue: en %.1f h se come toda la correccion." % (34.0 / tasa))
-        print("")
-        print("  Un trim de fabrica NO alcanza: el punto se va solo, sin que nadie")
-        print("  toque nada, y el que lo devuelve es el lazo. ESO es lo que")
-        print("  justifica que la calibracion sea automatica y corra en campo.")
+        print("  Contra los %.0f mV que la calibracion consigue, la tendencia sola"
+              % ERROR_CALIBRACION_MV)
+        print("  se los come en %.1f h. UN TRIM DE FABRICA NO ALCANZA para un turno"
+              % (ERROR_CALIBRACION_MV / abs(tasa_global)))
+        print("  de campo, y ese es el argumento que faltaba.")
         if margen > 0:
-            print("  Al ritmo medido tocaria el riel en %.1f h." % (margen / tasa))
+            print("  Al ritmo medido tocaria el riel en %.1f h." % (margen / abs(tasa_global)))
+    elif len(signos) > 1:
+        print("  ES VAGABUNDEO, NO UNA TENDENCIA: la recta solo se lleva %.0f mV en"
+              % (abs(tasa_global) * horas))
+        print("  %.1f h y el residuo es de %.0f mV, o sea que el punto no se va" % (horas, residuo))
+        print("  para ningun lado: va y viene dentro de una banda de %.0f mV." % banda)
+        print("")
+        print("  Para el argumento de la tesis esto es MAS fuerte que una rampa, no")
+        print("  menos: contra una rampa un trim fijo al menos se puede dimensionar")
+        print("  para el promedio del turno. Contra vagabundeo no hay valor fijo")
+        print("  que sirva, porque no hay un valor al que apuntar.")
+    else:
+        print("  ES UNA RAMPA: el signo se mantiene en todos los tramos y va a")
+        print("  %.0f mV/h. Contra los %.0f mV que la calibracion consigue, se los"
+              % (abs(tasa_global), ERROR_CALIBRACION_MV))
+        print("  come en %.1f h." % (ERROR_CALIBRACION_MV / abs(tasa_global)))
+        print("  Un trim de fabrica NO alcanza para un turno de campo.")
+        if margen > 0 and abs(tasa_global) > 0:
+            print("  Al ritmo medido tocaria el riel en %.1f h." % (margen / abs(tasa_global)))
 
     # ---- EXP4d: el ruido, que viaja en el mismo registro -------------------
     ruidos = [(datetime.fromisoformat(x["t"]), x["ruido_ch3"])
