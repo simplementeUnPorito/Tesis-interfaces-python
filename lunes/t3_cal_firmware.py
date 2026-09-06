@@ -34,14 +34,28 @@ LSB_UV = 2_500_000 / 131072
 
 RE_EV = re.compile(r"<psoc (0x[0-9A-Fa-f]+|[A-Z_]+) val=(\d+)")
 EV_BEGIN, EV_MEAS32 = 0x15, 0x1D
+#: Estos dos son los que contestan "¿por que dijo ok=0 si llego?". CAL_PI_STABLE
+#: cuenta las muestras seguidas dentro de la banda muerta -el criterio de cierre
+#: pide tres- y CAL_STAGE_OK es el veredicto por etapa. Sin ellos hay que
+#: adivinar entre "no llego" y "llego pero no alcanzo a confirmarlo".
+EV_STABLE, EV_STAGE_OK, EV_DEADBAND = 0x43, 0x16, 0x40
 
 #: El firmware puede tardar ~950 s en el peor caso. El plazo del ESP es 1500 s.
 PLAZO_S = 1500.0
 
 
 def reconstruir_trayectoria(lineas):
-    """Los eventos de un byte del PSoC -> [(etapa, cuentas), ...]."""
+    """Los eventos de un byte del PSoC -> (traza, cierre).
+
+    traza  = [(etapa, cuentas), ...], la serie que uso el lazo para decidir.
+    cierre = {etapa: {"stable": n, "ok": v, "deadband": n}}, que es lo que
+             distingue "el lazo no llego" de "llego pero no alcanzo a
+             confirmarlo con las tres muestras seguidas que su criterio exige".
+             Sin esto hay que adivinar entre esas dos cosas, que piden arreglos
+             distintos.
+    """
     etapa, bytes_meas, traza = None, [], []
+    cierre = {}
     for ln in lineas:
         m = RE_EV.search(ln)
         if not m:
@@ -51,6 +65,15 @@ def reconstruir_trayectoria(lineas):
         val = int(m.group(2))
         if ev == EV_BEGIN:
             etapa, bytes_meas = val, []
+            cierre.setdefault(etapa, {})
+        elif ev == EV_STABLE and etapa is not None:
+            # El MAXIMO alcanzado, no el ultimo: interesa cuanto llego a
+            # acercarse al criterio de cierre.
+            cierre[etapa]["stable"] = max(cierre[etapa].get("stable", 0), val)
+        elif ev == EV_STAGE_OK and etapa is not None:
+            cierre[etapa]["ok"] = val
+        elif ev == EV_DEADBAND and etapa is not None:
+            cierre[etapa]["deadband"] = val
         elif ev == EV_MEAS32:
             bytes_meas.append(val)
             if len(bytes_meas) == 4:
@@ -60,7 +83,7 @@ def reconstruir_trayectoria(lineas):
                     n -= 1 << 32
                 traza.append((etapa, n))
                 bytes_meas = []
-    return traza
+    return traza, cierre
 
 
 def correr(pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT, log=print):
@@ -103,7 +126,7 @@ def correr(pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT, log=print):
                     pass
         log("  (%.0f s de reloj)" % dur)
 
-        traza = reconstruir_trayectoria(crudo)
+        traza, cierre = reconstruir_trayectoria(crudo)
         if traza:
             log("")
             log("TRAYECTORIA (cada fila es una medida que el lazo uso para decidir)")
@@ -148,9 +171,26 @@ def correr(pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT, log=print):
     else:
         log("  2. ninguna etapa de la cadena quedo contra el riel")
     log("  3. el firmware informo ok=%s en %.0f s" % (ok_fw, dur))
+    for et in sorted(cierre):
+        c_ = cierre[et]
+        if not c_:
+            continue
+        log("     etapa %s: ok=%s, banda muerta %s cuentas, llego a %s muestras"
+            % (et, c_.get("ok", "?"), c_.get("deadband", "?"), c_.get("stable", 0)))
     if ok_fw == 0 and error_lp is not None and abs(error_lp) < 100:
-        log("     (ok=0 con el LP a menos de 100 mV: el lazo llego pero su")
-        log("      criterio de cierre es mas exigente que el resultado util)")
+        estables = max((c_.get("stable", 0) for c_ in cierre.values()), default=0)
+        log("")
+        log("     ok=0 con el LP a menos de 100 mV de Vref. El lazo LLEGO. Lo que")
+        log("     falta es el cierre: su criterio pide tres muestras seguidas")
+        log("     dentro de la banda muerta y llego a %d." % estables)
+        if estables >= 1:
+            log("     Que llegue a %d y no a 3 dice que entro en banda y se quedo" % estables)
+            log("     sin presupuesto de pasos, no que no supiera llegar: el")
+            log("     arreglo es subir CAL_PI_TIMEOUT_SAMPLES de esa etapa.")
+        else:
+            log("     Que no llegue a ninguna dice otra cosa: nunca entro en la")
+            log("     banda muerta, asi que el problema es la banda o la")
+            log("     resolucion del actuador, no el presupuesto.")
 
     ruta = guardar("t3_cal_firmware",
                    {"pga_x": GANANCIA[pga], "pgaout_x": GANANCIA[pgaout],
