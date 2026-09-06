@@ -228,9 +228,85 @@ def rescate_comparado():
     return _guardar(fig, "rescate_comparado.png")
 
 
+def numeros_para_el_informe():
+    """Escribe los numeros del informe como macros de LaTeX.
+
+    POR QUE. El informe afirma que ningun numero suyo esta escrito a mano, y
+    hasta el 2026-09-06 eso era falso para los de la deriva: estaban copiados a
+    mano del analisis de ese momento. Como el registro sigue corriendo, cada
+    hora que pasa los deja mas viejos, y un informe que dice "3,2 h" cuando van
+    5 no es un informe desactualizado sino uno equivocado.
+
+    Ahora salen del mismo JSON que las figuras, y basta recompilar.
+    """
+    f = max(glob.glob(os.path.join(LAB, 'deriva_2026*.json')), key=os.path.getmtime)
+    d = json.load(open(f, encoding='utf-8'))
+    m = [x for x in d["muestras"] if x["taps_mv"].get("3") is not None]
+    t0 = datetime.fromisoformat(m[0]["t"])
+    xs = [(datetime.fromisoformat(x["t"]) - t0).total_seconds() / 3600.0 for x in m]
+    ys = [(a_voltios(x["taps_mv"]["3"]) - VREF_V) * 1000 for x in m]
+    mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+    den = sum((x - mx) ** 2 for x in xs)
+    pend = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den if den else 0.0
+    res = [y - (my + pend * (x - mx)) for x, y in zip(xs, ys)]
+    residuo = (sum(r * r for r in res) / len(res)) ** 0.5
+
+    ruidos = [x["ruido_ch3"] for x in d["muestras"] if "ruido_ch3" in x]
+    rms = [r["rms_uv"] for r in ruidos] or [0]
+    hz50 = [r["hz50_uv"] for r in ruidos] or [0]
+
+    def coma(x, dec=0):
+        return ("%.*f" % (dec, x)).replace(".", ",")
+
+    # Las tasas por tramo tambien se generan: cambian cada vez que entran
+    # muestras nuevas, y tenerlas escritas a mano en el informe seria tenerlas
+    # viejas a la media hora.
+    N = 5
+    paso = max(1, len(xs) // N)
+    tramos = []
+    for i in range(N):
+        a_, b_ = i * paso, ((i + 1) * paso if i < N - 1 else len(xs))
+        px, py = xs[a_:b_], ys[a_:b_]
+        if len(px) < 3:
+            continue
+        pmx, pmy = sum(px) / len(px), sum(py) / len(py)
+        pden = sum((x - pmx) ** 2 for x in px)
+        if pden:
+            tramos.append(sum((x - pmx) * (y - pmy) for x, y in zip(px, py)) / pden)
+
+    macros = {
+        "derivaTramos":    ", ".join(("%+.1f" % t).replace(".", ",") for t in tramos),
+        "derivaRecta":     coma(abs(pend) * xs[-1]),
+        "derivaHoras":     coma(xs[-1], 1),
+        "derivaMuestras":  "%d" % len(m),
+        "derivaBanda":     coma(max(ys) - min(ys)),
+        "derivaTasa":      coma(abs(pend)),
+        "derivaResiduo":   coma(residuo),
+        "derivaCome":      coma(34.0 / abs(pend), 1) if pend else "--",
+        "ruidoN":          "%d" % len(ruidos),
+        "ruidoRms":        coma(sum(rms) / len(rms)),
+        "ruidoHz":         coma(sum(hz50) / len(hz50)),
+    }
+    # src/interfaces/python -> hay que subir CUATRO niveles para llegar a la
+    # raiz del repo, no tres: python, interfaces, src, y ahi si.
+    raiz = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "..", "..", ".."))
+    destino = os.path.join(raiz, "docs", "informe_semana_2026-09-06", "numeros.tex")
+    cab = ("% GENERADO POR figuras_semana.py. No editar a mano.\n"
+           "% Sale del mismo JSON que las figuras; se actualiza al recompilar.\n")
+    with open(destino, "w", encoding="utf-8") as fh:
+        fh.write(cab)
+        for k, v in macros.items():
+            fh.write("%snewcommand{%s%s}{%s}\n" % (chr(92), chr(92), k, v))
+    print("  -> numeros.tex  (%s h, %s muestras, %s mV/h)"
+          % (macros["derivaHoras"], macros["derivaMuestras"], macros["derivaTasa"]))
+    return destino
+
+
 if __name__ == "__main__":
     print("generando las figuras del informe:")
-    for f in (curva_adder, calibracion_antes_despues, deriva, ruido, rescate_comparado):
+    for f in (curva_adder, calibracion_antes_despues, deriva, ruido,
+              rescate_comparado, numeros_para_el_informe):
         try:
             f()
         except Exception as e:
