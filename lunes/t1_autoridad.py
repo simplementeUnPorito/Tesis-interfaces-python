@@ -93,9 +93,50 @@ def correr(etapa=2, tap=3, pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT,
             filas.append({"code": code, "taps_mv": {str(k): v[k] for k in v},
                           "asentada": quieto, "segundos": round(t_s, 1)})
 
+        # ------------------------------------------------------------------
+        # AFINAR EL UMBRAL, que es el numero que decide si el firmware llega.
+        #
+        # El barrido grueso dice ENTRE QUE DOS CODIGOS el tap entra o sale de la
+        # ventana observable, y con pasos de 32 eso es una incertidumbre de 32
+        # codigos. No alcanza: el 2026-09-06 la diferencia entre "el firmware
+        # llega" y "no llega" fueron 16 codigos -su clamp estaba en -128 y el
+        # tap empezaba a moverse entre -128 y -144-. Un umbral con +-32 de
+        # incertidumbre no distingue esos dos mundos.
+        #
+        # Asi que donde el barrido grueso cruza la frontera, se vuelve con
+        # pasos de a 4.
+        cruces = []
+        for a, b in zip(filas, filas[1:]):
+            va = a["taps_mv"].get(str(tap))
+            vb = b["taps_mv"].get(str(tap))
+            if va is None or vb is None:
+                continue
+            if lectura_valida(va) != lectura_valida(vb):
+                cruces.append((a["code"], b["code"]))
+        for lo, hi in cruces[:2]:      # dos cruces como mucho: entrada y salida
+            paso = 4 if abs(hi - lo) > 8 else 1
+            log("")
+            log("  afinando el umbral entre %+d y %+d, de a %d codigos" % (lo, hi, paso))
+            avance = paso if hi > lo else -paso
+            for code in range(lo + avance, hi, avance):
+                if not poner_idac(lab, etapa, code):
+                    break
+                v, t_s, quieto = esperar_quieto(lab, log=None)
+                mv = v.get(tap)
+                dentro = mv is not None and lectura_valida(mv)
+                log("  IDAC %d = %+5d   tap %d = %s   %s" % (
+                    etapa, code, tap,
+                    ("%9.2f" % mv) if mv is not None else "sin lectura",
+                    "EN VENTANA" if dentro else "zona ciega"))
+                filas.append({"code": code, "taps_mv": {str(k): v[k] for k in v},
+                              "asentada": quieto, "segundos": round(t_s, 1),
+                              "afinado": True})
+
         poner_idac(lab, etapa, 0)
     finally:
         c.close()
+
+    filas.sort(key=lambda f: f["code"])
 
     # ---- lo que sale del barrido ------------------------------------------
     puntos = [(f["code"], f["taps_mv"].get(str(tap))) for f in filas]
@@ -120,6 +161,17 @@ def correr(etapa=2, tap=3, pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT,
         log("               (ajustada sobre %d puntos dentro de la ventana)" % n)
         log("RECORRIDO UTIL %d de %d codigos barridos caen en la ventana"
             % (len(utiles), len(filas)))
+        # La region util, con sus dos bordes. Es el numero contra el que hay que
+        # comparar el clamp del firmware: si el clamp no llega al borde, el lazo
+        # no puede alcanzar la region donde su medida significa algo.
+        entran = sorted(f["code"] for f in filas
+                        if lectura_valida(f["taps_mv"].get(str(tap))))
+        if entran:
+            log("REGION UTIL    el tap esta en la ventana entre los codigos "
+                "%+d y %+d" % (entran[0], entran[-1]))
+            afinado = any(f.get("afinado") for f in filas)
+            log("               (borde localizado con paso de %s codigos)"
+                % ("4" if afinado else "32, SIN afinar"))
         if codigo_vref is not None:
             mv = codigo_vref["taps_mv"][str(tap)]
             log("PUNTO DE VREF  codigo %+d deja el tap en %.3f V (%.1f de banco)"
