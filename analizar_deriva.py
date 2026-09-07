@@ -93,8 +93,15 @@ def main():
     print("ganancias : PGA x%s, PGAout x%s" % (d.get("pga_x"), d.get("pgaout_x")))
     print("calibrado : %s" % d.get("calibrado_por", d.get("dac", "?")))
     print("muestras  : %d" % len(m))
-    if d.get("lecturas_fallidas"):
-        print("            (%d lecturas perdidas, ignoradas)" % d["lecturas_fallidas"])
+    nulos_por_canal = [sum(1 for x in m if x["taps_mv"].get(str(ch)) is None)
+                       for ch in range(4)]
+    nulos = sum(nulos_por_canal)
+    if nulos:
+        print("nulos     : %d de %d taps (ch0=%d, ch1=%d, ch2=%d, ch3=%d)"
+              % (nulos, 4 * len(m), *nulos_por_canal))
+    contador = d.get("lecturas_fallidas", 0)
+    if contador != nulos:
+        print("            contador legado=%d; no incluia respuestas vacias" % contador)
     if len(m) < 3:
         raise SystemExit("todavia no hay suficientes muestras para decir nada")
 
@@ -351,6 +358,7 @@ def main():
     if len(ruidos) >= 2:
         rms = [r["rms_uv"] for _, r in ruidos]
         hz50 = [r["hz50_uv"] for _, r in ruidos]
+        ruido_esperado = (len(m) + 4) // 5
         print()
         # LA MEDIANA, NO EL PROMEDIO. Un solo pico -8010 uV a las 5,2 h, veinte
         # veces el resto, casi seguro alguien caminando cerca- corre el promedio
@@ -367,6 +375,9 @@ def main():
 
         print("EXP4d - EL RUIDO DEL TAP DEL LP, con la cadena calibrada y quieta")
         print("  %d medidas a lo largo de %.1f h" % (len(ruidos), horas))
+        if len(ruidos) != ruido_esperado:
+            print("  faltan %d de %d bloques previstos" %
+                  (ruido_esperado - len(ruidos), ruido_esperado))
         print("  RMS      %6.0f uV de banco (mediana)   min %.0f" % (med_rms, min(rms)))
         print("  a 50 Hz  %6.0f uV de banco (mediana)" % med_hz)
         if picos:

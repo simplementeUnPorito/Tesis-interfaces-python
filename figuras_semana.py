@@ -327,7 +327,10 @@ def numeros_para_el_informe():
     """
     f = max(glob.glob(os.path.join(LAB, 'deriva_2026*.json')), key=os.path.getmtime)
     d = json.load(open(f, encoding='utf-8'))
-    m = [x for x in d["muestras"] if x["taps_mv"].get("3") is not None]
+    todas = d["muestras"]
+    m = [x for x in todas if x["taps_mv"].get("3") is not None]
+    nulos_tap = sum(1 for x in todas for ch in range(4)
+                    if x["taps_mv"].get(str(ch)) is None)
     t0 = datetime.fromisoformat(m[0]["t"])
     instantes = [datetime.fromisoformat(x["t"]) for x in m]
     xs = [(t - t0).total_seconds() / 3600.0 for t in instantes]
@@ -402,12 +405,18 @@ def numeros_para_el_informe():
         "derivaRectaSignada": ("%+.0f" % (pend * xs[-1])).replace(".", ","),
         "derivaHoras":     coma(xs[-1], 1),
         "derivaMuestras":  "%d" % len(m),
+        "derivaMuestrasTotales": "%d" % len(todas),
+        "lecturasTapTotales": "%d" % (4 * len(todas)),
+        "lecturasTapNulas": "%d" % nulos_tap,
+        "lecturasTapNulasPct": coma(100.0 * nulos_tap / (4 * len(todas)), 2),
         "derivaBanda":     coma(max(ys) - min(ys)),
         "derivaTasa":      coma(abs(pend)),
         "derivaTasaSignada": ("%+.1f" % pend).replace(".", ","),
         "derivaResiduo":   coma(residuo),
         "derivaCome":      coma(34.0 / abs(pend), 1) if pend else "--",
         "ruidoN":          "%d" % len(ruidos),
+        "ruidoEsperado":   "%d" % ((len(todas) + 4) // 5),
+        "ruidoFaltante":   "%d" % (((len(todas) + 4) // 5) - len(ruidos)),
         "ruidoRms":        coma(_mediana(rms)),
         "ruidoHz":         coma(_mediana(hz50)),
         "ruidoPicos":      "%d" % sum(1 for r in rms if r > 2.0 * _mediana(rms)),

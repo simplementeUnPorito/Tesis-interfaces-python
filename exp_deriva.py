@@ -144,7 +144,11 @@ def main(forzar_pc=False, horas=None):
             for ch in range(4):
                 try:
                     p = lab.measure_dc(ch, 3)
-                    v[ch] = (p.mean_uv / 1000.0) if (p and p.ok) else None
+                    if p and p.ok:
+                        v[ch] = p.mean_uv / 1000.0
+                    else:
+                        v[ch] = None
+                        reg["lecturas_fallidas"] += 1
                 except Exception:
                     v[ch] = None
                     reg["lecturas_fallidas"] += 1
@@ -156,6 +160,8 @@ def main(forzar_pc=False, horas=None):
                     if a and a.ok:
                         fila["ruido_ch3"] = {"rms_uv": a.rms_uv, "pp_uv": a.pp_uv,
                                              "hz50_uv": a.hz50_uv}
+                    else:
+                        reg["lecturas_fallidas"] += 1
                 except Exception:
                     reg["lecturas_fallidas"] += 1
                 r = a_voltios(v[3]) if v.get(3) is not None else None
