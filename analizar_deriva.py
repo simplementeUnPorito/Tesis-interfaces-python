@@ -23,13 +23,50 @@ saturada nunca. Asi que el veredicto se da contra dos varas:
 Uso:  python analizar_deriva.py [ruta.json]
 """
 from __future__ import annotations
-import sys, json, glob, os
+import sys, json, glob, os, math
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from escala_banco import a_voltios, VREF_V, BANCO_MIN_VALIDO_MV, BANCO_MAX_VALIDO_MV
 
 LAB = r'C:\Github\Tesis\lab\planta'
+
+
+def temperatura_exterior(instantes):
+    """Interpola el proxy horario de Open-Meteo sin extrapolarlo."""
+    candidatos = glob.glob(os.path.join(LAB, "temperatura_exterior_*.json"))
+    if not candidatos:
+        return [], None
+    with open(max(candidatos, key=os.path.getmtime), encoding="utf-8") as fh:
+        datos = json.load(fh)
+    serie = sorted((datetime.fromisoformat(x["t"]), float(x["temperature_2m_c"]))
+                   for x in datos.get("horas", []))
+    valores = []
+    j = 0
+    for instante in instantes:
+        while j + 1 < len(serie) and serie[j + 1][0] < instante:
+            j += 1
+        if j + 1 >= len(serie) or instante < serie[j][0]:
+            valores.append(None)
+            continue
+        ta, va = serie[j]
+        tb, vb = serie[j + 1]
+        ancho = (tb - ta).total_seconds()
+        f = (instante - ta).total_seconds() / ancho if ancho else 0.0
+        valores.append(va + f * (vb - va))
+    return valores, datos
+
+
+def correlacion(a, b):
+    pares = [(x, y) for x, y in zip(a, b) if y is not None]
+    if len(pares) < 3:
+        return None
+    aa, bb = zip(*pares)
+    ma, mb = sum(aa) / len(aa), sum(bb) / len(bb)
+    num = sum((x - ma) * (y - mb) for x, y in pares)
+    da = sum((x - ma) ** 2 for x in aa)
+    db = sum((y - mb) ** 2 for y in bb)
+    return num / math.sqrt(da * db) if da and db else None
 
 
 def cargar(ruta=None):
@@ -186,10 +223,10 @@ def main():
     # mantiene; si VAGABUNDEA dentro de un rango, la banda se satura y la
     # pendiente ajustada se achica sola a medida que entran muestras.
     #
-    # Medido el 2026-09-06: la banda fue 53, 101, 123, 130 y 130 mV, y la
-    # pendiente -17,8, -30,5, -24,6, -20,6 y -14,6 mV/h. La banda se freno y la
-    # pendiente se viene achicando: es vagabundeo acotado, y llamarlo "deriva de
-    # 24 mV/h" habria sido una afirmacion sobre algo que no esta pasando.
+    # La lectura provisional a 7,1 h parecia una banda cerrada, pero el registro
+    # posterior cruzo el origen y siguio creciendo. Es el ejemplo de por que
+    # esta clasificacion no debe convertirse en conclusion antes de cerrar la
+    # ventana temporal del experimento.
     # ------------------------------------------------------------------
     bandas = []
     for frac in (0.2, 0.4, 0.6, 0.8, 1.0):
@@ -276,8 +313,7 @@ def main():
         print("  se los come en %.1f h. UN TRIM DE FABRICA NO ALCANZA para un turno"
               % (ERROR_CALIBRACION_MV / abs(tasa_global)))
         print("  de campo, y ese es el argumento que faltaba.")
-        if margen > 0:
-            print("  Al ritmo medido tocaria el riel en %.1f h." % (margen / abs(tasa_global)))
+        print("  La recta resume solamente esta ventana; no se extrapola hasta el riel.")
     elif len(signos) > 1:
         print("  ES VAGABUNDEO, NO UNA TENDENCIA: la recta solo se lleva %.0f mV en"
               % (abs(tasa_global) * horas))
@@ -294,8 +330,20 @@ def main():
               % (abs(tasa_global), ERROR_CALIBRACION_MV))
         print("  come en %.1f h." % (ERROR_CALIBRACION_MV / abs(tasa_global)))
         print("  Un trim de fabrica NO alcanza para un turno de campo.")
-        if margen > 0 and abs(tasa_global) > 0:
-            print("  Al ritmo medido tocaria el riel en %.1f h." % (margen / abs(tasa_global)))
+        print("  La recta resume solamente esta ventana; no se extrapola hasta el riel.")
+
+    instantes_lp = [datetime.fromisoformat(x["t"]) for x in m
+                    if x["taps_mv"].get("3") is not None]
+    temp, _ = temperatura_exterior(instantes_lp)
+    corr = correlacion(ys, temp) if temp else None
+    temp_validas = [x for x in temp if x is not None]
+    if corr is not None and temp_validas:
+        print()
+        print("TEMPERATURA EXTERIOR (PROXY, NO SENSOR DEL BANCO)")
+        print("  %.1f a %.1f C; correlacion contemporanea con LP: r=%+.2f"
+              % (min(temp_validas), max(temp_validas), corr))
+        print("  Es un indicio meteorologico, no prueba causalidad termica:")
+        print("  falta medir la temperatura junto a la placa.")
 
     # ---- EXP4d: el ruido, que viaja en el mismo registro -------------------
     ruidos = [(datetime.fromisoformat(x["t"]), x["ruido_ch3"])

@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import glob
+import math
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -37,6 +38,50 @@ def _guardar(fig, nombre):
     fig.savefig(ruta, dpi=150)
     print("  -> %s" % nombre)
     return ruta
+
+
+def _temperatura_exterior():
+    """Devuelve la serie meteorologica opcional, siempre rotulada como proxy."""
+    candidatos = glob.glob(os.path.join(LAB, "temperatura_exterior_*.json"))
+    if not candidatos:
+        return None, []
+    ruta = max(candidatos, key=os.path.getmtime)
+    with open(ruta, encoding="utf-8") as fh:
+        datos = json.load(fh)
+    serie = [(datetime.fromisoformat(x["t"]), float(x["temperature_2m_c"]))
+             for x in datos.get("horas", [])]
+    serie.sort(key=lambda x: x[0])
+    return datos, serie
+
+
+def _interpolar_temperatura(instantes, serie):
+    """Interpola la serie horaria sin extrapolar fuera de sus extremos."""
+    salida = []
+    j = 0
+    for instante in instantes:
+        while j + 1 < len(serie) and serie[j + 1][0] < instante:
+            j += 1
+        if j + 1 >= len(serie) or instante < serie[j][0]:
+            salida.append(None)
+            continue
+        t_a, v_a = serie[j]
+        t_b, v_b = serie[j + 1]
+        ancho = (t_b - t_a).total_seconds()
+        fraccion = (instante - t_a).total_seconds() / ancho if ancho else 0.0
+        salida.append(v_a + fraccion * (v_b - v_a))
+    return salida
+
+
+def _correlacion(a, b):
+    pares = [(x, y) for x, y in zip(a, b) if y is not None]
+    if len(pares) < 3:
+        return None
+    aa, bb = zip(*pares)
+    ma, mb = sum(aa) / len(aa), sum(bb) / len(bb)
+    num = sum((x - ma) * (y - mb) for x, y in pares)
+    da = sum((x - ma) ** 2 for x in aa)
+    db = sum((y - mb) ** 2 for y in bb)
+    return num / math.sqrt(da * db) if da and db else None
 
 
 def curva_adder():
@@ -149,7 +194,8 @@ def deriva():
     d = json.load(open(f, encoding='utf-8'))
     m = [x for x in d["muestras"] if x["taps_mv"].get("3") is not None]
     t0 = datetime.fromisoformat(m[0]["t"])
-    xs = [(datetime.fromisoformat(x["t"]) - t0).total_seconds() / 3600.0 for x in m]
+    instantes = [datetime.fromisoformat(x["t"]) for x in m]
+    xs = [(t - t0).total_seconds() / 3600.0 for t in instantes]
     ys = [(a_voltios(x["taps_mv"]["3"]) - VREF_V) * 1000 for x in m]
 
     mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
@@ -167,7 +213,25 @@ def deriva():
     ax.set_ylabel("desvío de Vref [mV reales]")
     ax.set_title("EXP4c — el punto calibrado no se queda quieto\n"
                  "punto fijo, sin recalibrar, PGA ×50 / PGAout ×1")
-    ax.legend(fontsize=9, loc="lower left")
+    _, serie_temp = _temperatura_exterior()
+    if serie_temp:
+        puntos_temp = [((t - t0).total_seconds() / 3600.0, v)
+                       for t, v in serie_temp if xs[0] <= (t - t0).total_seconds() / 3600.0 <= xs[-1]]
+        if puntos_temp:
+            ax2 = ax.twinx()
+            ax2.plot([p[0] for p in puntos_temp], [p[1] for p in puntos_temp],
+                     "o--", color=GRIS, linewidth=1.1, markersize=3,
+                     label="temperatura exterior modelada (proxy)")
+            ax2.set_ylabel("temperatura exterior [°C]", color=GRIS)
+            ax2.tick_params(axis="y", colors=GRIS)
+            lineas = [linea for linea in ax.get_lines() + ax2.get_lines()
+                      if not linea.get_label().startswith("_")]
+            ax.legend(lineas, [linea.get_label() for linea in lineas],
+                      fontsize=8, loc="lower left")
+        else:
+            ax.legend(fontsize=9, loc="lower left")
+    else:
+        ax.legend(fontsize=9, loc="lower left")
     ax.grid(alpha=0.3)
     return _guardar(fig, "deriva_tendencia.png")
 
@@ -265,7 +329,8 @@ def numeros_para_el_informe():
     d = json.load(open(f, encoding='utf-8'))
     m = [x for x in d["muestras"] if x["taps_mv"].get("3") is not None]
     t0 = datetime.fromisoformat(m[0]["t"])
-    xs = [(datetime.fromisoformat(x["t"]) - t0).total_seconds() / 3600.0 for x in m]
+    instantes = [datetime.fromisoformat(x["t"]) for x in m]
+    xs = [(t - t0).total_seconds() / 3600.0 for t in instantes]
     ys = [(a_voltios(x["taps_mv"]["3"]) - VREF_V) * 1000 for x in m]
     mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
     den = sum((x - mx) ** 2 for x in xs)
@@ -276,6 +341,10 @@ def numeros_para_el_informe():
     ruidos = [x["ruido_ch3"] for x in d["muestras"] if "ruido_ch3" in x]
     rms = [r["rms_uv"] for r in ruidos] or [0]
     hz50 = [r["hz50_uv"] for r in ruidos] or [0]
+    _, serie_temp = _temperatura_exterior()
+    temperaturas = _interpolar_temperatura(instantes, serie_temp) if serie_temp else []
+    temp_validas = [t for t in temperaturas if t is not None]
+    corr_temp = _correlacion(ys, temperaturas) if temperaturas else None
 
     # MEDIANA Y NO PROMEDIO, por lo mismo que la figura recorta la escala: un
     # solo pico de ruido ambiente -8010 uV a las 5,2 h- corre el promedio un
@@ -330,16 +399,28 @@ def numeros_para_el_informe():
         "derivaVeces":     coma((max(ys) - min(ys)) / 34.0, 1),
         "derivaTramos":    ", ".join(("%+.1f" % t).replace(".", ",") for t in tramos),
         "derivaRecta":     coma(abs(pend) * xs[-1]),
+        "derivaRectaSignada": ("%+.0f" % (pend * xs[-1])).replace(".", ","),
         "derivaHoras":     coma(xs[-1], 1),
         "derivaMuestras":  "%d" % len(m),
         "derivaBanda":     coma(max(ys) - min(ys)),
         "derivaTasa":      coma(abs(pend)),
+        "derivaTasaSignada": ("%+.1f" % pend).replace(".", ","),
         "derivaResiduo":   coma(residuo),
         "derivaCome":      coma(34.0 / abs(pend), 1) if pend else "--",
         "ruidoN":          "%d" % len(ruidos),
         "ruidoRms":        coma(_mediana(rms)),
         "ruidoHz":         coma(_mediana(hz50)),
         "ruidoPicos":      "%d" % sum(1 for r in rms if r > 2.0 * _mediana(rms)),
+        "ruidoMax":        coma(max(rms)),
+        "ruidoVecesMax":   coma(max(rms) / _mediana(rms), 1) if _mediana(rms) else "--",
+        "ruidoPromedio":   coma(sum(rms) / len(rms)),
+        "ruidoSesgoPromedio": coma(100.0 * (sum(rms) / len(rms) / _mediana(rms) - 1.0), 0)
+                              if _mediana(rms) else "--",
+        "tempN":           "%d" % len(temp_validas),
+        "tempMin":        coma(min(temp_validas), 1) if temp_validas else "--",
+        "tempMax":        coma(max(temp_validas), 1) if temp_validas else "--",
+        "tempCorr":       (("%+.2f" % corr_temp).replace(".", ",")
+                           if corr_temp is not None else "--"),
     }
     # src/interfaces/python -> hay que subir CUATRO niveles para llegar a la
     # raiz del repo, no tres: python, interfaces, src, y ahi si.

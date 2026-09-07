@@ -32,6 +32,7 @@ sueltas.
 Uso:  python exp_deriva.py [--pc]      # --pc fuerza el procedimiento de la PC
 """
 from __future__ import annotations
+import argparse
 import sys
 import os
 import time
@@ -81,7 +82,7 @@ def calibrar_con_pc(lab):
     return refinar(lab, dac, 2 * TAU_S, 2, lambda t: log("  " + t))
 
 
-def main(forzar_pc=False):
+def main(forzar_pc=False, horas=None):
     ruta = r'C:\Github\Tesis\lab\planta\deriva_%s.json' % datetime.now().strftime('%Y%m%d_%H%M')
     os.makedirs(os.path.dirname(ruta), exist_ok=True)
 
@@ -127,6 +128,7 @@ def main(forzar_pc=False):
            "pga_x": 50, "pgaout_x": 1,
            "calibrado_por": quien,
            "nota": "punto FIJO toda la corrida; no se recalibra",
+           "duracion_objetivo_h": horas,
            "punto_inicial_mv": {str(k): v.get(k) for k in range(4)},
            "muestras": [], "lecturas_fallidas": 0}
 
@@ -163,9 +165,22 @@ def main(forzar_pc=False):
                              for k in range(4)),
                     ("%.3f V" % r) if r is not None else ""))
             reg["muestras"].append(fila)
-            with open(ruta, "w", encoding="utf-8") as f:
+            # Escritura atomica: los analizadores pueden leer el registro
+            # mientras corre el ensayo sin encontrar un JSON a medio escribir.
+            temporal = ruta + ".tmp"
+            with open(temporal, "w", encoding="utf-8") as f:
                 json.dump(reg, f, indent=1)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporal, ruta)
             n += 1
+            if horas is not None:
+                transcurrido_h = (datetime.fromisoformat(fila["t"]) -
+                                  datetime.fromisoformat(reg["inicio"])).total_seconds() / 3600.0
+                if transcurrido_h >= horas:
+                    log("plazo cumplido: %.1f h, %d muestras" %
+                        (transcurrido_h, len(reg["muestras"])))
+                    break
             time.sleep(PERIODO_S)
     except KeyboardInterrupt:
         log("")
@@ -177,4 +192,12 @@ def main(forzar_pc=False):
 
 
 if __name__ == "__main__":
-    main("--pc" in sys.argv[1:])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pc", action="store_true",
+                        help="fuerza la calibracion de respaldo desde la PC")
+    parser.add_argument("--horas", type=float, default=None,
+                        help="corta limpiamente al cumplir esta duracion (por defecto, corre hasta Ctrl+C)")
+    args = parser.parse_args()
+    if args.horas is not None and args.horas <= 0:
+        parser.error("--horas debe ser mayor que cero")
+    main(args.pc, args.horas)
