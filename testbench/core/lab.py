@@ -16,8 +16,8 @@ Dos cosas que conviene tener presentes al usar esto:
   diferencia con C4/C5/D7, que sí capturan y sí lo necesitan.
 * **Lo que se informa en µV es desviación respecto de ``Vref``**, no tensión
   absoluta: la cadena entra al ADC por un amplificador referido a ``Vdda/2``.
-  Y el código de IDAC vale 1875 µV en la referencia de esta placa, no los 3750
-  que asume el firmware (ver ``checklist.LSB_UV_PLACA``).
+  Los códigos valen 1875 µV en las referencias PGA/BP/ADDER y 487,5 µV en LP,
+  porque R14 cambió a 3,9 kΩ (ver ``checklist.LSB_UV_BY_STAGE``).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from .checklist import LSB_UV_PLACA, STAGE_NAMES, TAP_NAMES
+from .checklist import LSB_UV_BY_STAGE, STAGE_NAMES, TAP_NAMES
 from .session import Session
 
 # Selectores de asentamiento del comando `dc`, copiados de ST_SETTLE_MS[] del
@@ -122,12 +122,12 @@ class Sweep:
     def gain_from_reference(self, ch: int) -> Optional[float]:
         """Ganancia desde la referencia hasta el tap, adimensional.
 
-        Divide la pendiente medida por el escalón real de esta placa
-        (1875 µV por código). Es el número con sentido físico: cuánto amplifica
+        Divide la pendiente medida por el escalón real de esa referencia en
+        esta placa. Es el número con sentido físico: cuánto amplifica
         la etapa, sin la escala equivocada del firmware de por medio.
         """
         s = self.slope_uv_per_code(ch)
-        return None if s is None else s / LSB_UV_PLACA
+        return None if s is None else s / LSB_UV_BY_STAGE[self.stage]
 
 
 class Lab:

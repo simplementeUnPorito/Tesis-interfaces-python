@@ -374,7 +374,8 @@ def cmd_ac(args) -> int:
 
 
 def cmd_idac(args) -> int:
-    from .core.lab import LSB_UV_PLACA, describe_stage
+    from .core.lab import describe_stage
+    from .core.checklist import LSB_UV_BY_STAGE
 
     c, sess, lab = _lab(args)
     try:
@@ -383,8 +384,9 @@ def cmd_idac(args) -> int:
         if ok:
             print(color(f"IDAC de {describe_stage(args.etapa)} en el codigo "
                         f"{args.codigo}", "PASS"))
-            print(f"  son {args.codigo * LSB_UV_PLACA / 1000.0:.1f} mV sobre Vref "
-                  f"en esta placa ({LSB_UV_PLACA:.0f} uV por codigo)")
+            lsb_uv = LSB_UV_BY_STAGE[args.etapa]
+            print(f"  son {args.codigo * lsb_uv / 1000.0:.1f} mV sobre Vref "
+                  f"en esta placa ({lsb_uv:.1f} uV por codigo)")
         else:
             print(color("  el PSoC no acepto la escritura", "FAIL"))
         if args.medir:

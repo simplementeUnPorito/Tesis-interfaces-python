@@ -26,11 +26,19 @@ barrido llega a +-255, que es el limite del hardware, y punto.
 
 Uso:
     python -m lunes.t1_autoridad [etapa] [--tap N] [--pga N] [--pgaout N]
+                                  [--seed ETAPA CODIGO]
 
     etapa: 0 PGA, 1 BP, 2 ADDER, 3 LP   (por defecto 2, el ADDER)
     tap:   canal que se mira            (por defecto 3, el del LP, que es el
                                          que se captura y el unico cuyo error
                                          importa de verdad)
+
+    --seed: deja otro IDAC en un codigo conocido antes del barrido. Es
+            imprescindible para medir el LP cuando la cadena con todos los
+            IDAC en cero esta saturada; por ejemplo, despues de localizar Vref
+            del ADDER en -192:
+
+            python -m lunes.t1_autoridad 3 --seed 2 -192
 """
 from __future__ import annotations
 import sys
@@ -38,7 +46,7 @@ import time
 
 from .comun import (abrir_banco, poner_idac, cerar_idacs, leer_taps,
                     describir_taps, esperar_quieto, guardar,
-                    pendiente_por_codigo, lectura_valida, a_voltios,
+                    lectura_valida, en_riel, delta_a_voltios, a_voltios,
                     VREF_V, GANANCIA, CAMPO_PGA, CAMPO_PGAOUT)
 
 NOMBRES = {0: "PGA", 1: "BP", 2: "ADDER", 3: "LP"}
@@ -53,7 +61,8 @@ def codigos_del_barrido(paso_grueso=32):
 
 
 def correr(etapa=2, tap=3, pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT,
-           paso_grueso=32, log=print):
+           paso_grueso=32, semillas=None, log=print):
+    semillas = dict(semillas or {})
     nombre = NOMBRES.get(etapa, str(etapa))
     log("=" * 70)
     log("T1  autoridad del %s (IDAC %d) sobre el tap %d, en lazo abierto"
@@ -67,8 +76,20 @@ def correr(etapa=2, tap=3, pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT,
         if mal:
             raise SystemExit("ABORTA: el firmware rechazo los IDAC %s" % mal)
 
+        for etapa_seed, code_seed in sorted(semillas.items()):
+            if etapa_seed == etapa:
+                raise SystemExit("ABORTA: --seed no puede fijar la misma etapa "
+                                 "que se esta barriendo")
+            if not poner_idac(lab, etapa_seed, code_seed):
+                raise SystemExit("ABORTA: el firmware rechazo seed IDAC %d = %d"
+                                 % (etapa_seed, code_seed))
+            log("seed: IDAC %d = %+d" % (etapa_seed, code_seed))
+
         log("")
-        log("asentando con todos los IDAC en cero...")
+        if semillas:
+            log("asentando con los IDAC no indicados en cero y las semillas aplicadas...")
+        else:
+            log("asentando con todos los IDAC en cero...")
         v, t_s, quieto = esperar_quieto(lab, log=lambda t: log("  " + t))
         log(describir_taps(v))
         partida = dict(v)
@@ -83,6 +104,8 @@ def correr(etapa=2, tap=3, pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT,
             marca = ""
             if mv is not None and not lectura_valida(mv):
                 marca = "  <- fuera de la ventana observable"
+            elif mv is not None and en_riel(mv):
+                marca = "  ->  %.3f V  <- SIN GUARDA ANTIRRIEL" % a_voltios(mv)
             elif mv is not None:
                 marca = "  ->  %.3f V  (%+.0f mV de Vref)" % (
                     a_voltios(mv), (a_voltios(mv) - VREF_V) * 1000)
@@ -132,17 +155,35 @@ def correr(etapa=2, tap=3, pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT,
                               "asentada": quieto, "segundos": round(t_s, 1),
                               "afinado": True})
 
-        poner_idac(lab, etapa, 0)
     finally:
+        # Un corte o excepcion a mitad del barrido no debe dejar ni el actuador
+        # barrido ni los seeds aplicados. Restaurar los cuatro es mas seguro
+        # que confiar en que se alcanzo el final normal del bucle.
+        cerar_idacs(lab)
         c.close()
 
     filas.sort(key=lambda f: f["code"])
 
     # ---- lo que sale del barrido ------------------------------------------
-    puntos = [(f["code"], f["taps_mv"].get(str(tap))) for f in filas]
-    m_banco, uv_reales, n = pendiente_por_codigo(puntos)
-
-    utiles = [f for f in filas if lectura_valida(f["taps_mv"].get(str(tap)))]
+    # La ventana observable del ADC es más ancha que la región donde la etapa
+    # analógica todavía transmite. Una lectura a 4,81 V es real para el ADC,
+    # pero es el amplificador pegado al riel y no demuestra autoridad del IDAC.
+    observables = [f for f in filas
+                   if lectura_valida(f["taps_mv"].get(str(tap)))]
+    utiles = [f for f in observables
+              if not en_riel(f["taps_mv"].get(str(tap)))]
+    puntos = [(f["code"], f["taps_mv"].get(str(tap))) for f in utiles]
+    n = len(puntos)
+    if n >= 2:
+        mx = sum(c for c, _ in puntos) / n
+        my = sum(mv for _, mv in puntos) / n
+        den = sum((c - mx) ** 2 for c, _ in puntos)
+        m_banco = (sum((c - mx) * (mv - my) for c, mv in puntos) / den
+                   if den else None)
+        uv_reales = (delta_a_voltios(m_banco) * 1e6
+                     if m_banco is not None else None)
+    else:
+        m_banco = uv_reales = None
     codigo_vref = None
     if utiles:
         codigo_vref = min(utiles,
@@ -151,21 +192,24 @@ def correr(etapa=2, tap=3, pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT,
     log("")
     log("-" * 70)
     if m_banco is None:
-        log("NO HAY PENDIENTE MEDIBLE: el tap %d nunca entro en la ventana" % tap)
-        log("observable en todo el recorrido del %s. O la etapa no tiene" % nombre)
+        log("NO HAY PENDIENTE MEDIBLE: el tap %d nunca entro en la region" % tap)
+        log("operativa con guarda antirriel en el recorrido del %s. O la etapa no tiene" % nombre)
         log("autoridad sobre ese tap, o hay otra etapa saturada cortando el")
         log("camino. Correr T1 sobre las otras etapas para distinguir.")
     else:
         log("PENDIENTE      %.4f mV de banco por codigo = %.0f uV REALES por codigo"
             % (m_banco, uv_reales))
-        log("               (ajustada sobre %d puntos dentro de la ventana)" % n)
-        log("RECORRIDO UTIL %d de %d codigos barridos caen en la ventana"
+        log("               (ajustada sobre %d puntos operativos)" % n)
+        log("RECORRIDO UTIL %d de %d codigos barridos conservan guarda antirriel"
             % (len(utiles), len(filas)))
+        log("OBSERVABLE     %d de %d codigos son legibles por el ADC"
+            % (len(observables), len(filas)))
         # La region util, con sus dos bordes. Es el numero contra el que hay que
         # comparar el clamp del firmware: si el clamp no llega al borde, el lazo
         # no puede alcanzar la region donde su medida significa algo.
         entran = sorted(f["code"] for f in filas
-                        if lectura_valida(f["taps_mv"].get(str(tap))))
+                        if lectura_valida(f["taps_mv"].get(str(tap)))
+                        and not en_riel(f["taps_mv"].get(str(tap))))
         if entran:
             log("REGION UTIL    el tap esta en la ventana entre los codigos "
                 "%+d y %+d" % (entran[0], entran[-1]))
@@ -190,9 +234,12 @@ def correr(etapa=2, tap=3, pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT,
     ruta = guardar("t1_autoridad_e%d_tap%d" % (etapa, tap),
                    {"etapa": etapa, "tap": tap,
                     "pga_x": GANANCIA[pga], "pgaout_x": GANANCIA[pgaout],
+                    "semillas": {str(k): v for k, v in semillas.items()},
                     "partida_mv": {str(k): partida[k] for k in partida},
                     "mv_banco_por_codigo": m_banco,
                     "uv_reales_por_codigo": uv_reales,
+                    "puntos_observables": len(observables),
+                    "puntos_operativos": len(utiles),
                     "codigo_vref": codigo_vref["code"] if codigo_vref else None,
                     "filas": filas})
     log("")
@@ -205,5 +252,12 @@ if __name__ == "__main__":
     etapa = int(args[0]) if args and not args[0].startswith("-") else 2
     def opc(nombre, defecto):
         return int(args[args.index(nombre) + 1]) if nombre in args else defecto
+    semillas = {}
+    if "--seed" in args:
+        i = args.index("--seed")
+        if i + 2 >= len(args):
+            raise SystemExit("uso de --seed: --seed ETAPA CODIGO")
+        semillas[int(args[i + 1])] = int(args[i + 2])
     correr(etapa=etapa, tap=opc("--tap", 3),
-           pga=opc("--pga", CAMPO_PGA), pgaout=opc("--pgaout", CAMPO_PGAOUT))
+           pga=opc("--pga", CAMPO_PGA), pgaout=opc("--pgaout", CAMPO_PGAOUT),
+           semillas=semillas)

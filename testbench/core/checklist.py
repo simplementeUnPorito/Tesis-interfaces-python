@@ -57,13 +57,17 @@ SKIP_MARKERS = ("C*", "D*")
 # --------------------------------------------------------------------------
 # El firmware deriva su escala de la portadora JitX, que no se fabricó: R de
 # conversión 30 kΩ y Vref de un AMS1117 que en la placa no existe. La placa
-# construida tiene R11-R14 = 15 kΩ contra Vref, y Vref = Vdda/2 = 2,5 V
-# bufferado por OPAref. Con los IDAC8 en 0-31,875 µA (1/8 µA por bit):
+# construida tenía R11-R14 = 15 kΩ contra Vref. El 2026-09-07 se cambió sólo
+# R14 (Vref_LP) a 3,9 kΩ. Vref = Vdda/2, bufferado por OPAref. Con los IDAC8
+# en 0-31,875 µA (1/8 µA por bit):
 IDAC_LSB_NA = 125.0            # 1/8 µA por bit
 IDAC_RSET_OHM_PLACA = 15_000.0  # medido: R11 = 14,76 kΩ sobre seis lecturas
+IDAC_RSET_OHM_BY_STAGE = (15_000.0, 15_000.0, 15_000.0, 3_900.0)
 IDAC_RSET_OHM_FIRMWARE = 30_000.0
 #: µV por código de IDAC en la placa construida: 125 nA x 15 kΩ = 1875 µV.
 LSB_UV_PLACA = IDAC_LSB_NA * IDAC_RSET_OHM_PLACA / 1000.0
+LSB_UV_BY_STAGE = tuple(IDAC_LSB_NA * r / 1000.0
+                        for r in IDAC_RSET_OHM_BY_STAGE)
 #: El umbral del firmware (200 µV/código) está justificado con 3,75 mV/LSB.
 #: Escalado a esta placa da la mitad.
 D2_MIN_SLOPE_UV_FIRMWARE = 200.0

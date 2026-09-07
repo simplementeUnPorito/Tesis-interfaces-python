@@ -59,6 +59,7 @@ from .core import figures
 from .core.checklist import (
     D2_MIN_SLOPE_UV_PLACA,
     LSB_UV_PLACA,
+    LSB_UV_BY_STAGE,
     STAGE_NAMES,
     fmt_mv,
     TAP_NAMES,
@@ -454,7 +455,7 @@ class MainWindow(QMainWindow):
             sp.setValue(0)
             sp.setMinimumWidth(70)
             sp.setToolTip(
-                f"0 = Vref. Cada código vale {LSB_UV_PLACA:.0f} µV en la "
+                f"0 = Vref. Cada código vale {LSB_UV_BY_STAGE[etapa]:.1f} µV en la "
                 "referencia; Enter aplica.")
             # Enter aplica sin tener que ir al botón, que es como se usa cuando
             # uno está mirando la traza y no el teclado.
@@ -900,8 +901,8 @@ class MainWindow(QMainWindow):
 
         nota = QLabel(
             "Estos comandos no necesitan el SYNC armado: miden, no capturan.\n"
-            f"Cada código de IDAC vale {LSB_UV_PLACA:.0f} µV en la referencia de "
-            "esta placa, y el código 0 es Vref: los negativos bajan la "
+            "Cada código vale 1875 µV en PGA/BP/ADDER y 487,5 µV en LP "
+            "(R14 = 3,9 kΩ). El código 0 es Vref: los negativos bajan la "
             "referencia y los positivos la suben."
         )
         nota.setWordWrap(True)
@@ -916,6 +917,7 @@ class MainWindow(QMainWindow):
             sp = QSpinBox()
             sp.setRange(-255, 255)
             sp.setValue(0)          # 0 = Vref, el centro del rango con signo
+            sp.setToolTip(f"{LSB_UV_BY_STAGE[etapa]:.1f} µV por código en esta referencia")
             self.idac_spins[etapa] = sp
             gl.addWidget(sp, etapa, 1)
             b = QPushButton("Fijar")
@@ -1777,6 +1779,10 @@ def _smoke() -> int:
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="testbench gui", description="Banco, modo gráfico")
     p.add_argument("--port", default=None, help="COM del ESP; si se omite se detecta")
+    p.add_argument("--manual", action="store_true",
+                   help="abrir directamente la pestaña Experimentos")
+    p.add_argument("--connect", action="store_true",
+                   help="conectar automáticamente al puerto elegido")
     p.add_argument("--smoke", action="store_true",
                    help="prueba headless sin ventana ni placa")
     args = p.parse_args(argv)
@@ -1787,7 +1793,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Banco de placas")
     win = MainWindow(port=args.port or con.default_port())
+    if args.manual:
+        win.tabs.setCurrentIndex(4)  # Experimentos
     win.show()
+    if args.connect:
+        QTimer.singleShot(200, win._toggle_connection)
     return app.exec()
 
 

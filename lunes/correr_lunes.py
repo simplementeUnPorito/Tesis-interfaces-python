@@ -37,20 +37,45 @@ from __future__ import annotations
 import sys
 import time
 import traceback
+import json
 from datetime import datetime
 
 from . import (t0_linea_base, t1_autoridad, t2_sin_calibrar,
                t3_cal_firmware, t4_encadenado)
 
+_ultima_t1_adder = None
+
+
+def _correr_t1_adder(log):
+    global _ultima_t1_adder
+    _ultima_t1_adder = t1_autoridad.correr(2, 3, log=log)
+    return _ultima_t1_adder
+
+
+def _correr_t1_lp_precentrado(log):
+    """Mide el LP sólo después de llevar la cadena a su región útil con ADDER.
+
+    Con todos los IDAC en cero el LP de esta placa queda oculto por saturación;
+    barrerlo así había producido una curva vacía aunque el actuador funcionaba.
+    """
+    if not _ultima_t1_adder:
+        raise SystemExit("no hay una curva ADDER previa para precentrar el LP")
+    with open(_ultima_t1_adder, encoding="utf-8") as f:
+        codigo = json.load(f).get("codigo_vref")
+    if codigo is None:
+        raise SystemExit("la curva ADDER no encontró un código operativo cerca de Vref")
+    log("LP se mide con ADDER fijado en %+d (Vref de la curva anterior)" % codigo)
+    return t1_autoridad.correr(3, 3, semillas={2: codigo}, log=log)
+
 PLANES = {
     "antes":   [("T0 linea base", lambda log: t0_linea_base.correr(log=log))],
     "despues": [("T0 linea base", lambda log: t0_linea_base.correr(log=log)),
-                ("T1 autoridad del ADDER", lambda log: t1_autoridad.correr(2, 3, log=log)),
-                ("T1 autoridad del LP", lambda log: t1_autoridad.correr(3, 3, log=log)),
+                ("T1 autoridad del ADDER", _correr_t1_adder),
+                ("T1 autoridad del LP", _correr_t1_lp_precentrado),
                 ("T4 encadenado", lambda log: t4_encadenado.correr(log=log))],
     "completo": [("T0 linea base", lambda log: t0_linea_base.correr(log=log)),
-                 ("T1 autoridad del ADDER", lambda log: t1_autoridad.correr(2, 3, log=log)),
-                 ("T1 autoridad del LP", lambda log: t1_autoridad.correr(3, 3, log=log)),
+                 ("T1 autoridad del ADDER", _correr_t1_adder),
+                 ("T1 autoridad del LP", _correr_t1_lp_precentrado),
                  ("T4 encadenado", lambda log: t4_encadenado.correr(log=log)),
                  ("T3 se calibra solo", lambda log: t3_cal_firmware.correr(log=log)),
                  ("T2 sin calibrar", lambda log: t2_sin_calibrar.correr(log=log))],
