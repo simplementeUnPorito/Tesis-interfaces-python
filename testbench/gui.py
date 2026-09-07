@@ -259,6 +259,8 @@ class MainWindow(QMainWindow):
         #: monitor porque la consola del firmware es una sola.
         self._mon_target = "lab"
         self._scope_running = False
+        self._startup_field = False
+        self._startup_field_done = False
         #: Canal pedido desde la GUI; el motor lo relee en cada corte.
         self._scope_ch = 0
         #: Cambios pedidos desde la GUI mientras el osciloscopio corre.
@@ -1133,6 +1135,26 @@ class MainWindow(QMainWindow):
         # contestaban "primero hay que conectar", que era falso y confundía.
         self._set_scope_enabled(ok)
         self._set_link(None)
+        if ok and self._startup_field and not self._startup_field_done:
+            self._startup_field_done = True
+            self.cmb_scope_pga.setCurrentIndex(8)       # x50
+            self.cmb_scope_pgaout.setCurrentIndex(0)    # x1
+            self.gain_combos["pga"].setCurrentIndex(8)
+            self.gain_combos["pgaout"].setCurrentIndex(0)
+            for etapa in range(4):
+                self.spin_scope_idac[etapa].setValue(0)
+                self.idac_spins[etapa].setValue(0)
+
+            def estado_campo(_s: Session) -> bool:
+                lab = self.worker.lab
+                operaciones = [lab.set_gain("pga", 8),
+                               lab.set_gain("pgaout", 0)]
+                operaciones.extend(lab.set_idac(etapa, 0) for etapa in range(4))
+                if not all(operaciones):
+                    raise RuntimeError("el PSoC rechazó parte del estado inicial")
+                return True
+
+            self._job("estado inicial x50/x1, IDAC=0", estado_campo, None)
 
     def _set_scope_enabled(self, listo: bool) -> None:
         for wdg in ([self.btn_scope, self.cmb_scope_pga, self.cmb_scope_pgaout]
@@ -1783,6 +1805,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="abrir directamente la pestaña Experimentos")
     p.add_argument("--connect", action="store_true",
                    help="conectar automáticamente al puerto elegido")
+    p.add_argument("--field", action="store_true",
+                   help="al conectar, fijar PGA x50/PGAout x1 y los IDAC en 0")
     p.add_argument("--smoke", action="store_true",
                    help="prueba headless sin ventana ni placa")
     args = p.parse_args(argv)
@@ -1795,6 +1819,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     win = MainWindow(port=args.port or con.default_port())
     if args.manual:
         win.tabs.setCurrentIndex(4)  # Experimentos
+    win._startup_field = args.field
     win.show()
     if args.connect:
         QTimer.singleShot(200, win._toggle_connection)
