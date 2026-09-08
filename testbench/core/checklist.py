@@ -57,17 +57,18 @@ SKIP_MARKERS = ("C*", "D*")
 # --------------------------------------------------------------------------
 # El firmware deriva su escala de la portadora JitX, que no se fabricó: R de
 # conversión 30 kΩ y Vref de un AMS1117 que en la placa no existe. La placa
-# construida tenía R11-R14 = 15 kΩ contra Vref. El 2026-09-07 se cambió sólo
-# R14 (Vref_LP) a 3,9 kΩ. Vref = Vdda/2, bufferado por OPAref. Con los IDAC8
-# en 0-31,875 µA (1/8 µA por bit):
-IDAC_LSB_NA = 125.0            # 1/8 µA por bit
+# construida tenía R11-R14 = 15 kΩ contra Vref. La topología comprobada el
+# 2026-09-08 usa 1,5 kΩ en la referencia exclusiva de PGAout (IDAC2) y 10 kΩ
+# en LP (IDAC3). Sólo IDAC2 se conmuta por firmware al rango 0-255 µA.
+IDAC_LSB_NA = 125.0            # compatibilidad: etapas 0, 1 y 3
+IDAC_LSB_NA_BY_STAGE = (125.0, 125.0, 1000.0, 125.0)
 IDAC_RSET_OHM_PLACA = 15_000.0  # medido: R11 = 14,76 kΩ sobre seis lecturas
-IDAC_RSET_OHM_BY_STAGE = (15_000.0, 15_000.0, 15_000.0, 3_900.0)
+IDAC_RSET_OHM_BY_STAGE = (15_000.0, 15_000.0, 1_500.0, 10_000.0)
 IDAC_RSET_OHM_FIRMWARE = 30_000.0
 #: µV por código de IDAC en la placa construida: 125 nA x 15 kΩ = 1875 µV.
 LSB_UV_PLACA = IDAC_LSB_NA * IDAC_RSET_OHM_PLACA / 1000.0
-LSB_UV_BY_STAGE = tuple(IDAC_LSB_NA * r / 1000.0
-                        for r in IDAC_RSET_OHM_BY_STAGE)
+LSB_UV_BY_STAGE = tuple(i * r / 1000.0 for i, r in
+                        zip(IDAC_LSB_NA_BY_STAGE, IDAC_RSET_OHM_BY_STAGE))
 #: El umbral del firmware (200 µV/código) está justificado con 3,75 mV/LSB.
 #: Escalado a esta placa da la mitad.
 D2_MIN_SLOPE_UV_FIRMWARE = 200.0
@@ -76,9 +77,13 @@ D2_MIN_SLOPE_UV_PLACA = D2_MIN_SLOPE_UV_FIRMWARE * (
 )
 
 #: Qué mide cada canal del AMux, en orden.
-TAP_NAMES = ("PGAgain", "BPo", "SUMo", "LPo", "AMuxCap")
+TAP_NAMES = ("PGAgain", "BPo", "OPA_SUMo", "SUMo", "LPo", "AMuxCap")
+#: Canales de señal. El último elemento de TAP_NAMES es el capacitor auxiliar.
+SIGNAL_TAP_CHANNELS = tuple(range(len(TAP_NAMES) - 1))
 #: Qué referencia mueve cada etapa de IDAC, en orden.
-STAGE_NAMES = ("Vref_PGA", "Vref_BP", "Vref_ADDER", "Vref_LP")
+STAGE_NAMES = ("Vref_PGA", "Vref_BP compartida", "Vref_PGAout", "Vref_LP")
+#: Tap propio de cada etapa. LP salta ch3 porque ese canal ahora es SUMo.
+STAGE_TAP_CHANNELS = (0, 1, 2, 4)
 
 
 def fmt_mv(uv: float, decimales: int = 3) -> str:
@@ -140,7 +145,8 @@ class Measurements:
 
     #: matriz[etapa][tap] en µV por código de IDAC, None donde no hubo dato
     d2: list[list[Optional[float]]] = field(
-        default_factory=lambda: [[None] * 4 for _ in range(4)]
+        default_factory=lambda: [[None] * len(SIGNAL_TAP_CHANNELS)
+                                 for _ in STAGE_NAMES]
     )
     #: reposo DC por tap, en mV (ítem D1)
     d1_mv: dict[int, float] = field(default_factory=dict)
@@ -150,7 +156,16 @@ class Measurements:
     d7: list[dict] = field(default_factory=list)
 
     def d2_diagonal(self) -> list[Optional[float]]:
-        return [self.d2[i][i] for i in range(4)]
+        # Si se abre un informe viejo de cuatro taps, la etapa LP estaba en
+        # ch3. Los informes nuevos usan ch4. No se reetiquetan las otras
+        # columnas: esta única caída conserva el veredicto histórico.
+        out: list[Optional[float]] = []
+        for stage, tap in enumerate(STAGE_TAP_CHANNELS):
+            slope = self.d2[stage][tap]
+            if stage == 3 and slope is None:
+                slope = self.d2[stage][3]
+            out.append(slope)
+        return out
 
     def d2_veredicto_placa(self) -> list[tuple[str, Optional[float], bool]]:
         """Diagonal contra el umbral corregido a esta placa.
@@ -265,12 +280,12 @@ class ChecklistParser:
         if code.startswith("D2.") and code[3:].isdigit():
             stage = int(code[3:])
             nums = re.findall(r"-?\d+(?:\.\d+)?", detail)
-            if 0 <= stage < 4 and len(nums) >= 4:
-                for tap in range(4):
+            if 0 <= stage < len(STAGE_NAMES) and len(nums) >= 4:
+                for tap in range(min(len(SIGNAL_TAP_CHANNELS), len(nums))):
                     self.meas.d2[stage][tap] = float(nums[tap])
             return
 
-        # `[D1] ... PASS  ch0=1010mV ch1=1015mV ch2=1030mV ch3=907mV`
+        # `[D1] ... PASS  ch0=1010mV ... ch3=950mV ch4=907mV`
         if code == "D1":
             for ch, mv in re.findall(r"ch(\d+)=(-?\d+)mV", detail):
                 self.meas.d1_mv[int(ch)] = float(mv)
@@ -450,11 +465,11 @@ BAD_REPORT = GOOD_REPORT.replace(
 TRUNCATED_REPORT = "\n".join(GOOD_REPORT.splitlines()[:8]) + "\n"
 
 # Corrida real del 2026-09-02: los detalles que alimentan los gráficos.
-REAL_DETAILS = """[D1] Reposo de los taps analogicos ........ PASS  ch0=1010mV ch1=1015mV ch2=1030mV ch3=907mV
-[D2.0]   pendientes uV/codigo ............. INFO  61.0 -66.8 0.9 43.4
-[D2.1]   pendientes uV/codigo ............. INFO  -0.5 190.7 -686.2 6546.5
-[D2.2]   pendientes uV/codigo ............. INFO  2.9 -5.7 767.2 -6718.2
-[D2.3]   pendientes uV/codigo ............. INFO  0.5 -0.9 0.0 1269.8
+REAL_DETAILS = """[D1] Reposo de los taps analogicos ........ PASS  ch0=1010mV ch1=1015mV ch2=1030mV ch3=950mV ch4=907mV
+[D2.0]   pendientes uV/codigo ............. INFO  61.0 -66.8 0.9 43.4 40.0
+[D2.1]   pendientes uV/codigo ............. INFO  -0.5 190.7 -686.2 6546.5 6000.0
+[D2.2]   pendientes uV/codigo ............. INFO  2.9 -5.7 767.2 -6718.2 -6000.0
+[D2.3]   pendientes uV/codigo ............. INFO  0.5 -0.9 0.0 0.0 1269.8
 [D6.0] Piso de ruido del tap .............. PASS  media 1010761 uV, RMS 38 uV, pp 228 uV, 50Hz 0 uV
 [D7] Golpe al geofono (pico y polaridad) .. PASS  pico 4246 counts (fondo pp 295), 1a excursion POSITIVA
 [D7] Golpe al geofono (pico y polaridad) .. FAIL  pico 93 counts no supera el fondo pp 259: sin definir
@@ -511,10 +526,10 @@ def self_test() -> int:
     p = ChecklistParser()
     p.feed_many(REAL_DETAILS)
     m = p.meas
-    check("D2: matriz 4x4 completa", all(v is not None for fila in m.d2 for v in fila))
+    check("D2: matriz 4x5 completa", all(v is not None for fila in m.d2 for v in fila))
     check("D2: diagonal correcta", m.d2_diagonal() == [61.0, 190.7, 767.2, 1269.8])
     check("D2: fila 1 con negativos", m.d2[1][2] == -686.2)
-    check("D1: cuatro taps", len(m.d1_mv) == 4 and m.d1_mv[3] == 907.0)
+    check("D1: cinco taps", len(m.d1_mv) == 5 and m.d1_mv[4] == 907.0)
     check("D6: ruido del tap 0", m.d6[0]["rms_uv"] == 38.0)
     check("D7: dos intentos", len(m.d7) == 2)
     check("D7: pico y polaridad", m.d7[0]["pico"] == 4246 and m.d7[0]["polaridad"] == "POSITIVA")

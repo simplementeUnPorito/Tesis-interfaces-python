@@ -72,14 +72,20 @@ marca —con razón— como corrida incompleta.
 ## Modo manual
 
 ```powershell
-& $py -m testbench taps                    # reposo DC de los cuatro taps
-& $py -m testbench dc 3 --settle 3         # una medida de un canal
+& $py -m testbench taps                    # reposo DC de los cinco taps de señal
+& $py -m testbench dc 2 --settle 3         # OPA_SUMo, antes de PGAout
+& $py -m testbench dc 3 --settle 3         # SUMo, después de PGAout
+& $py -m testbench dc 4 --settle 3         # LPo
 & $py -m testbench ac 0 --n 2              # media, RMS, pp y 50 Hz
 & $py -m testbench idac 3 128 --medir      # mover un IDAC y ver qué pasó
 & $py -m testbench gain pgaout 2           # ganancias
 & $py -m testbench mon 3 --periodo 200     # osciloscopio lento, Ctrl+C corta
 & $py -m testbench sweep 3 --paso 16 --figs figs   # barrido con ajuste
 ```
+
+Mapa vigente de `AMux_ADC`: `0=PGAgain`, `1=BPo`, `2=OPA_SUMo` (sumador
+pre-PGAout), `3=SUMo` (post-PGAout), `4=LPo`, `5=AMuxCapacitor`. Los comandos
+`dc`, `ac` y `mon` aceptan `0..5`; `taps` omite el capacitor y lee `0..4`.
 
 `sweep` es la matriz D2 pero con la curva entera en vez de dos puntos: muestra
 si la etapa es lineal, dónde tiene zona muerta y dónde se comprime. En la

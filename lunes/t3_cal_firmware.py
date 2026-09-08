@@ -27,7 +27,8 @@ import time
 
 from .comun import (abrir_banco, cerar_idacs, esperar_quieto, describir_taps,
                     leer_taps, guardar, en_riel, a_voltios, lectura_valida,
-                    VREF_V, GANANCIA, CAMPO_PGA, CAMPO_PGAOUT, TAU_S)
+                    VREF_V, GANANCIA, CAMPO_PGA, CAMPO_PGAOUT, TAU_S,
+                    TAP_LP, TAP_SIGNAL_CHANNELS)
 
 #: Cuentas -> mV de banco, con la escala del propio ADC (18 bits sobre +-2,5 V).
 LSB_UV = 2_500_000 / 131072
@@ -148,8 +149,8 @@ def correr(pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT, log=print):
         c.close()
 
     # ---- el veredicto, en el orden en que importa -------------------------
-    lp = despues.get(3)
-    railadas = [k for k in range(4) if en_riel(despues.get(k))]
+    lp = despues.get(TAP_LP)
+    railadas = [k for k in TAP_SIGNAL_CHANNELS if en_riel(despues.get(k))]
     error_lp = None
     if lp is not None and lectura_valida(lp):
         error_lp = (a_voltios(lp) - VREF_V) * 1000.0

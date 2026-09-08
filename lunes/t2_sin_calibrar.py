@@ -32,7 +32,7 @@ import sys
 
 from .comun import (abrir_banco, cerar_idacs, esperar_quieto, guardar,
                     en_riel, a_voltios, lectura_valida, VREF_V, GANANCIA,
-                    CAMPO_PGA, CAMPO_PGAOUT)
+                    CAMPO_PGA, CAMPO_PGAOUT, TAP_SIGNAL_CHANNELS)
 
 #: Alternado a proposito. Los tres (8,0) son el control de reproducibilidad.
 COMBOS = [
@@ -66,17 +66,17 @@ def correr(combos=None, log=print):
                 break
 
             v, t_s, quieto = esperar_quieto(lab, log=lambda t: log("  " + t))
-            railados = [k for k in range(4) if en_riel(v.get(k))]
+            railados = [k for k in TAP_SIGNAL_CHANNELS if en_riel(v.get(k))]
             # El desvio solo se informa cuando TODOS los taps estan en ventana;
             # si alguno no lo esta, la magnitud no existe y el veredicto es
             # cualitativo.
             peor = None
             if not railados:
-                peor = max(abs(a_voltios(v[k]) - VREF_V) * 1000 for k in range(4)
+                peor = max(abs(a_voltios(v[k]) - VREF_V) * 1000 for k in TAP_SIGNAL_CHANNELS
                            if v.get(k) is not None)
             log("      banco  " + " ".join(
                 ("%9.2f" % v[k]) if v.get(k) is not None else "%9s" % "-"
-                for k in range(4)))
+                for k in TAP_SIGNAL_CHANNELS))
             log("      -> %s%s%s" % (
                 ("EN RIEL: taps %s" % railados) if railados else "todas en rango",
                 ("; peor tap a %.0f mV de Vref" % peor) if peor is not None else "",
@@ -84,7 +84,7 @@ def correr(combos=None, log=print):
 
             filas.append({"orden": i, "pga_code": pga, "pgaout_code": out,
                           "pga_x": GANANCIA[pga], "pgaout_x": GANANCIA[out],
-                          "taps_mv": {str(k): v.get(k) for k in range(4)},
+                          "taps_mv": {str(k): v.get(k) for k in TAP_SIGNAL_CHANNELS},
                           "en_riel": railados, "peor_mv_reales": peor,
                           "segundos": round(t_s, 1), "asentada": quieto})
     finally:
@@ -101,7 +101,7 @@ def correr(combos=None, log=print):
             log("   orden %2d: %s   %s" % (
                 f["orden"],
                 [None if f["taps_mv"][str(k)] is None else round(f["taps_mv"][str(k)], 1)
-                 for k in range(4)],
+                 for k in TAP_SIGNAL_CHANNELS],
                 ("EN RIEL %s" % f["en_riel"]) if f["en_riel"] else "en rango"))
         reproducible = all(bool(f["en_riel"]) == bool(ctrl[0]["en_riel"]) for f in ctrl)
         log("   -> %s" % ("coinciden en el veredicto: la medida se puede creer"

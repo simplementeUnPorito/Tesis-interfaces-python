@@ -29,7 +29,7 @@ Uso:
                                   [--seed ETAPA CODIGO]
 
     etapa: 0 PGA, 1 BP, 2 ADDER, 3 LP   (por defecto 2, el ADDER)
-    tap:   canal que se mira            (por defecto 3, el del LP, que es el
+    tap:   canal que se mira            (por defecto 4, el del LP, que es el
                                          que se captura y el unico cuyo error
                                          importa de verdad)
 
@@ -47,7 +47,7 @@ import time
 from .comun import (abrir_banco, poner_idac, cerar_idacs, leer_taps,
                     describir_taps, esperar_quieto, guardar,
                     lectura_valida, en_riel, delta_a_voltios, a_voltios,
-                    VREF_V, GANANCIA, CAMPO_PGA, CAMPO_PGAOUT)
+                    VREF_V, GANANCIA, CAMPO_PGA, CAMPO_PGAOUT, TAP_LP)
 
 NOMBRES = {0: "PGA", 1: "BP", 2: "ADDER", 3: "LP"}
 
@@ -60,7 +60,7 @@ def codigos_del_barrido(paso_grueso=32):
     return [0] + negativos + [0] + positivos
 
 
-def correr(etapa=2, tap=3, pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT,
+def correr(etapa=2, tap=TAP_LP, pga=CAMPO_PGA, pgaout=CAMPO_PGAOUT,
            paso_grueso=32, semillas=None, log=print):
     semillas = dict(semillas or {})
     nombre = NOMBRES.get(etapa, str(etapa))
@@ -258,6 +258,6 @@ if __name__ == "__main__":
         if i + 2 >= len(args):
             raise SystemExit("uso de --seed: --seed ETAPA CODIGO")
         semillas[int(args[i + 1])] = int(args[i + 2])
-    correr(etapa=etapa, tap=opc("--tap", 3),
+    correr(etapa=etapa, tap=opc("--tap", TAP_LP),
            pga=opc("--pga", CAMPO_PGA), pgaout=opc("--pgaout", CAMPO_PGAOUT),
            semillas=semillas)

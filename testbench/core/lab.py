@@ -16,8 +16,9 @@ Dos cosas que conviene tener presentes al usar esto:
   diferencia con C4/C5/D7, que sí capturan y sí lo necesitan.
 * **Lo que se informa en µV es desviación respecto de ``Vref``**, no tensión
   absoluta: la cadena entra al ADC por un amplificador referido a ``Vdda/2``.
-  Los códigos valen 1875 µV en las referencias PGA/BP/ADDER y 487,5 µV en LP,
-  porque R14 cambió a 3,9 kΩ (ver ``checklist.LSB_UV_BY_STAGE``).
+  La escala nominal es por etapa: PGA/BP 1875 µV/código, PGAout 1500
+  µV/código (rango 255 µA) y LP 1250 µV/código. Ver
+  ``checklist.LSB_UV_BY_STAGE``.
 """
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from .checklist import LSB_UV_BY_STAGE, STAGE_NAMES, TAP_NAMES
+from .checklist import (LSB_UV_BY_STAGE, SIGNAL_TAP_CHANNELS, STAGE_NAMES,
+                        TAP_NAMES)
 from .session import Session
 
 # Selectores de asentamiento del comando `dc`, copiados de ST_SETTLE_MS[] del
@@ -51,6 +53,7 @@ RE_SWEEP = re.compile(r"^#SWEEP (\d+) (-?\d+) (\d+) (-?\d+) (-?\d+) (\d)")
 RE_SWEEPEND = re.compile(r"^#SWEEPEND (\d+) (-?\d+)")
 RE_GAIN = re.compile(r"^#GAIN (pga|pgaout) (\d+)")
 RE_ADCCFG = re.compile(r"^#ADC (\d+) (-?\d+) (-?\d+) (-?\d+) (\d)")
+RE_SAVECAL = re.compile(r"^#SAVECAL (\d) (\d)")
 
 
 @dataclass
@@ -171,8 +174,8 @@ class Lab:
         return False
 
     def measure_dc(self, ch: int, settle_sel: int = SETTLE_DEFAULT) -> Optional[DcPoint]:
-        if not 0 <= ch <= 4 or not 0 <= settle_sel <= 7:
-            raise ValueError("canal 0-4, asentamiento 0-7")
+        if not 0 <= ch < len(TAP_NAMES) or not 0 <= settle_sel <= 7:
+            raise ValueError(f"canal 0-{len(TAP_NAMES) - 1}, asentamiento 0-7")
         plazo = SETTLE_MS[settle_sel] / 1000.0 + 8.0
 
         def es_mia(linea: str) -> bool:
@@ -189,8 +192,8 @@ class Lab:
         return None
 
     def measure_ac(self, ch: int, n_sel: int = 0) -> Optional[AcPoint]:
-        if not 0 <= ch <= 4 or not 0 <= n_sel <= 7:
-            raise ValueError("canal 0-4, n 0-7")
+        if not 0 <= ch < len(TAP_NAMES) or not 0 <= n_sel <= 7:
+            raise ValueError(f"canal 0-{len(TAP_NAMES) - 1}, n 0-7")
         # 8192 muestras a 2604 Hz son más de tres segundos; el plazo lo cubre.
         plazo = AC_SAMPLES[n_sel] / 2604.0 + 15.0
 
@@ -262,10 +265,22 @@ class Lab:
                 return True
         return False
 
+    def commit_calibration(self, timeout: float = 8.0) -> bool:
+        """Acepta los IDAC ya verificados y los guarda con CRC en el PSoC."""
+        def es_mia(linea: str) -> bool:
+            return bool(RE_SAVECAL.match(linea))
+
+        for linea in self.s.raw("savecal", idle=2.0, timeout=timeout,
+                                until=es_mia):
+            match = RE_SAVECAL.match(linea)
+            if match:
+                return match.group(1) == "1" and match.group(2) == "1"
+        return False
+
     def read_all_taps(self, settle_sel: int = SETTLE_DEFAULT) -> dict[int, DcPoint]:
-        """Los cuatro taps de una, para ver el estado completo de la cadena."""
+        """Los cinco taps de señal, excluyendo el capacitor auxiliar."""
         out: dict[int, DcPoint] = {}
-        for ch in range(4):
+        for ch in SIGNAL_TAP_CHANNELS:
             p = self.measure_dc(ch, settle_sel)
             if p is not None:
                 out[ch] = p
@@ -290,8 +305,8 @@ class Lab:
         ``stop`` se consulta entre muestras; devolver True corta y le manda una
         tecla al firmware, que también corta su lazo.
         """
-        if not 0 <= ch <= 4:
-            raise ValueError("canal 0-4")
+        if not 0 <= ch < len(TAP_NAMES):
+            raise ValueError(f"canal 0-{len(TAP_NAMES) - 1}")
         muestras: list[MonSample] = []
         self.s.console.send(f"mon {ch} {period_ms} {n}")
 

@@ -52,6 +52,12 @@ GANANCIA = {0: 1, 1: 2, 2: 4, 3: 8, 4: 16, 5: 24, 6: 32, 7: 48, 8: 50}
 #: La configuracion que Elias valido en campo.
 CAMPO_PGA, CAMPO_PGAOUT = 8, 0
 
+#: Mapa vigente de AMux_ADC (2026-09-07). El capacitor es auxiliar y se
+#: excluye de las lecturas de estado de la cadena.
+TAP_NAMES = ("PGA", "BP", "OPA_SUM", "SUM", "LP", "AMuxCap")
+TAP_SIGNAL_CHANNELS = tuple(range(len(TAP_NAMES) - 1))
+TAP_LP = 4
+
 #: A menos de esto de un riel la etapa no transmite, en mV de banco.
 MARGEN_RIEL_MV = 25.0
 
@@ -104,7 +110,7 @@ def cerar_idacs(lab, etapas=(0, 1, 2, 3)):
     return [k for k in etapas if not poner_idac(lab, k, 0)]
 
 
-def leer_taps(lab, canales=(0, 1, 2, 3)):
+def leer_taps(lab, canales=TAP_SIGNAL_CHANNELS):
     """Los taps en mV de banco, sin esperar. None si el firmware dijo que no."""
     v = {}
     for ch in canales:
@@ -124,22 +130,21 @@ def en_riel(mv):
             mv >= BANCO_MAX_VALIDO_MV - MARGEN_RIEL_MV)
 
 
-def describir_taps(v, canales=(0, 1, 2, 3)):
+def describir_taps(v, canales=TAP_SIGNAL_CHANNELS):
     """Una linea por tap, con los volts SOLO donde la lectura significa algo."""
-    nombres = {0: "PGA", 1: "BP", 2: "ADDER", 3: "LP"}
     filas = []
     for ch in canales:
         mv = v.get(ch)
         if mv is None:
-            filas.append("   ch%d %-5s sin lectura" % (ch, nombres.get(ch, "")))
+            filas.append("   ch%d %-8s sin lectura" % (ch, TAP_NAMES[ch]))
         elif not lectura_valida(mv):
-            filas.append("   ch%d %-5s %9.2f de banco  ->  FUERA DE LA VENTANA "
+            filas.append("   ch%d %-8s %9.2f de banco  ->  FUERA DE LA VENTANA "
                          "OBSERVABLE (no es una medida del tap)"
-                         % (ch, nombres.get(ch, ""), mv))
+                         % (ch, TAP_NAMES[ch], mv))
         else:
             r = a_voltios(mv)
-            filas.append("   ch%d %-5s %9.2f de banco  ->  %.3f V  (%+.0f mV de Vref)"
-                         % (ch, nombres.get(ch, ""), mv, r, (r - VREF_V) * 1000))
+            filas.append("   ch%d %-8s %9.2f de banco  ->  %.3f V  (%+.0f mV de Vref)"
+                         % (ch, TAP_NAMES[ch], mv, r, (r - VREF_V) * 1000))
     return "\n".join(filas)
 
 

@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 from .core import console as con
-from .core.checklist import ChecklistParser, evaluate, fmt_mv
+from .core.checklist import ChecklistParser, TAP_NAMES, evaluate, fmt_mv
 from .core.session import GROUPS, INTERACTIVE, Session
 
 # --------------------------------------------------------------------------
@@ -329,7 +329,7 @@ def _print_dc(pt) -> None:
 
 
 def cmd_taps(args) -> int:
-    """Los cuatro taps de una: el estado completo de la cadena en un vistazo."""
+    """Los cinco taps de señal: el estado de la cadena en un vistazo."""
     c, sess, lab = _lab(args)
     try:
         print()
@@ -337,7 +337,7 @@ def cmd_taps(args) -> int:
         puntos = lab.read_all_taps(settle_sel=args.settle)
         for ch in sorted(puntos):
             _print_dc(puntos[ch])
-        return 0 if len(puntos) == 4 else 1
+        return 0 if len(puntos) == len(TAP_NAMES) - 1 else 1
     finally:
         c.close()
 
@@ -858,13 +858,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("dc", help="una medida DC de un canal del AMux")
     comunes(sp)
-    sp.add_argument("canal", type=int, choices=range(5))
+    sp.add_argument("canal", type=int, choices=range(len(TAP_NAMES)))
     sp.add_argument("--settle", type=int, default=3, choices=range(8))
     sp.set_defaults(func=cmd_dc)
 
     sp = sub.add_parser("ac", help="media, RMS, pp y 50 Hz de un canal")
     comunes(sp)
-    sp.add_argument("canal", type=int, choices=range(5))
+    sp.add_argument("canal", type=int, choices=range(len(TAP_NAMES)))
     sp.add_argument("--n", type=int, default=0, choices=range(8),
                     help="selector de cantidad de muestras 0-7")
     sp.set_defaults(func=cmd_ac)
@@ -885,7 +885,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("mon", help="osciloscopio lento sobre un tap")
     comunes(sp)
-    sp.add_argument("canal", type=int, choices=range(5))
+    sp.add_argument("canal", type=int, choices=range(len(TAP_NAMES)))
     sp.add_argument("--periodo", type=int, default=200, help="ms entre muestras")
     sp.add_argument("--n", type=int, default=200, help="cantidad de muestras")
     sp.set_defaults(func=cmd_mon)

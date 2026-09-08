@@ -247,6 +247,12 @@ class MainWindow(QMainWindow):
         self.resize(1220, 820)
 
         self.worker: Optional[SerialWorker] = None
+        # ``worker is not None`` no significa que ya haya una sesion usable:
+        # abrir el puerto resetea el ESP y puede tardar hasta 25 s. Mantener
+        # esos estados separados evita mostrar "Desconectar" mientras los
+        # botones todavía no tienen una Session a la cual mandar comandos.
+        self._connecting = False
+        self._connected = False
         #: Parser que alimentan el replay y las corridas sin placa.
         self.offline_parser = ChecklistParser()
         self._mon_samples: list[MonSample] = []
@@ -287,13 +293,17 @@ class MainWindow(QMainWindow):
         # en el banco, y estaba enterrado adentro de Experimentos detrás de
         # elegir cuántas muestras. Acá se elige el canal y se aprieta Graficar.
         self.tabs.addTab(self._build_scope_tab(), "Osciloscopio")
-        self.tabs.addTab(self._build_actions_tab(), "Acciones")
+        self.actions_tab = self._build_actions_tab()
+        self.tabs.addTab(self.actions_tab, "Acciones")
         self.tabs.addTab(self._build_checklist_tab(), "Checklist")
-        self.tabs.addTab(self._build_console_tab(), "Consola")
-        self.tabs.addTab(self._build_lab_tab(), "Experimentos")
+        self.console_tab = self._build_console_tab()
+        self.tabs.addTab(self.console_tab, "Consola")
+        self.lab_tab = self._build_lab_tab()
+        self.tabs.addTab(self.lab_tab, "Experimentos")
         self.tabs.addTab(self._build_plots_tab(), "Gráficos")
 
         self.statusBar().showMessage("Sin conectar")
+        self._set_connection_controls(False)
         self._set_busy(False)
 
     # -- barra superior ----------------------------------------------------
@@ -378,7 +388,7 @@ class MainWindow(QMainWindow):
         barra = QHBoxLayout()
         barra.addWidget(QLabel("Canal:"))
         self.scope_canal = QComboBox()
-        for ch in range(5):
+        for ch in range(len(TAP_NAMES)):
             self.scope_canal.addItem(f"ch{ch} · {TAP_NAMES[ch]}", ch)
         self.scope_canal.setMinimumWidth(170)
         # En marcha, cambiar de canal tiene que cambiar de canal. Antes el canal
@@ -435,7 +445,8 @@ class MainWindow(QMainWindow):
             barra.addWidget(QLabel(f"{etiqueta}:"))
             cb = QComboBox()
             for i, g in enumerate(GAIN_CODES):
-                cb.addItem(f"{g}x", i)
+                suffix = " · EXP" if cual == "pgaout" and g > 24 else ""
+                cb.addItem(f"{g}x{suffix}", i)
             cb.activated.connect(
                 lambda idx, C=cual: self._scope_set_gain(C, idx))
             setattr(self, f"cmb_scope_{cual}", cb)
@@ -453,7 +464,12 @@ class MainWindow(QMainWindow):
         for etapa in range(4):
             mandos.addWidget(QLabel(f"{etapa}·{STAGE_NAMES[etapa]}"))
             sp = QSpinBox()
-            sp.setRange(-255, 255)
+            if etapa == 2:
+                sp.setRange(-48, 48)
+            elif etapa == 3:
+                sp.setRange(-160, 160)
+            else:
+                sp.setRange(-255, 255)
             sp.setValue(0)
             sp.setMinimumWidth(70)
             sp.setToolTip(
@@ -903,9 +919,10 @@ class MainWindow(QMainWindow):
 
         nota = QLabel(
             "Estos comandos no necesitan el SYNC armado: miden, no capturan.\n"
-            "Cada código vale 1875 µV en PGA/BP/ADDER y 487,5 µV en LP "
-            "(R14 = 3,9 kΩ). El código 0 es Vref: los negativos bajan la "
-            "referencia y los positivos la suben."
+            "Modelo actual: PGA/BP 1,875 mV/código; PGAout 1,500 mV/código "
+            "(1,5 kΩ, rango 255 µA); LP 1,250 mV/código (10 kΩ). Por "
+            "seguridad manual PGAout queda limitado a ±48 y LP a ±160. "
+            "El código 0 es Vref."
         )
         nota.setWordWrap(True)
         nota.setStyleSheet(f"color: {figures.MUTED};")
@@ -917,7 +934,12 @@ class MainWindow(QMainWindow):
         for etapa in range(4):
             gl.addWidget(QLabel(f"{etapa} · {STAGE_NAMES[etapa]}"), etapa, 0)
             sp = QSpinBox()
-            sp.setRange(-255, 255)
+            if etapa == 2:
+                sp.setRange(-48, 48)
+            elif etapa == 3:
+                sp.setRange(-160, 160)
+            else:
+                sp.setRange(-255, 255)
             sp.setValue(0)          # 0 = Vref, el centro del rango con signo
             sp.setToolTip(f"{LSB_UV_BY_STAGE[etapa]:.1f} µV por código en esta referencia")
             self.idac_spins[etapa] = sp
@@ -937,7 +959,8 @@ class MainWindow(QMainWindow):
         for cual in ("pga", "pgaout"):
             cb = QComboBox()
             for i, g in enumerate(GAIN_CODES):
-                cb.addItem(f"{i} — {g}x", i)
+                suffix = " · EXPERIMENTAL" if cual == "pgaout" and g > 24 else ""
+                cb.addItem(f"{i} — {g}x{suffix}", i)
             cb.activated.connect(
                 lambda idx, C=cual: self._job(
                     f"{C} {idx}",
@@ -953,7 +976,7 @@ class MainWindow(QMainWindow):
         gc = QGroupBox("Canal del AMux")
         gcl = QHBoxLayout(gc)
         self.cmb_canal = QComboBox()
-        for ch in range(5):
+        for ch in range(len(TAP_NAMES)):
             self.cmb_canal.addItem(f"ch{ch} · {TAP_NAMES[ch]}", ch)
         self.cmb_canal.setCurrentIndex(3)
         gcl.addWidget(self.cmb_canal, 1)
@@ -983,7 +1006,7 @@ class MainWindow(QMainWindow):
             lambda s: self.worker.lab.measure_ac(self.cmb_canal.currentData(), 0),
             self._on_ac))
         gmv.addWidget(b)
-        b = QPushButton("Leer los cuatro taps")
+        b = QPushButton("Leer los cinco taps")
         b.clicked.connect(lambda: self._job(
             "taps",
             lambda s: self.worker.lab.read_all_taps(self.cmb_settle.currentData()),
@@ -1033,18 +1056,20 @@ class MainWindow(QMainWindow):
         self.spin_paso = QSpinBox(); self.spin_paso.setRange(1, 128); self.spin_paso.setValue(16)
         for s in (self.spin_lo, self.spin_hi, self.spin_paso):
             fila.addWidget(s)
+        self.cmb_sweep_stage.currentIndexChanged.connect(self._sync_sweep_limits)
         gbl.addLayout(fila, 1, 1)
         gbl.addWidget(QLabel("medir"), 2, 0)
         self.cmb_sweep_ch = QComboBox()
-        self.cmb_sweep_ch.addItem("los cuatro taps", -1)
-        for ch in range(4):
+        self.cmb_sweep_ch.addItem("los cinco taps", -1)
+        for ch in range(len(TAP_NAMES) - 1):
             self.cmb_sweep_ch.addItem(f"sólo ch{ch} · {TAP_NAMES[ch]}", ch)
         gbl.addWidget(self.cmb_sweep_ch, 2, 1)
         b = QPushButton("Barrer")
         b.setToolTip("Cada punto tarda 500 ms por canal: un barrido de 16 puntos "
-                     "por los cuatro taps son unos 35 segundos.")
+                     "por los cinco taps son unos 45 segundos.")
         b.clicked.connect(self._run_sweep)
         gbl.addWidget(b, 3, 0, 1, 2)
+        self._sync_sweep_limits()
         iv.addWidget(gb)
         iv.addStretch(1)
         split.addWidget(izq)
@@ -1096,44 +1121,62 @@ class MainWindow(QMainWindow):
     # ======================================================================
     def _toggle_connection(self) -> None:
         if self.worker is not None:
-            self.worker.stop()
-            self.worker.wait(4000)
-            self.worker = None
-            self.btn_connect.setText("Conectar")
-            self._set_link(None)
+            worker = self.worker
+            worker.stop()
+            self.btn_connect.setEnabled(False)
+            self.btn_connect.setText("Desconectando…")
+            self.statusBar().showMessage("Cerrando el puerto…")
+            # Una medida puede estar terminando. No destruimos el QThread si
+            # todavía corre; ``_on_worker_finished`` limpia la referencia.
+            if worker.wait(4000):
+                self._finish_disconnection(worker)
             return
 
         puerto = self.port_combo.currentData()
         if not puerto:
             QMessageBox.warning(self, "Puerto", "No hay ningún puerto elegido.")
             return
-        self.worker = SerialWorker(puerto)
-        self.worker.entry_received.connect(self._on_entry)
-        self.worker.item_received.connect(self._on_item)
-        self.worker.phase_changed.connect(self.lbl_phase.setText)
-        self.worker.connection_changed.connect(self._on_connection)
-        self.worker.job_started.connect(lambda n: self._set_busy(True, n))
-        self.worker.job_finished.connect(lambda n, r: self._set_busy(False))
-        self.worker.job_failed.connect(self._on_job_failed)
-        self.worker.state_changed.connect(self._on_state)
-        self.worker.mon_sample.connect(self._on_mon_sample)
-        self.worker.mon_mark.connect(self._on_scope_mark)
-        self.worker.mon_reset.connect(self._on_scope_reset)
-        self.worker.start()
-        self.btn_connect.setText("Desconectar")
+        worker = SerialWorker(puerto)
+        self.worker = worker
+        worker.entry_received.connect(self._on_entry)
+        worker.item_received.connect(self._on_item)
+        worker.phase_changed.connect(self.lbl_phase.setText)
+        worker.connection_changed.connect(self._on_connection)
+        worker.job_started.connect(lambda n: self._set_busy(True, n))
+        worker.job_finished.connect(lambda n, r: self._set_busy(False))
+        worker.job_failed.connect(self._on_job_failed)
+        worker.state_changed.connect(self._on_state)
+        worker.mon_sample.connect(self._on_mon_sample)
+        worker.mon_mark.connect(self._on_scope_mark)
+        worker.mon_reset.connect(self._on_scope_reset)
+        worker.finished.connect(lambda W=worker: self._on_worker_finished(W))
+        self._connecting = True
+        self._connected = False
+        self._set_connection_controls(False)
+        worker.start()
+        # No decir "Desconectar" antes de tener Console + Session. Además se
+        # deshabilita durante el arranque: ``Console.open`` está esperando el
+        # banner y no se puede cancelar destruyendo el QThread que aún corre.
+        self.btn_connect.setText("Conectando…")
+        self.btn_connect.setEnabled(False)
         self.statusBar().showMessage(f"Abriendo {puerto}… (abrir resetea el ESP)")
 
     def _on_connection(self, ok: bool, mensaje: str) -> None:
+        origen = self.sender()
+        if isinstance(origen, SerialWorker) and origen is not self.worker:
+            return                         # señal tardía de una conexión vieja
         self.bitacora.nota("enlace", conectado=ok, mensaje=mensaje)
         self.statusBar().showMessage(mensaje)
-        if not ok and self.worker is not None:
-            self.btn_connect.setText("Conectar")
+        self._connecting = False
+        self._connected = ok
+        self.btn_connect.setEnabled(True)
+        self.btn_connect.setText("Desconectar" if ok else "Conectar")
         # Abrir el puerto resetea el ESP y hay que esperarle el banner: hasta
         # 25 s en los que ya se apretó Conectar pero todavía no hay con qué
         # hablar. Los controles del osciloscopio se habilitan recién ACÁ, que es
         # cuando el enlace está de verdad. Antes quedaban vivos todo ese rato y
         # contestaban "primero hay que conectar", que era falso y confundía.
-        self._set_scope_enabled(ok)
+        self._set_connection_controls(ok)
         self._set_link(None)
         if ok and self._startup_field and not self._startup_field_done:
             self._startup_field_done = True
@@ -1155,6 +1198,34 @@ class MainWindow(QMainWindow):
                 return True
 
             self._job("estado inicial x50/x1, IDAC=0", estado_campo, None)
+
+    def _on_worker_finished(self, worker: SerialWorker) -> None:
+        """Reap del hilo sin dejar una conexión muerta ocupando el botón."""
+        if worker is not self.worker:
+            return
+        if not self._connected:
+            self._finish_disconnection(worker)
+
+    def _finish_disconnection(self, worker: SerialWorker) -> None:
+        if worker is not self.worker:
+            return
+        self.worker = None
+        self._connecting = False
+        self._connected = False
+        self._set_busy(False)
+        self._set_connection_controls(False)
+        self.btn_connect.setEnabled(True)
+        self.btn_connect.setText("Conectar")
+        self.statusBar().showMessage("Desconectado")
+        self._set_link(None)
+
+    def _set_connection_controls(self, listo: bool) -> None:
+        """Habilita comandos sólo cuando existe una Session utilizable."""
+        self._set_scope_enabled(listo)
+        self.actions_tab.setEnabled(listo)
+        self.console_tab.setEnabled(listo)
+        self.lab_tab.setEnabled(listo)
+        self.btn_reset.setEnabled(listo)
 
     def _set_scope_enabled(self, listo: bool) -> None:
         for wdg in ([self.btn_scope, self.cmb_scope_pga, self.cmb_scope_pgaout]
@@ -1199,8 +1270,14 @@ class MainWindow(QMainWindow):
     def _job(self, nombre: str, fn: Callable[[Session], Any],
              on_done: Optional[Callable[[Any], None]]) -> None:
         if self.worker is None or self.worker.session is None:
-            QMessageBox.information(self, "Sin conexión",
-                                    "Primero hay que conectarse a la placa.")
+            if self._connecting:
+                QMessageBox.information(
+                    self, "Conectando",
+                    "Todavía se está abriendo la placa. Esperá a que el botón "
+                    "cambie de “Conectando…” a “Desconectar”.")
+            else:
+                QMessageBox.information(self, "Sin conexión",
+                                        "Primero hay que conectarse a la placa.")
             return
         if self._busy:
             QMessageBox.information(
@@ -1309,6 +1386,12 @@ class MainWindow(QMainWindow):
         destino = self.scope_plot if self._mon_target == "scope" else self.lab_plot
         destino.show_figure(fig)
 
+    def _sync_sweep_limits(self) -> None:
+        etapa = self.cmb_sweep_stage.currentData()
+        limit = 48 if etapa == 2 else (160 if etapa == 3 else 255)
+        self.spin_lo.setRange(-limit, limit)
+        self.spin_hi.setRange(-limit, limit)
+
     def _run_sweep(self) -> None:
         etapa = self.cmb_sweep_stage.currentData()
         lo, hi, paso = self.spin_lo.value(), self.spin_hi.value(), self.spin_paso.value()
@@ -1321,7 +1404,7 @@ class MainWindow(QMainWindow):
             return self.worker.lab.sweep(etapa, lo, hi, paso, ch)
 
         puntos = len(range(lo, hi + 1, paso))
-        canales = 4 if ch < 0 else 1
+        canales = 5 if ch < 0 else 1
         self._lab_print(f"barrido de {STAGE_NAMES[etapa]}: {puntos} puntos x "
                         f"{canales} canal(es), ~{puntos * canales * 0.6:.0f} s")
         self._job("barrido", fn, self._on_sweep)
@@ -1658,6 +1741,8 @@ def _smoke() -> int:
     # Las figuras del modo manual.
     from .core.lab import MonSample, Sweep
 
+    # Simular una conexión lista para probar los mandos sin abrir un COM real.
+    win._set_connection_controls(True)
     muestras = [MonSample(i, i * 137, 3, 941800 + (i % 5) * 60, 1200, True)
                 for i in range(40)]
     win.lab_plot.show_figure(figures.fig_monitor(muestras, ch=3))
@@ -1731,8 +1816,15 @@ def _smoke() -> int:
           any("sin conversión" in t.get_text() for t in f.texts))
 
     # Los mandos del osciloscopio, y que se encolen en vez de pisar la corrida.
+    win._set_connection_controls(False)
     check("mandos deshabilitados sin conexión",
           not win.btn_scope_idac[0].isEnabled())
+    check("experimentos deshabilitados sin conexión",
+          not win.lab_tab.isEnabled())
+    check("acciones y consola deshabilitadas sin conexión",
+          not win.actions_tab.isEnabled() and not win.console_tab.isEnabled())
+    check("reset ESP deshabilitado sin conexión",
+          not win.btn_reset.isEnabled())
     check("las cuatro referencias a la vista",
           len(win.spin_scope_idac) == 4 and len(win.btn_scope_idac) == 4)
     win._scope_running = True
@@ -1741,15 +1833,15 @@ def _smoke() -> int:
     check("el cambio se encola, no pisa la corrida",
           win._scope_actions.qsize() == 1)
     etiqueta, accion = win._scope_actions.get_nowait()
-    check("la etiqueta dice etapa y codigo", etiqueta == "Vref_ADDER=-40")
+    check("la etiqueta dice etapa y codigo", etiqueta == "Vref_PGAout=-40")
     win._mon_marcas = []
     win._on_scope_mark((12.5, etiqueta))
     check("la marca queda para la figura", win._mon_marcas == [(12.5, etiqueta)])
     f = figures.fig_monitor(
         [MonSample(i, i * 1000, 0, 1001014 + i, 286, True) for i in range(30)],
-        ch=0, marcas=[(12.5, "Vref_ADDER=-40")])
+        ch=0, marcas=[(12.5, "Vref_PGAout=-40")])
     check("la marca se dibuja en la traza",
-          any("Vref_ADDER" in t.get_text() for t in f.axes[0].texts))
+          any("Vref_PGAout" in t.get_text() for t in f.axes[0].texts))
     # Cambiar de canal EN MARCHA. Antes el canal quedaba capturado al arrancar,
     # se elegía otro y no pasaba nada: parecía que el mux se trababa.
     win._scope_ch = 0

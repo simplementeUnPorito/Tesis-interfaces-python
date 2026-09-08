@@ -34,6 +34,7 @@ from matplotlib.figure import Figure
 from .checklist import (
     D2_MIN_SLOPE_UV_FIRMWARE,
     D2_MIN_SLOPE_UV_PLACA,
+    SIGNAL_TAP_CHANNELS,
     STAGE_NAMES,
     TAP_NAMES,
     Measurements,
@@ -127,20 +128,22 @@ def fig_d2_matrix(meas: Measurements, titulo: str = "") -> Figure:
     norm = SymLogNorm(linthresh=10.0, vmin=-tope, vmax=tope, base=10)
     im = ax.imshow(m, cmap=DIVERGING, norm=norm)
 
-    ax.set_xticks(range(4), [f"ch{i}\n{TAP_NAMES[i]}" for i in range(4)])
-    ax.set_yticks(range(4), [f"etapa {i}\n{STAGE_NAMES[i]}" for i in range(4)])
+    n_taps = len(SIGNAL_TAP_CHANNELS)
+    n_stages = len(STAGE_NAMES)
+    ax.set_xticks(range(n_taps), [f"ch{i}\n{TAP_NAMES[i]}" for i in SIGNAL_TAP_CHANNELS])
+    ax.set_yticks(range(n_stages), [f"etapa {i}\n{STAGE_NAMES[i]}" for i in range(n_stages)])
     ax.tick_params(colors=INK_2, labelsize=9, length=0)
     for lado in ("top", "right", "left", "bottom"):
         ax.spines[lado].set_visible(False)
 
     # Separación de 2 px entre celdas: el hueco es del fondo, no una línea.
-    ax.set_xticks(np.arange(-0.5, 4, 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, 4, 1), minor=True)
+    ax.set_xticks(np.arange(-0.5, n_taps, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, n_stages, 1), minor=True)
     ax.grid(which="minor", color=SURFACE, linewidth=2.5)
     ax.tick_params(which="minor", length=0)
 
-    for i in range(4):
-        for j in range(4):
+    for i in range(n_stages):
+        for j in range(n_taps):
             v = m[i, j]
             if not np.isfinite(v):
                 ax.text(j, i, "—", ha="center", va="center", color=MUTED, fontsize=10)
@@ -217,7 +220,7 @@ def fig_d2_diagonal(meas: Measurements) -> Figure:
     ax = fig.add_subplot(111)
     _style(ax, "Diagonal de D2: cada etapa contra su propio tap", "µV / código")
 
-    x = np.arange(4)
+    x = np.arange(len(STAGE_NAMES))
     colores = [STATUS["PASS"] if ok else STATUS["FAIL"] for ok in pasa]
     ax.bar(x, vals, width=0.5, color=colores, zorder=3)
 
@@ -240,7 +243,7 @@ def fig_d2_diagonal(meas: Measurements) -> Figure:
         ax.text(3.45, umbral, etiqueta, color=MUTED, fontsize=8, va="center", ha="left")
 
     ax.set_yscale("log")
-    ax.set_xticks(x, [f"{i}\n{STAGE_NAMES[i]}" for i in range(4)])
+    ax.set_xticks(x, [f"{i}\n{STAGE_NAMES[i]}" for i in range(len(STAGE_NAMES))])
     ax.set_xlim(-0.6, 3.4)
     # Sitio para las etiquetas de dos renglones y para la nota al pie: sin esto
     # los nombres de etapa se montaban encima del texto.
@@ -279,8 +282,8 @@ def fig_d6(
     ax = fig.add_subplot(111)
     _style(ax, "Piso de ruido por tap (D6)", "RMS [µV]")
 
-    x = np.arange(4)
-    a = [meas.d6.get(i, {}).get("rms_uv", 0.0) for i in range(4)]
+    x = np.arange(len(SIGNAL_TAP_CHANNELS))
+    a = [meas.d6.get(i, {}).get("rms_uv", 0.0) for i in SIGNAL_TAP_CHANNELS]
 
     if comparacion is None:
         ax.bar(x, a, width=0.5, color=SERIES_1, zorder=3)
@@ -288,7 +291,8 @@ def fig_d6(
             ax.text(i, v * 1.06, f"{v:,.0f}".replace(",", " "), ha="center",
                     va="bottom", color=INK, fontsize=9)
     else:
-        b = [comparacion.d6.get(i, {}).get("rms_uv", 0.0) for i in range(4)]
+        b = [comparacion.d6.get(i, {}).get("rms_uv", 0.0)
+             for i in SIGNAL_TAP_CHANNELS]
         ancho = 0.34
         ax.bar(x - ancho / 2 - 0.01, a, width=ancho, color=SERIES_1,
                label=etiquetas[0], zorder=3)
@@ -304,7 +308,7 @@ def fig_d6(
             t.set_color(INK_2)
 
     ax.set_yscale("log")
-    ax.set_xticks(x, [f"ch{i}\n{TAP_NAMES[i]}" for i in range(4)])
+    ax.set_xticks(x, [f"ch{i}\n{TAP_NAMES[i]}" for i in SIGNAL_TAP_CHANNELS])
     # Márgenes explícitos: con un tap en cero el eje logarítmico se vuelve
     # degenerado y tight_layout avisa que no puede acomodar las decoraciones.
     fig.subplots_adjust(left=0.11, right=0.97, top=0.88, bottom=0.16)
