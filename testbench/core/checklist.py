@@ -57,13 +57,14 @@ SKIP_MARKERS = ("C*", "D*")
 # --------------------------------------------------------------------------
 # El firmware deriva su escala de la portadora JitX, que no se fabricó: R de
 # conversión 30 kΩ y Vref de un AMS1117 que en la placa no existe. La placa
-# construida tenía R11-R14 = 15 kΩ contra Vref. La topología comprobada el
-# 2026-09-08 usa 1,5 kΩ en la referencia exclusiva de PGAout (IDAC2) y 10 kΩ
-# en LP (IDAC3). Sólo IDAC2 se conmuta por firmware al rango 0-255 µA.
+# construida tenía R11-R14 = 15 kΩ contra Vref. La topología en prueba del
+# 2026-09-08 lleva IDAC2 a la referencia de OPA_SUM (PGAout queda referenciado
+# a 2,5 V fijos) y usa 10 kΩ tanto allí como en LP. Los cuatro IDAC usan el
+# rango fino normal de 31,875 µA.
 IDAC_LSB_NA = 125.0            # compatibilidad: etapas 0, 1 y 3
-IDAC_LSB_NA_BY_STAGE = (125.0, 125.0, 1000.0, 125.0)
+IDAC_LSB_NA_BY_STAGE = (125.0, 125.0, 125.0, 125.0)
 IDAC_RSET_OHM_PLACA = 15_000.0  # medido: R11 = 14,76 kΩ sobre seis lecturas
-IDAC_RSET_OHM_BY_STAGE = (15_000.0, 15_000.0, 1_500.0, 10_000.0)
+IDAC_RSET_OHM_BY_STAGE = (15_000.0, 15_000.0, 10_000.0, 10_000.0)
 IDAC_RSET_OHM_FIRMWARE = 30_000.0
 #: µV por código de IDAC en la placa construida: 125 nA x 15 kΩ = 1875 µV.
 LSB_UV_PLACA = IDAC_LSB_NA * IDAC_RSET_OHM_PLACA / 1000.0
@@ -81,7 +82,7 @@ TAP_NAMES = ("PGAgain", "BPo", "OPA_SUMo", "SUMo", "LPo", "AMuxCap")
 #: Canales de señal. El último elemento de TAP_NAMES es el capacitor auxiliar.
 SIGNAL_TAP_CHANNELS = tuple(range(len(TAP_NAMES) - 1))
 #: Qué referencia mueve cada etapa de IDAC, en orden.
-STAGE_NAMES = ("Vref_PGA", "Vref_BP compartida", "Vref_PGAout", "Vref_LP")
+STAGE_NAMES = ("Vref_PGA", "Vref_BP", "Vref_OPAsum", "Vref_LP")
 #: Tap propio de cada etapa. LP salta ch3 porque ese canal ahora es SUMo.
 STAGE_TAP_CHANNELS = (0, 1, 2, 4)
 

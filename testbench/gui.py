@@ -464,12 +464,7 @@ class MainWindow(QMainWindow):
         for etapa in range(4):
             mandos.addWidget(QLabel(f"{etapa}·{STAGE_NAMES[etapa]}"))
             sp = QSpinBox()
-            if etapa == 2:
-                sp.setRange(-48, 48)
-            elif etapa == 3:
-                sp.setRange(-160, 160)
-            else:
-                sp.setRange(-255, 255)
+            sp.setRange(-255, 255)
             sp.setValue(0)
             sp.setMinimumWidth(70)
             sp.setToolTip(
@@ -919,9 +914,9 @@ class MainWindow(QMainWindow):
 
         nota = QLabel(
             "Estos comandos no necesitan el SYNC armado: miden, no capturan.\n"
-            "Modelo actual: PGA/BP 1,875 mV/código; PGAout 1,500 mV/código "
-            "(1,5 kΩ, rango 255 µA); LP 1,250 mV/código (10 kΩ). Por "
-            "seguridad manual PGAout queda limitado a ±48 y LP a ±160. "
+            "Modelo en prueba, todos en rango fino 31,875 µA: PGA/BP "
+            "1,875 mV/código; OPAsum/LP 1,250 mV/código (10 kΩ). "
+            "PGAout usa Vref fija de 2,5 V. Rango manual completo ±255. "
             "El código 0 es Vref."
         )
         nota.setWordWrap(True)
@@ -934,12 +929,7 @@ class MainWindow(QMainWindow):
         for etapa in range(4):
             gl.addWidget(QLabel(f"{etapa} · {STAGE_NAMES[etapa]}"), etapa, 0)
             sp = QSpinBox()
-            if etapa == 2:
-                sp.setRange(-48, 48)
-            elif etapa == 3:
-                sp.setRange(-160, 160)
-            else:
-                sp.setRange(-255, 255)
+            sp.setRange(-255, 255)
             sp.setValue(0)          # 0 = Vref, el centro del rango con signo
             sp.setToolTip(f"{LSB_UV_BY_STAGE[etapa]:.1f} µV por código en esta referencia")
             self.idac_spins[etapa] = sp
@@ -1388,7 +1378,7 @@ class MainWindow(QMainWindow):
 
     def _sync_sweep_limits(self) -> None:
         etapa = self.cmb_sweep_stage.currentData()
-        limit = 48 if etapa == 2 else (160 if etapa == 3 else 255)
+        limit = 255
         self.spin_lo.setRange(-limit, limit)
         self.spin_hi.setRange(-limit, limit)
 
@@ -1833,15 +1823,15 @@ def _smoke() -> int:
     check("el cambio se encola, no pisa la corrida",
           win._scope_actions.qsize() == 1)
     etiqueta, accion = win._scope_actions.get_nowait()
-    check("la etiqueta dice etapa y codigo", etiqueta == "Vref_PGAout=-40")
+    check("la etiqueta dice etapa y codigo", etiqueta == "Vref_OPAsum=-40")
     win._mon_marcas = []
     win._on_scope_mark((12.5, etiqueta))
     check("la marca queda para la figura", win._mon_marcas == [(12.5, etiqueta)])
     f = figures.fig_monitor(
         [MonSample(i, i * 1000, 0, 1001014 + i, 286, True) for i in range(30)],
-        ch=0, marcas=[(12.5, "Vref_PGAout=-40")])
+        ch=0, marcas=[(12.5, "Vref_OPAsum=-40")])
     check("la marca se dibuja en la traza",
-          any("Vref_PGAout" in t.get_text() for t in f.axes[0].texts))
+          any("Vref_OPAsum" in t.get_text() for t in f.axes[0].texts))
     # Cambiar de canal EN MARCHA. Antes el canal quedaba capturado al arrancar,
     # se elegía otro y no pasaba nada: parecía que el mux se trababa.
     win._scope_ch = 0
