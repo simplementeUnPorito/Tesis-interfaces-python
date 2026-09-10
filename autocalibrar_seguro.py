@@ -79,9 +79,10 @@ MIN_IDENT_EFFECT_UV = tuple(real_uv_to_bank_uv(value) for value in
 # Una sola resta entre dos puntos no distingue autoridad de una deriva lenta.
 # Para las plantas rápidas se exige el efecto completo low->high en los dos
 # sentidos temporales (ABBA), además de margen sobre el ruido observado. En
-# IDAC2 el umbral físico es deliberadamente alto: con 1,5 kohm y PGAout x24 se
-# esperan ~140 mV entre -16 y +16; los 2,5 mV vistos en placa eran deriva.
-MIN_BIPOLAR_AUTHORITY_UV = tuple(real_uv_to_bank_uv(12_000) for _ in range(4))
+# IDAC2 usa 10 kOhm en la referencia de OPAsum. El umbral de autoridad debe
+# quedar por debajo de la excursión teórica ABBA, pero por encima de la deriva.
+MIN_BIPOLAR_AUTHORITY_UV = tuple(real_uv_to_bank_uv(value) for value in
+                                  (12_000, 12_000, 4_000, 12_000))
 AUTHORITY_NOISE_MULTIPLIER = 6.0
 AUTHORITY_MIN_RATIO = 0.50
 MAX_FINAL_DRIFT_UV = real_uv_to_bank_uv(15_000)
@@ -555,7 +556,8 @@ class AdaptiveCalibrator:
             # pp incluye la componente de 50 Hz dentro de cada ventana. Para
             # estimar la incertidumbre de la MEDIA se usa la dispersión entre
             # ventanas de base, que fue 5-25 veces menor en la prueba real.
-            noise = max(base.spread_uv[TAU_EST_CHANNEL], 100)
+            noise = max(base.spread_uv[TAU_EST_CHANNEL],
+                        real_uv_to_bank_uv(100))
             tau, metrics = estimate_tau_series(points, noise)
             self.log("tau_measurement",
                      f"  tau BP medido: {tau if tau else 0:.2f} s",
@@ -880,7 +882,7 @@ class AdaptiveCalibrator:
             # una tabla ni una semilla. Se buscan 40 mV low->high y se exige
             # al menos ±2 códigos para distinguir cuantización de deriva.
             expected = abs(self.stage2_slope_x1_uv_per_code or
-                           real_uv_to_bank_uv(10_000))
+                           real_uv_to_bank_uv(1_912.5))
             expected *= self.pgaout_gain
             probe = max(1, min(8, int(math.ceil(real_uv_to_bank_uv(40_000) /
                                                  (2.0 * expected)))))
@@ -920,7 +922,7 @@ class AdaptiveCalibrator:
         noise_uv = max(
             low_forward.spread_uv[channel], high_forward.spread_uv[channel],
             high_reverse.spread_uv[channel], low_reverse.spread_uv[channel],
-            base.spread_uv[channel], 100)
+            base.spread_uv[channel], real_uv_to_bank_uv(100))
         threshold_uv = max(MIN_BIPOLAR_AUTHORITY_UV[stage],
                            AUTHORITY_NOISE_MULTIPLIER * noise_uv)
         same_sign = (forward != 0.0 and reverse != 0.0 and
@@ -1594,15 +1596,19 @@ class SimLab:
 
     def measure_dc(self, ch: int, settle_sel: int = 3):
         d = [self.codes[i] - self.truth[i] for i in range(4)]
-        e0 = 2_500 * d[0]
-        e1 = 400 * d[0] + 1_200 * d[1]
-        # 10 kΩ en la referencia de OPA_SUM: la placa midió del orden de
-        # 8-10 mV/código en x1, mucho más grueso que la versión de 1,5 kΩ.
-        e2 = -800 * d[0] - 250 * d[1] + 10_000 * d[2]
-        e3 = self.gain * e2 + (1 - self.gain) * self.pgaout_ref_mismatch
-        e4 = 0.25 * e3 + 1_300 * d[3]
-        error = (e0, e1, e2, e3, e4)[ch] + self.rng.randint(-250, 250)
-        return SimpleNamespace(mean_uv=int(TARGET_UV + error), pp_uv=500, ok=True)
+        # Modelo expresado primero en microvoltios físicos. IDAC2 usa 10 kΩ:
+        # 1,25 mV/código en su referencia y ~3,75 mV/código en OPA_SUMo.
+        e0_real = 2_500 * d[0]
+        e1_real = 400 * d[0] + 1_200 * d[1]
+        e2_real = -800 * d[0] - 250 * d[1] + 3_750 * d[2]
+        e3_real = (self.gain * e2_real +
+                   (1 - self.gain) * self.pgaout_ref_mismatch)
+        e4_real = 0.25 * e3_real + 1_300 * d[3]
+        noise_real = self.rng.randint(-250, 250)
+        error_bank = real_uv_to_bank_uv(
+            (e0_real, e1_real, e2_real, e3_real, e4_real)[ch] + noise_real)
+        return SimpleNamespace(mean_uv=TARGET_UV + error_bank,
+                               pp_uv=real_uv_to_bank_uv(500), ok=True)
 
 
 def self_test() -> int:
@@ -1614,7 +1620,7 @@ def self_test() -> int:
         cal = AdaptiveCalibrator(lab, samples=3, period_s=0, verbose=False,
                                  tau_override_s=0.0)
         # Sólo el banco matemático saltea la automedición física de tau.
-        cal.bp_slope_uv_per_code = 1_200.0
+        cal.bp_slope_uv_per_code = float(real_uv_to_bank_uv(1_200.0))
         cal.bp_zero_error_uv = 0.0
         try:
             result = cal.calibrate_gain(gain, strategy)

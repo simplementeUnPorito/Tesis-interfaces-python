@@ -59,12 +59,19 @@ SKIP_MARKERS = ("C*", "D*")
 # conversión 30 kΩ y Vref de un AMS1117 que en la placa no existe. La placa
 # construida tenía R11-R14 = 15 kΩ contra Vref. La topología en prueba del
 # 2026-09-08 lleva IDAC2 a la referencia de OPA_SUM (PGAout queda referenciado
-# a 2,5 V fijos) y usa 10 kΩ tanto allí como en LP. Los cuatro IDAC usan el
-# rango fino normal de 31,875 µA.
+# a 2,5 V fijos). CORRECCIÓN 2026-09-10 tarde: Elías inspeccionó las partes y
+# IDAC2 tiene 5,1 kΩ, IDAC3 tiene 10 kΩ. La nota anterior de esta misma fecha,
+# que declaraba 10 kΩ en ambos, era incorrecta y ya se propagó al handoff.
+# Los datos la contradicen por tres caminos independientes: con el pasabanda
+# bloqueado en continua la pendiente IDAC1->BPo fija la ganancia unitaria de esa
+# rama, IDAC1->OPA_SUMo da la ganancia inversora del sumador desde BPo, y con
+# ambas la pendiente IDAC2->OPA_SUMo implica un paso de ~0,75 mV/código en el
+# nodo, o sea ~5,1 kΩ y no 10 kΩ.
+# Los cuatro IDAC usan el rango fino normal de 31,875 µA.
 IDAC_LSB_NA = 125.0            # compatibilidad: etapas 0, 1 y 3
 IDAC_LSB_NA_BY_STAGE = (125.0, 125.0, 125.0, 125.0)
 IDAC_RSET_OHM_PLACA = 15_000.0  # medido: R11 = 14,76 kΩ sobre seis lecturas
-IDAC_RSET_OHM_BY_STAGE = (15_000.0, 15_000.0, 10_000.0, 10_000.0)
+IDAC_RSET_OHM_BY_STAGE = (15_000.0, 15_000.0, 5_100.0, 10_000.0)
 IDAC_RSET_OHM_FIRMWARE = 30_000.0
 #: µV por código de IDAC en la placa construida: 125 nA x 15 kΩ = 1875 µV.
 LSB_UV_PLACA = IDAC_LSB_NA * IDAC_RSET_OHM_PLACA / 1000.0

@@ -14,11 +14,10 @@ Dos cosas que conviene tener presentes al usar esto:
 * **Ninguno de estos comandos necesita el SYNC armado.** ``0xA4`` y ``0xA7``
   miden, no capturan, así que andan apenas hay enlace con el PSoC. Es la
   diferencia con C4/C5/D7, que sí capturan y sí lo necesitan.
-* **Lo que se informa en µV es desviación respecto de ``Vref``**, no tensión
-  absoluta: la cadena entra al ADC por un amplificador referido a ``Vdda/2``.
-  La escala nominal es por etapa: PGA/BP 1875 µV/código, PGAout 1500
-  µV/código (rango 255 µA) y LP 1250 µV/código. Ver
-  ``checklist.LSB_UV_BY_STAGE``.
+* **Lo que se informa en µV es la lectura absoluta del banco**, no una
+  desviación física respecto de ``Vref``. La conversión medida de esa lectura a
+  tensión real está en ``escala_banco.py``; las escalas nominales de los IDAC
+  por etapa están en ``checklist.LSB_UV_BY_STAGE``.
 """
 
 from __future__ import annotations

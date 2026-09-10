@@ -61,6 +61,48 @@ BANCO_MAX_VALIDO_MV = 1122.7
 BANCO_VREF_MV = 1001.5
 
 
+# --------------------------------------------------------------------------
+# RIEL MEDIDO, Y POR QUE LA VENTANA DE ARRIBA NO ALCANZA
+# --------------------------------------------------------------------------
+# BANCO_MAX_VALIDO_MV son 1122,7 porque es Vdda. Pero ninguna etapa llega a
+# Vdda: el operacional se queda antes. Medido sobre 217 lecturas de ch4 en
+# lab/calibracion_nueva/autoridad_local_actual_2026-09-10*.csv, LPo toma UN
+# SOLO valor, 1106,1 mV de banco, o sea 4,50 V, en las 138 filas del ensayo de
+# autoridad, sin moverse ni cuando cambia IDAC3.
+#
+# O sea que la ventana declara VALIDA una etapa clavada contra su riel. Eso es
+# lo que sostiene el "100/100 PASS" de la autocalibracion en dos fases: LPo
+# estuvo pegado arriba en todas las campanas.
+BANCO_RIEL_ALTO_MEDIDO_MV = 1106.1
+
+# La prueba robusta no es la ventana sino el RUIDO. Un nodo vivo de esta cadena
+# tiene pico a pico de milivoltios; uno clavado no tiene ninguno. Medido en el
+# mismo conjunto, por canal, en microvoltios de banco:
+#
+#     ch0 PGAgain   pp mediano 2307   minimo 1010
+#     ch1 BPo       pp mediano 3166   minimo 1602
+#     ch2 OPA_SUMo  pp mediano 1220   minimo  514
+#     ch3 SUMo      pp mediano 1125   minimo  514
+#     ch4 LPo       pp mediano  114   maximo  190     <- clavado
+#
+# Hay un orden de magnitud de separacion entre 190 y 514, asi que el umbral no
+# es delicado. Sirve igual arriba que abajo y no depende de donde este el riel.
+PP_CLAVADO_UV = 300.0
+
+
+def clavado(pp_banco_uv: float | None) -> bool:
+    """True si el tap no tiene ruido propio, o sea si esta pegado a un riel."""
+    if pp_banco_uv is None:
+        return False
+    return pp_banco_uv < PP_CLAVADO_UV
+
+
+def lectura_utilizable(banco_mv: float | None,
+                       pp_banco_uv: float | None) -> bool:
+    """Dentro de rango Y con ruido propio. Es el criterio que hay que usar."""
+    return lectura_valida(banco_mv) and not clavado(pp_banco_uv)
+
+
 def a_voltios(banco_mv: float | None) -> float | None:
     """Lectura del banco -> voltios reales contra masa."""
     if banco_mv is None:
