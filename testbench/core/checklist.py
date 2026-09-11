@@ -71,7 +71,10 @@ SKIP_MARKERS = ("C*", "D*")
 IDAC_LSB_NA = 125.0            # compatibilidad: etapas 0, 1 y 3
 IDAC_LSB_NA_BY_STAGE = (125.0, 125.0, 125.0, 125.0)
 IDAC_RSET_OHM_PLACA = 15_000.0  # medido: R11 = 14,76 kΩ sobre seis lecturas
-IDAC_RSET_OHM_BY_STAGE = (15_000.0, 15_000.0, 5_100.0, 10_000.0)
+# 2026-09-10 noche: Elias bajo IDAC3 de 10 k a 1 k y le puso zocalo. El paso
+# de IDAC3 sobre LPo medido con 10 k era de 230 a 700 mV/codigo, o sea un
+# tercio del rango util de LPo por codigo: inutilizable como ajuste fino.
+IDAC_RSET_OHM_BY_STAGE = (15_000.0, 15_000.0, 5_100.0, 1_000.0)
 IDAC_RSET_OHM_FIRMWARE = 30_000.0
 #: µV por código de IDAC en la placa construida: 125 nA x 15 kΩ = 1875 µV.
 LSB_UV_PLACA = IDAC_LSB_NA * IDAC_RSET_OHM_PLACA / 1000.0

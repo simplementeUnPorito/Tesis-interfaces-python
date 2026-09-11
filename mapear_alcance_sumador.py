@@ -28,16 +28,20 @@ from verificar_deriva_ch0 import (ConsolaSimulada, LaboratorioSimulado,
 CANALES = (0, 1, 2, 3, 4)
 IDAC1_IDA = (-255, -192, -128, -64, 0, 64, 128, 192, 255)
 IDAC2_MALLA = (-255, -128, -64, 0, 64, 128, 255)
-DESPLAZAMIENTOS_FINOS = (-8, -4, -2, 0, 2, 4, 8)
+DELTAS_ABBA = (8, 4, 2)
+DELTAS_ABBA_IDAC0 = (2, 4)
 VENTANAS_POR_LECTURA = 3
 REINTENTOS_POR_VENTANA = 4
-ESPERA_IDAC_LENTO_S = 90.0
 ESPERA_IDAC_RAPIDO_S = 1.5
 ESPERA_CENTRADO_S = 2.0
+INTERVALO_ASENTAMIENTO_S = 5.0
+PISO_ASENTAMIENTO_S = 60.0
+TECHO_ASENTAMIENTO_S = 240.0
 ESTIMADO_TOTAL_S = 45.0 * 60.0
 
 CAMPOS = (
-    "t_s", "pasada", "idac0", "idac1", "idac2", "fase", "ch", "tap",
+    "t_s", "pasada", "idac0", "idac1", "idac2", "fase", "posicion",
+    "asentamiento_incompleto", "ch", "tap",
     "media_banco_uv", "pp_banco_uv", "ok", "valido", "clavado",
     "real_mv_vs_vref",
 )
@@ -151,11 +155,20 @@ def main() -> int:
     ap.add_argument("--pgaout", type=int, choices=GAIN_CODES, default=1)
     ap.add_argument("--max-s", type=float, default=5400.0,
                     help="duracion maxima total; un corte devuelve codigo 1")
+    ap.add_argument(
+        "--espera-lenta-s", type=float,
+        help=("fuerza una espera fija despues de mover IDAC1; si se omite, "
+              "se usa el asentamiento adaptativo"),
+    )
+    ap.add_argument("--sin-fino", action="store_true",
+                    help="omite los tramos ABBA de IDAC2")
     ap.add_argument("--simular", action="store_true")
     ap.add_argument("--output", type=Path)
     args = ap.parse_args()
     if args.max_s <= 0:
         ap.error("--max-s debe ser positivo")
+    if args.espera_lenta_s is not None and args.espera_lenta_s < 0:
+        ap.error("--espera-lenta-s no puede ser negativo")
 
     csv_path, json_path = resolver_salidas(args.output, args.simular)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,6 +177,7 @@ def main() -> int:
     filas: list[dict[str, Any]] = []
     capturas: list[dict[str, Any]] = []
     resumen: dict[str, Any] | None = None
+    resultado_abba_idac0: dict[str, Any] | None = None
     estado = "iniciando"
     codigo_idac0 = 0
 
@@ -230,12 +244,18 @@ def main() -> int:
             picos.append(float(punto.pp_uv))
         return Lectura(statistics.median(medias), statistics.median(picos), True)
 
-    def medir_cinco(pasada: int, idac1: int, idac2: int,
-                    fase: str) -> dict[str, Any]:
-        captura: dict[str, Any] = {"pasada": pasada, "idac1": idac1,
-                                   "idac2": idac2, "fase": fase,
-                                   "lecturas": {}}
-        for ch in CANALES:
+    def medir_canales(pasada: int, idac0: int, idac1: int, idac2: int,
+                      fase: str, posicion: str = "",
+                      asentamiento_incompleto: bool = False,
+                      canales: tuple[int, ...] = CANALES,
+                      **datos_captura: Any) -> dict[str, Any]:
+        captura: dict[str, Any] = {
+            "pasada": pasada, "idac0": idac0, "idac1": idac1,
+            "idac2": idac2, "fase": fase, "posicion": posicion,
+            "asentamiento_incompleto": asentamiento_incompleto,
+            "lecturas": {}, **datos_captura,
+        }
+        for ch in canales:
             lectura = medir(ch)
             captura["lecturas"][ch] = lectura
             real_mv = None
@@ -243,8 +263,10 @@ def main() -> int:
                 real_mv = FACTOR * (lectura.media_uv / 1000.0 - BANCO_VREF_MV)
             escribir_fila({
                 "t_s": round(reloj.transcurrido(), 3), "pasada": pasada,
-                "idac0": codigo_idac0, "idac1": idac1, "idac2": idac2,
-                "fase": fase, "ch": ch, "tap": TAP_NAMES[ch],
+                "idac0": idac0, "idac1": idac1, "idac2": idac2,
+                "fase": fase, "posicion": posicion,
+                "asentamiento_incompleto": asentamiento_incompleto,
+                "ch": ch, "tap": TAP_NAMES[ch],
                 "media_banco_uv": lectura.media_uv,
                 "pp_banco_uv": lectura.pp_uv, "ok": lectura.ok,
                 "valido": lectura.valida, "clavado": lectura.clavada,
@@ -252,6 +274,79 @@ def main() -> int:
             })
         capturas.append(captura)
         return captura
+
+    def lectura_util_abba(captura: dict[str, Any], ch: int) -> Lectura | None:
+        lectura = captura["lecturas"].get(ch)
+        # En ABBA un pp pequeno no invalida por si solo el punto: puede ser una
+        # senal genuinamente quieta. La excursion A/B permite detectar una
+        # falta de respuesta; fuera de rango o sin lectura si son "sin dato".
+        if lectura is None or not lectura.valida or lectura.media_uv is None:
+            return None
+        return lectura
+
+    def pendiente_abba(capturas_delta: list[dict[str, Any]],
+                       ch: int, delta: int) -> float | None:
+        por_posicion = {c["posicion"]: lectura_util_abba(c, ch)
+                        for c in capturas_delta}
+        if any(por_posicion.get(p) is None for p in ("A1", "B1", "B2", "A2")):
+            return None
+        medias_a = [por_posicion[p].media_uv for p in ("A1", "A2")]
+        medias_b = [por_posicion[p].media_uv for p in ("B1", "B2")]
+        return ((statistics.mean(medias_b) - statistics.mean(medias_a)) /
+                (2.0 * delta))  # type: ignore[arg-type]
+
+    def esperar_asentamiento_idac1(pasada: int, idac1: int) -> bool:
+        """Devuelve True si se alcanzo el techo sin verificar asentamiento."""
+        if args.espera_lenta_s is not None:
+            reloj.esperar(args.espera_lenta_s)
+            evento("asentamiento_fijo", "se aplico la espera lenta forzada",
+                   pasada=pasada, idac1=idac1,
+                   espera_s=args.espera_lenta_s)
+            return False
+
+        inicio = reloj.transcurrido()
+        anterior: float | None = None
+        diferencias_bajas = 0
+        muestras = 0
+        ultima_diferencia: float | None = None
+        ultimo_umbral: float | None = None
+        while reloj.transcurrido() - inicio < TECHO_ASENTAMIENTO_S:
+            restante = TECHO_ASENTAMIENTO_S - (reloj.transcurrido() - inicio)
+            reloj.esperar(min(INTERVALO_ASENTAMIENTO_S, restante))
+            if reloj.transcurrido() - inicio >= TECHO_ASENTAMIENTO_S:
+                break
+            lectura = medir(1)
+            muestras += 1
+            if lectura.media_uv is None or lectura.pp_uv is None:
+                anterior = None
+                diferencias_bajas = 0
+                continue
+            ultima_diferencia = (None if anterior is None else
+                                 abs(lectura.media_uv - anterior))
+            ultimo_umbral = lectura.pp_uv / 2.0
+            if ultima_diferencia is not None and ultima_diferencia < ultimo_umbral:
+                diferencias_bajas += 1
+            else:
+                diferencias_bajas = 0
+            anterior = lectura.media_uv
+            transcurrido = reloj.transcurrido() - inicio
+            if (transcurrido >= PISO_ASENTAMIENTO_S and
+                    diferencias_bajas >= 2):
+                evento("asentamiento_completo", "ch1 se considero asentado",
+                       pasada=pasada, idac1=idac1,
+                       espera_s=round(transcurrido, 3), muestras=muestras,
+                       ultima_diferencia_uv=ultima_diferencia,
+                       ultimo_umbral_uv=ultimo_umbral)
+                return False
+
+        transcurrido = reloj.transcurrido() - inicio
+        evento("asentamiento_incompleto",
+               "ch1 no cumplio el criterio antes del techo; se continua",
+               pasada=pasada, idac1=idac1,
+               espera_s=round(transcurrido, 3), muestras=muestras,
+               ultima_diferencia_uv=ultima_diferencia,
+               ultimo_umbral_uv=ultimo_umbral)
+        return True
 
     def centrar_idac0() -> int:
         muestras: dict[int, Lectura] = {}
@@ -315,6 +410,77 @@ def main() -> int:
                correcciones_unitarias=pasos)
         return codigo
 
+    def medir_abba_idac0(centro: int,
+                         asentamiento_incompleto: bool) -> dict[str, Any]:
+        resultados_delta: list[dict[str, Any]] = []
+        try:
+            for delta in DELTAS_ABBA_IDAC0:
+                capturas_delta: list[dict[str, Any]] = []
+                secuencia = (("A1", centro - delta), ("B1", centro + delta),
+                             ("B2", centro + delta), ("A2", centro - delta))
+                if any(not -255 <= codigo <= 255 for _, codigo in secuencia):
+                    resultados_delta.append({
+                        "delta": delta, "pendiente_ch0_uv_por_codigo": None,
+                        "pendiente_ch2_uv_por_codigo": None,
+                        "pendiente_ch0_mv_fisicos_por_codigo": None,
+                        "pendiente_ch2_mv_fisicos_por_codigo": None,
+                        "motivo": "codigos fuera del alcance del IDAC0",
+                    })
+                    continue
+                for posicion, codigo in secuencia:
+                    operacion_comprobada(lambda c=codigo: lab.set_idac(0, c),  # type: ignore[union-attr]
+                                         f"IDAC0 ABBA={codigo:+d}")
+                    reloj.esperar(ESPERA_IDAC_RAPIDO_S)
+                    capturas_delta.append(medir_canales(
+                        0, codigo, 0, 0, "abba_idac0", posicion,
+                        asentamiento_incompleto, (0, 2),
+                        delta=delta, centro_idac0=centro,
+                    ))
+                pendiente_ch0 = pendiente_abba(capturas_delta, 0, delta)
+                pendiente_ch2 = pendiente_abba(capturas_delta, 2, delta)
+                resultados_delta.append({
+                    "delta": delta,
+                    "pendiente_ch0_uv_por_codigo": pendiente_ch0,
+                    "pendiente_ch2_uv_por_codigo": pendiente_ch2,
+                    "pendiente_ch0_mv_fisicos_por_codigo": (
+                        None if pendiente_ch0 is None else
+                        FACTOR * pendiente_ch0 / 1000.0),
+                    "pendiente_ch2_mv_fisicos_por_codigo": (
+                        None if pendiente_ch2 is None else
+                        FACTOR * pendiente_ch2 / 1000.0),
+                    "motivo_ch2_sin_dato": (None if pendiente_ch2 is not None else
+                                             "ch2 fuera de rango, clavado o sin lectura"),
+                })
+        finally:
+            # El brazo es diagnostico: siempre se vuelve al codigo centrado
+            # antes de iniciar la malla, incluso si una lectura falla.
+            if lab is not None:
+                lab.set_idac(0, centro)
+
+        pendientes_ch0 = [r["pendiente_ch0_uv_por_codigo"]
+                          for r in resultados_delta
+                          if r["pendiente_ch0_uv_por_codigo"] is not None]
+        pendientes_ch2 = [r["pendiente_ch2_uv_por_codigo"]
+                          for r in resultados_delta
+                          if r["pendiente_ch2_uv_por_codigo"] is not None]
+        mediana_ch0 = statistics.median(pendientes_ch0) if pendientes_ch0 else None
+        mediana_ch2 = statistics.median(pendientes_ch2) if pendientes_ch2 else None
+        ganancia = None
+        if mediana_ch0 is not None and mediana_ch2 is not None and abs(mediana_ch0) > 1e-12:
+            ganancia = mediana_ch2 / mediana_ch0
+        resultado = {
+            "centro_idac0": centro, "pendientes_por_delta": resultados_delta,
+            "pendiente_ch0_mediana_uv_por_codigo": mediana_ch0,
+            "pendiente_ch2_mediana_uv_por_codigo": mediana_ch2,
+            "pendiente_ch0_mediana_mv_fisicos_por_codigo": (
+                None if mediana_ch0 is None else FACTOR * mediana_ch0 / 1000.0),
+            "pendiente_ch2_mediana_mv_fisicos_por_codigo": (
+                None if mediana_ch2 is None else FACTOR * mediana_ch2 / 1000.0),
+            "ganancia_sumador_desde_seo": ganancia,
+        }
+        evento("abba_idac0", "brazo ABBA de IDAC0 terminado", **resultado)
+        return resultado
+
     def crear_resumen() -> dict[str, Any]:
         malla = [c for c in capturas if c["fase"] == "malla"]
         tabla_celdas: list[dict[str, Any]] = []
@@ -332,44 +498,91 @@ def main() -> int:
                         "ch3_valido": lecturas[3].valida,
                     })
 
-        pendientes_pasada: list[dict[str, Any]] = []
+        pendientes_locales: list[dict[str, Any]] = []
         for pasada in (1, 2):
             for idac1 in IDAC1_IDA:
-                puntos = []
-                for captura in capturas:
-                    if (captura["fase"] == "fino" and captura["pasada"] == pasada and
-                            captura["idac1"] == idac1):
-                        lectura = captura["lecturas"][2]
-                        if lectura.valida and lectura.media_uv is not None:
-                            puntos.append((float(captura["idac2"]), lectura.media_uv))
-                ajuste = regresion_lineal(puntos)
-                if ajuste is not None:
-                    pendientes_pasada.append({"pasada": pasada, "idac1": idac1,
-                                               **ajuste})
-        pendientes_locales: list[dict[str, Any]] = []
-        for idac1 in IDAC1_IDA:
-            ajustes = [p for p in pendientes_pasada if p["idac1"] == idac1]
-            if not ajustes:
-                continue
-            valores = [float(p["pendiente_uv_por_codigo"]) for p in ajustes]
-            media = statistics.mean(valores)
-            desvio = statistics.stdev(valores) if len(valores) > 1 else 0.0
-            pendientes_locales.append({
-                "idac1": idac1, "pendiente_media_uv_por_codigo": media,
-                "signo": "positivo" if media > 0 else ("negativo" if media < 0 else "nulo"),
-                "desvio_entre_pasadas_uv_por_codigo": desvio,
-                "ajustes_por_pasada": ajustes,
-            })
+                grupo = [c for c in capturas if c["fase"] == "abba" and
+                         c["pasada"] == pasada and c["idac1"] == idac1]
+                if not grupo:
+                    continue
+                por_delta: list[dict[str, Any]] = []
+                for delta in DELTAS_ABBA:
+                    capturas_delta = [c for c in grupo if c.get("delta") == delta]
+                    pendiente = pendiente_abba(capturas_delta, 2, delta)
+                    por_delta.append({
+                        "delta": delta,
+                        "pendiente_uv_por_codigo": pendiente,
+                        "pendiente_mv_fisicos_por_codigo": (
+                            None if pendiente is None else
+                            FACTOR * pendiente / 1000.0),
+                    })
+                valores = [p["pendiente_uv_por_codigo"] for p in por_delta
+                           if p["pendiente_uv_por_codigo"] is not None]
+                if not valores:
+                    continue
+                mediana = statistics.median(valores)
+                pendientes_locales.append({
+                    "pasada": pasada, "idac1": idac1,
+                    "pendientes_por_delta": por_delta,
+                    "pendiente_mediana_uv_por_codigo": mediana,
+                    "pendiente_mediana_mv_fisicos_por_codigo": (
+                        FACTOR * mediana / 1000.0),
+                    "signo": ("positivo" if mediana > 0 else
+                              ("negativo" if mediana < 0 else "nulo")),
+                })
 
         datos_ajuste: list[tuple[float, float, float, float]] = []
+        descarte = {
+            "candidatas": len(malla), "incluidas": 0,
+            "descartadas_total": 0,
+            "descartadas_por_motivo": {
+                **{f"ch{ch}_sin_lectura": 0 for ch in range(4)},
+                **{f"ch{ch}_fuera_de_rango": 0 for ch in range(4)},
+                **{f"ch{ch}_clavado": 0 for ch in range(4)},
+                "error_ch2_mayor_o_igual_1500_mv": 0,
+            },
+            "nota": "los motivos pueden solaparse en una misma captura",
+        }
+        for captura in malla:
+            motivos: set[str] = set()
+            for ch in range(4):
+                lectura = captura["lecturas"].get(ch)
+                if lectura is None or not lectura.ok or lectura.media_uv is None:
+                    motivos.add(f"ch{ch}_sin_lectura")
+                    continue
+                if not lectura.valida:
+                    motivos.add(f"ch{ch}_fuera_de_rango")
+                if lectura.clavada:
+                    motivos.add(f"ch{ch}_clavado")
+            ch2 = captura["lecturas"].get(2)
+            if ch2 is not None and ch2.media_uv is not None:
+                error_ch2_mv = FACTOR * (ch2.media_uv / 1000.0 - BANCO_VREF_MV)
+                if abs(error_ch2_mv) >= 1500.0:
+                    motivos.add("error_ch2_mayor_o_igual_1500_mv")
+            if motivos:
+                descarte["descartadas_total"] += 1
+                for motivo in motivos:
+                    descarte["descartadas_por_motivo"][motivo] += 1
+                continue
+            ch0 = captura["lecturas"][0]
+            datos_ajuste.append((float(captura["idac2"]),
+                                 float(captura["idac1"]),
+                                 ch0.media_uv, ch2.media_uv))
+            descarte["incluidas"] += 1
+        ajuste_malla = minimos_cuadrados(datos_ajuste)
+
+        # Se conserva el calculo sin limitar para mostrar, no ocultar, por que
+        # el ajuste global anterior era enganoso frente a las derivadas ABBA.
+        datos_sin_limitar: list[tuple[float, float, float, float]] = []
         for captura in malla:
             ch0 = captura["lecturas"][0]
             ch2 = captura["lecturas"][2]
-            if ch0.valida and ch2.valida and ch0.media_uv is not None and ch2.media_uv is not None:
-                datos_ajuste.append((float(captura["idac2"]),
-                                     float(captura["idac1"]),
-                                     ch0.media_uv, ch2.media_uv))
-        ajuste_malla = minimos_cuadrados(datos_ajuste)
+            if (ch0.valida and ch2.valida and ch0.media_uv is not None and
+                    ch2.media_uv is not None):
+                datos_sin_limitar.append((float(captura["idac2"]),
+                                          float(captura["idac1"]),
+                                          ch0.media_uv, ch2.media_uv))
+        ajuste_sin_limitar = minimos_cuadrados(datos_sin_limitar)
 
         histeresis_celdas: list[dict[str, Any]] = []
         for idac1 in IDAC1_IDA:
@@ -405,9 +618,17 @@ def main() -> int:
             }
         return {
             "codigo_idac0_final": codigo_idac0,
+            "abba_idac0": resultado_abba_idac0,
             "tabla_validez_celdas": tabla_celdas,
             "pendiente_local_idac2_sobre_ch2": pendientes_locales,
             "ajuste_malla": ajuste_malla,
+            "filtro_region_lineal": descarte,
+            "ajuste_malla_sin_limitar": ajuste_sin_limitar,
+            "advertencia_ajuste_global": (
+                "El ajuste historico sobre todo el mapa dio un residuo de "
+                "aproximadamente 103 mV y coeficientes casi a la mitad de los "
+                "ABBA. No debe interpretarse como la ganancia local del sumador."
+            ),
             "histeresis_por_celda": histeresis_celdas,
             "histeresis_resumen": histeresis_resumen,
             "filas": len(filas),
@@ -432,11 +653,16 @@ def main() -> int:
             operacion_comprobada(lambda e=etapa: lab.set_idac(e, 0),
                                  f"IDAC{etapa}=0")
         progreso("puesta a punto; asentando referencias")
-        reloj.esperar(ESPERA_IDAC_LENTO_S)
+        asentamiento_inicial_incompleto = esperar_asentamiento_idac1(0, 0)
 
         estado = "centrando_idac0"
         codigo_idac0 = centrar_idac0()
         progreso(f"IDAC0 congelado en {codigo_idac0:+d}; IDAC3 queda en cero")
+
+        estado = "abba_idac0"
+        resultado_abba_idac0 = medir_abba_idac0(
+            codigo_idac0, asentamiento_inicial_incompleto)
+        progreso("brazo ABBA de IDAC0 terminado; IDAC0 restaurado al centro")
 
         estado = "malla"
         secuencias = (IDAC1_IDA, tuple(reversed(IDAC1_IDA)))
@@ -450,8 +676,9 @@ def main() -> int:
                                      f"IDAC1={idac1:+d}")
                 evento("idac1", f"IDAC1={idac1:+d}; comienza espera lenta",
                        pasada=pasada, idac1=idac1)
-                reloj.esperar(ESPERA_IDAC_LENTO_S)
-                medir_cinco(pasada, idac1, 0, "referencia")
+                asentamiento_incompleto = esperar_asentamiento_idac1(pasada, idac1)
+                medir_canales(pasada, codigo_idac0, idac1, 0, "referencia",
+                              asentamiento_incompleto=asentamiento_incompleto)
                 progreso(f"pasada {pasada}/2, IDAC1 {indice_i1}/9={idac1:+d}, referencia")
 
                 capturas_malla_punto: list[dict[str, Any]] = []
@@ -459,7 +686,9 @@ def main() -> int:
                     operacion_comprobada(lambda c=idac2: lab.set_idac(2, c),
                                          f"IDAC2={idac2:+d}")
                     reloj.esperar(ESPERA_IDAC_RAPIDO_S)
-                    captura = medir_cinco(pasada, idac1, idac2, "malla")
+                    captura = medir_canales(
+                        pasada, codigo_idac0, idac1, idac2, "malla",
+                        asentamiento_incompleto=asentamiento_incompleto)
                     capturas_malla_punto.append(captura)
                     progreso(f"pasada {pasada}/2, IDAC1={idac1:+d}, IDAC2={idac2:+d}")
 
@@ -471,27 +700,39 @@ def main() -> int:
                                            captura, lectura))
                 if candidatos:
                     _, mejor, lectura_mejor = min(candidatos, key=lambda item: item[0])
-                    if lectura_mejor.valida:
-                        centro = int(mejor["idac2"])
-                        codigos_finos: list[int] = []
-                        for desplazamiento in DESPLAZAMIENTOS_FINOS:
-                            codigo = max(-255, min(255, centro + desplazamiento))
-                            if codigo not in codigos_finos:
-                                codigos_finos.append(codigo)
-                        evento("tramo_fino", f"tramo fino alrededor de IDAC2={centro:+d}",
-                               pasada=pasada, idac1=idac1, centro_idac2=centro)
-                        for idac2 in codigos_finos:
-                            operacion_comprobada(lambda c=idac2: lab.set_idac(2, c),
-                                                 f"IDAC2 fino={idac2:+d}")
-                            reloj.esperar(ESPERA_IDAC_RAPIDO_S)
-                            medir_cinco(pasada, idac1, idac2, "fino")
+                    if lectura_mejor.valida and not args.sin_fino:
+                        centro_original = int(mejor["idac2"])
+                        centro = max(-255 + max(DELTAS_ABBA),
+                                     min(255 - max(DELTAS_ABBA), centro_original))
+                        evento("tramo_abba", f"ABBA alrededor de IDAC2={centro:+d}",
+                               pasada=pasada, idac1=idac1,
+                               centro_idac2=centro,
+                               centro_malla_original=centro_original)
+                        for delta in DELTAS_ABBA:
+                            secuencia = (("A1", centro - delta),
+                                         ("B1", centro + delta),
+                                         ("B2", centro + delta),
+                                         ("A2", centro - delta))
+                            for posicion, idac2_abba in secuencia:
+                                operacion_comprobada(
+                                    lambda c=idac2_abba: lab.set_idac(2, c),
+                                    f"IDAC2 ABBA={idac2_abba:+d}")
+                                reloj.esperar(ESPERA_IDAC_RAPIDO_S)
+                                medir_canales(
+                                    pasada, codigo_idac0, idac1, idac2_abba,
+                                    "abba", posicion, asentamiento_incompleto,
+                                    delta=delta, centro_idac2=centro,
+                                )
+                    elif args.sin_fino:
+                        evento("tramo_abba_omitido", "se solicito --sin-fino",
+                               pasada=pasada, idac1=idac1)
                     else:
-                        evento("tramo_fino_omitido",
+                        evento("tramo_abba_omitido",
                                "el punto de malla mas cercano a Vref estaba saturado",
                                pasada=pasada, idac1=idac1,
                                centro_idac2=int(mejor["idac2"]))
                 else:
-                    evento("tramo_fino_omitido", "ch2 no tuvo lecturas en la malla",
+                    evento("tramo_abba_omitido", "ch2 no tuvo lecturas en la malla",
                            pasada=pasada, idac1=idac1)
 
             operacion_comprobada(lambda: lab.set_idac(1, 0), "IDAC1=0 al cerrar pasada")
@@ -531,6 +772,19 @@ def main() -> int:
     if completada and resumen is not None:
         print("\nRESUMEN FINAL", flush=True)
         print(f"  IDAC0 final: {codigo_idac0:+d}", flush=True)
+        brazo = resumen["abba_idac0"]
+        print("  Brazo ABBA IDAC0:", flush=True)
+        for dato in brazo["pendientes_por_delta"]:
+            p0 = dato["pendiente_ch0_mv_fisicos_por_codigo"]
+            p2 = dato["pendiente_ch2_mv_fisicos_por_codigo"]
+            texto_p0 = "sin dato" if p0 is None else f"{p0:+.4f} mV/codigo"
+            texto_p2 = "sin dato" if p2 is None else f"{p2:+.4f} mV/codigo"
+            print(f"    delta={dato['delta']}: ch0={texto_p0}, ch2={texto_p2}",
+                  flush=True)
+        ganancia_seo = brazo["ganancia_sumador_desde_seo"]
+        print("    ganancia sumador desde SEo: " +
+              ("sin dato" if ganancia_seo is None else f"{ganancia_seo:+.5f}"),
+              flush=True)
         print("  Validez por celda (2=ch2 valido, 3=ch3 valido, -=saturado/sin dato):",
               flush=True)
         tabla = resumen["tabla_validez_celdas"]
@@ -543,18 +797,32 @@ def main() -> int:
                 print(f"    P{pasada} IDAC1={idac1:+4d}  {texto}", flush=True)
         print("  Pendiente local IDAC2 -> ch2:", flush=True)
         for pendiente in resumen["pendiente_local_idac2_sobre_ch2"]:
-            print(f"    IDAC1={pendiente['idac1']:+4d}: "
-                  f"{pendiente['pendiente_media_uv_por_codigo']:+.2f} uV/codigo "
-                  f"({pendiente['signo']}), desvio entre pasadas "
-                  f"{pendiente['desvio_entre_pasadas_uv_por_codigo']:.2f}", flush=True)
+            detalles = ", ".join(
+                f"d={p['delta']}:" + (
+                    "sin dato" if p["pendiente_mv_fisicos_por_codigo"] is None
+                    else f"{p['pendiente_mv_fisicos_por_codigo']:+.4f}")
+                for p in pendiente["pendientes_por_delta"])
+            print(f"    P{pendiente['pasada']} IDAC1={pendiente['idac1']:+4d}: "
+                  f"{detalles}; mediana="
+                  f"{pendiente['pendiente_mediana_mv_fisicos_por_codigo']:+.4f} "
+                  "mV/codigo "
+                  f"({pendiente['signo']})", flush=True)
         ajuste = resumen["ajuste_malla"]
         if ajuste["disponible"]:
-            print(f"  Ajuste ({ajuste['n']} filas): A={ajuste['A_uv_por_codigo_idac2']:+.3f}, "
+            print(f"  Ajuste region lineal ({ajuste['n']} capturas): "
+                  f"A={ajuste['A_uv_por_codigo_idac2']:+.3f}, "
                   f"B={ajuste['B_uv_por_codigo_idac1']:+.3f}, "
                   f"C={ajuste['C_uv_por_uv_ch0']:+.5f}, K={ajuste['K_uv']:+.1f} uV, "
                   f"RMS={ajuste['residuo_rms_uv']:.2f} uV", flush=True)
         else:
             print(f"  Ajuste no disponible: {ajuste['motivo']}", flush=True)
+        filtro = resumen["filtro_region_lineal"]
+        print(f"  Filtro del ajuste: {filtro['incluidas']} dentro, "
+              f"{filtro['descartadas_total']} descartadas de {filtro['candidatas']}",
+              flush=True)
+        for motivo, cantidad in filtro["descartadas_por_motivo"].items():
+            print(f"    {motivo}: {cantidad}", flush=True)
+        print(f"  ADVERTENCIA: {resumen['advertencia_ajuste_global']}", flush=True)
         h2 = resumen["histeresis_resumen"]["ch2"]
         h3 = resumen["histeresis_resumen"]["ch3"]
         print(f"  Histeresis RMS: ch2={h2['rms_uv']:.1f} uV, ch3={h3['rms_uv']:.1f} uV",

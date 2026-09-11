@@ -42,6 +42,9 @@ NOMBRES = {
 }
 A_PREVIO_MV_POR_CODIGO = 9.56
 RMS_PREVIO_MV = 15.0
+CORRIENTE_IDAC_UA_POR_CODIGO = 0.125
+R_OSCILOSCOPIO_OHM = 3294.0
+POSICIONES_ABBA = ("A1", "B1", "B2", "A2")
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,8 @@ class Lectura:
     idac1: int
     idac2: int
     fase: str
+    posicion: str | None
+    asentamiento_incompleto: bool | None
     ch: int
     tap: str
     media_uv: float | None
@@ -74,9 +79,12 @@ class Lectura:
 @dataclass
 class Captura:
     pasada: int
+    idac0: int
     idac1: int
     idac2: int
     fase: str
+    posicion: str | None
+    asentamiento_incompleto: bool | None
     lecturas: dict[int, Lectura]
 
     @property
@@ -98,7 +106,7 @@ def flotante(texto: str) -> float | None:
     return None if not texto else float(texto)
 
 
-def cargar_csv(ruta: Path) -> list[Lectura]:
+def cargar_csv(ruta: Path) -> tuple[list[Lectura], set[str]]:
     filas: list[Lectura] = []
     with ruta.open(newline="", encoding="utf-8-sig") as archivo:
         lector = csv.DictReader(archivo)
@@ -107,7 +115,8 @@ def cargar_csv(ruta: Path) -> list[Lectura]:
             "tap", "media_banco_uv", "pp_banco_uv", "ok", "valido",
             "clavado", "real_mv_vs_vref",
         }
-        faltantes = esperadas - set(lector.fieldnames or ())
+        columnas = set(lector.fieldnames or ())
+        faltantes = esperadas - columnas
         if faltantes:
             raise ValueError("faltan columnas: " + ", ".join(sorted(faltantes)))
         for linea, fila in enumerate(lector, start=2):
@@ -119,6 +128,11 @@ def cargar_csv(ruta: Path) -> list[Lectura]:
                 idac1=int(fila["idac1"]),
                 idac2=int(fila["idac2"]),
                 fase=fila["fase"].strip(),
+                posicion=(fila["posicion"].strip() if "posicion" in columnas else None),
+                asentamiento_incompleto=(
+                    booleano(fila["asentamiento_incompleto"])
+                    if "asentamiento_incompleto" in columnas else None
+                ),
                 ch=int(fila["ch"]),
                 tap=fila["tap"].strip(),
                 media_uv=flotante(fila["media_banco_uv"]),
@@ -140,14 +154,17 @@ def cargar_csv(ruta: Path) -> list[Lectura]:
             filas.append(lectura)
     if not filas:
         raise ValueError("el CSV no contiene filas de datos")
-    return filas
+    return filas, columnas
 
 
 def agrupar_capturas(filas: Sequence[Lectura]) -> list[Captura]:
-    grupos: dict[tuple[int, int, int, str], dict[int, Lectura]] = {}
-    orden: list[tuple[int, int, int, str]] = []
+    grupos: dict[tuple[int, int, int, int, str, str | None,
+                       bool | None], dict[int, Lectura]] = {}
+    orden: list[tuple[int, int, int, int, str, str | None, bool | None]] = []
     for lectura in filas:
-        clave = (lectura.pasada, lectura.idac1, lectura.idac2, lectura.fase)
+        clave = (lectura.pasada, lectura.idac0, lectura.idac1, lectura.idac2,
+                 lectura.fase, lectura.posicion,
+                 lectura.asentamiento_incompleto)
         if clave not in grupos:
             grupos[clave] = {}
             orden.append(clave)
@@ -307,8 +324,170 @@ def captura_malla(capturas: Sequence[Captura], pasada: int,
                  c.pasada == pasada and c.idac1 == idac1 and c.idac2 == idac2), None)
 
 
+@dataclass(frozen=True)
+class BloqueABBA:
+    fase: str
+    pasada: int
+    idac1: int
+    delta: float
+    capturas: tuple[Captura, Captura, Captura, Captura]
+
+    @property
+    def asentamiento_incompleto(self) -> bool:
+        return any(c.asentamiento_incompleto is True for c in self.capturas)
+
+
+def reconstruir_bloques_abba(capturas: Sequence[Captura], fase: str) -> list[BloqueABBA]:
+    """Reconstruye del orden CSV el delta que el runner no guarda como columna."""
+    candidatas = [c for c in capturas if c.fase == fase]
+    bloques: list[BloqueABBA] = []
+    indice = 0
+    while indice + 3 < len(candidatas):
+        grupo = candidatas[indice:indice + 4]
+        if tuple(c.posicion for c in grupo) != POSICIONES_ABBA:
+            indice += 1
+            continue
+        if len({(c.pasada, c.idac1) for c in grupo}) != 1:
+            indice += 1
+            continue
+        codigos = ([c.idac0 for c in grupo] if fase == "abba_idac0"
+                   else [c.idac2 for c in grupo])
+        if codigos[0] != codigos[3] or codigos[1] != codigos[2]:
+            indice += 1
+            continue
+        delta = abs(codigos[1] - codigos[0]) / 2.0
+        if delta <= 0.0:
+            indice += 1
+            continue
+        bloques.append(BloqueABBA(
+            fase=fase, pasada=grupo[0].pasada, idac1=grupo[0].idac1,
+            delta=delta, capturas=(grupo[0], grupo[1], grupo[2], grupo[3]),
+        ))
+        indice += 4
+    return bloques
+
+
+def pendiente_abba(bloque: BloqueABBA, ch: int) -> dict[str, object]:
+    lecturas = [captura.lecturas.get(ch) for captura in bloque.capturas]
+    completas = all(
+        lectura is not None and lectura.ok and lectura.valido and
+        lectura.real_mv_vs_vref is not None
+        for lectura in lecturas
+    )
+    todas_clavadas = completas and all(
+        lectura is not None and lectura.esta_clavado for lectura in lecturas
+    )
+    pendiente: float | None = None
+    if completas:
+        valores = [float(lectura.real_mv_vs_vref) for lectura in lecturas
+                   if lectura is not None and lectura.real_mv_vs_vref is not None]
+        pendiente = ((statistics.mean((valores[1], valores[2])) -
+                      statistics.mean((valores[0], valores[3]))) /
+                     (2.0 * bloque.delta))
+    motivos: list[str] = []
+    if not completas:
+        motivos.append("faltan cuatro lecturas válidas")
+    if todas_clavadas:
+        motivos.append("4/4 posiciones clavadas")
+    if bloque.asentamiento_incompleto:
+        motivos.append("asentamiento incompleto")
+    limpia = pendiente if not motivos else None
+    return {
+        "pendiente": pendiente,
+        "limpia": limpia,
+        "todas_clavadas": todas_clavadas,
+        "asentamiento_incompleto": bloque.asentamiento_incompleto,
+        "estado": "limpia" if not motivos else "; ".join(motivos),
+        "lecturas": [lectura for lectura in lecturas if lectura is not None],
+    }
+
+
+def mediana_no_nula(valores: Iterable[float | None]) -> float | None:
+    presentes = [valor for valor in valores if valor is not None]
+    return statistics.median(presentes) if presentes else None
+
+
+def lectura_util(lectura: Lectura | None, exigir_viva: bool) -> bool:
+    if (lectura is None or not lectura.ok or not lectura.valido or
+            lectura.real_mv_vs_vref is None):
+        return False
+    return not exigir_viva or not lectura.esta_clavado
+
+
+def derivada_malla_local(malla: Sequence[Captura], pasada: int, idac1: int,
+                         exigir_limpia: bool) -> dict[str, object]:
+    """Deriva IDAC1 localmente, conservando iguales filas para ch1 y ch2."""
+    presentes = sorted({c.idac1 for c in malla if c.pasada == pasada})
+    if idac1 not in presentes or len(presentes) < 2:
+        return {"ch1": None, "ch2": None, "b": None, "n": 0}
+    posicion = presentes.index(idac1)
+    if posicion == 0:
+        extremos = (presentes[0], presentes[1])
+    elif posicion == len(presentes) - 1:
+        extremos = (presentes[-2], presentes[-1])
+    else:
+        extremos = (presentes[posicion - 1], presentes[posicion + 1])
+    pendientes_ch1: list[float] = []
+    pendientes_ch2: list[float] = []
+    usadas: list[Lectura] = []
+    for idac2 in sorted({c.idac2 for c in malla if c.pasada == pasada}):
+        a = captura_malla(malla, pasada, extremos[0], idac2)
+        b = captura_malla(malla, pasada, extremos[1], idac2)
+        if a is None or b is None:
+            continue
+        if exigir_limpia and (a.asentamiento_incompleto or b.asentamiento_incompleto):
+            continue
+        lecturas = (a.lecturas.get(1), b.lecturas.get(1),
+                    a.lecturas.get(2), b.lecturas.get(2))
+        if not all(lectura_util(l, exigir_limpia) for l in lecturas):
+            continue
+        dx = float(extremos[1] - extremos[0])
+        ch1a, ch1b, ch2a, ch2b = lecturas
+        pendientes_ch1.append(
+            (float(ch1b.real_mv_vs_vref) - float(ch1a.real_mv_vs_vref)) / dx)  # type: ignore[union-attr]
+        pendientes_ch2.append(
+            (float(ch2b.real_mv_vs_vref) - float(ch2a.real_mv_vs_vref)) / dx)  # type: ignore[union-attr]
+        usadas.extend(l for l in lecturas if l is not None)
+    p1 = mediana_no_nula(pendientes_ch1)
+    p2 = mediana_no_nula(pendientes_ch2)
+    cociente = p2 / p1 if p1 is not None and p2 is not None and abs(p1) > 1e-12 else None
+    return {"ch1": p1, "ch2": p2, "b": cociente, "n": len(pendientes_ch1),
+            "extremos": extremos, "lecturas": usadas}
+
+
+def dispersion(valores: Sequence[float]) -> tuple[float, float, float, float] | None:
+    if not valores:
+        return None
+    mediana = statistics.median(valores)
+    mad = statistics.median(abs(v - mediana) for v in valores)
+    return mediana, mad, min(valores), max(valores)
+
+
+def calcular_k_bloque(capturas: Sequence[Captura], pasada: int, idac1: int,
+                      a: float | None, b: float | None, n: float | None,
+                      paso_nodo: float | None, exigir_limpia: bool) -> tuple[float | None, int]:
+    if any(valor is None for valor in (a, b, n, paso_nodo)):
+        return None, 0
+    valores: list[float] = []
+    for captura in capturas:
+        if (captura.pasada != pasada or captura.idac1 != idac1 or
+                captura.fase not in {"referencia", "malla", "fino", "abba"}):
+            continue
+        if exigir_limpia and captura.asentamiento_incompleto:
+            continue
+        lecturas = [captura.lecturas.get(ch) for ch in (0, 1, 2)]
+        if not all(lectura_util(l, exigir_limpia) for l in lecturas):
+            continue
+        s, p, salida = (float(l.real_mv_vs_vref) for l in lecturas
+                        if l is not None and l.real_mv_vs_vref is not None)
+        v2 = float(paso_nodo) * captura.idac2
+        valores.append(salida - (float(n) * v2 - float(a) * s - float(b) * p))
+    return (statistics.mean(valores), len(valores)) if valores else (None, 0)
+
+
 def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura],
-                    metadatos: dict[str, object] | None) -> str:
+                    metadatos: dict[str, object] | None,
+                    columnas: set[str]) -> str:
     informe: list[str] = [
         "# Resultados del mapa parcial del sumador — 2026-09-10",
         "",
@@ -322,6 +501,8 @@ def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura
 
     malla = [c for c in capturas if c.fase == "malla"]
     finos = [c for c in capturas if c.fase == "fino"]
+    abbas = [c for c in capturas if c.fase == "abba"]
+    abbas_idac0 = [c for c in capturas if c.fase == "abba_idac0"]
     referencias = [c for c in capturas if c.fase == "referencia"]
     celdas_malla_completas = [c for c in malla if c.completa]
     total_malla = len(PASADAS_PLANEADAS) * len(IDAC1_PLANEADOS) * len(IDAC2_MALLA)
@@ -345,7 +526,8 @@ def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura
         ["Capturas completas de cinco canales", f"{sum(c.completa for c in capturas)} de {len(capturas)} registradas"],
         ["Celdas de malla gruesa", f"{len(celdas_malla_completas)} de {total_malla} planeadas ({fmt(proporcion, 1)} %)"],
         ["Bloques IDAC1 completos", f"{bloques_completos} de {len(PASADAS_PLANEADAS) * len(IDAC1_PLANEADOS)}"],
-        ["Capturas adicionales", f"{len(referencias)} de referencia y {len(finos)} del tramo fino"],
+        ["Capturas adicionales", f"{len(referencias)} de referencia, {len(finos)} del tramo fino, "
+         f"{len(abbas)} ABBA de IDAC2 y {len(abbas_idac0)} ABBA de IDAC0"],
         ["Pasadas con filas", ", ".join(str(p) for p in pasadas_presentes)],
         ["Tiempo hasta la última fila", f"t_s={fmt(t_max, 3)} s ({duracion(t_max)})"],
         ["Intervalo cubierto por filas", f"{fmt(t_max - t_min, 3)} s ({duracion(t_max - t_min)})"],
@@ -399,7 +581,7 @@ def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura
     informe.extend(["", "## 3. La diagonal de soluciones", ""])
     informe.append(
         "Se buscó, por pasada e IDAC1, el menor `abs(real_mv_vs_vref)` de ch4 entre "
-        "capturas `malla` y `fino` donde ch4 es válido y no está clavado. No se incluyó "
+        "capturas `malla`, `fino` y `abba` donde ch4 es válido y no está clavado. No se incluyó "
         "la captura `referencia`."
     )
     diagonal: list[tuple[int, int, Captura, Lectura]] = []
@@ -409,7 +591,7 @@ def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura
             candidatos: list[tuple[float, float, Captura, Lectura]] = []
             for captura in capturas:
                 if (captura.pasada == pasada and captura.idac1 == idac1_actual and
-                        captura.fase in {"malla", "fino"}):
+                        captura.fase in {"malla", "fino", "abba"}):
                     ch4 = captura.lecturas.get(4)
                     if ch4 is not None and ch4.vivo and ch4.real_mv_vs_vref is not None:
                         candidatos.append((abs(ch4.real_mv_vs_vref), ch4.t_s, captura, ch4))
@@ -527,54 +709,381 @@ def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura
         "el signo indica hacia qué lado se desplaza."
     )
 
-    informe.extend(["", "## 5. Ajuste del modelo", ""])
+    informe.extend(["", "## 5. Coeficientes físicos obtenidos con ABBA", ""])
+    bloques_idac0 = reconstruir_bloques_abba(capturas, "abba_idac0")
+    bloques_idac2 = reconstruir_bloques_abba(capturas, "abba")
+    resultados_idac0: list[tuple[BloqueABBA, dict[str, object],
+                                  dict[str, object]]] = []
+    filas_idac0: list[list[str]] = []
+    for bloque in bloques_idac0:
+        r0 = pendiente_abba(bloque, 0)
+        r2 = pendiente_abba(bloque, 2)
+        resultados_idac0.append((bloque, r0, r2))
+        p0 = r0["pendiente"]
+        p2 = r2["pendiente"]
+        a_delta = (float(p2) / float(p0)
+                   if p0 is not None and p2 is not None and abs(float(p0)) > 1e-12
+                   else None)
+        estado = "; ".join(sorted({str(r0["estado"]), str(r2["estado"])}))
+        filas_idac0.append([
+            fmt(bloque.delta, 0), fmt(p0, 4, True), fmt(p2, 4, True),
+            fmt(a_delta, 5, True), estado,
+            lineas_csv([l for l in r0["lecturas"] + r2["lecturas"]  # type: ignore[operator]
+                        if isinstance(l, Lectura)]),
+        ])
+    if filas_idac0:
+        informe.append("Brazo `abba_idac0`; pendientes físicas por delta:")
+        informe.append("")
+        informe.extend(tabla_markdown(
+            ["Delta", "d(ch0)/d(IDAC0) (mV/cód.)",
+             "d(ch2)/d(IDAC0) (mV/cód.)", "a por delta", "Estado", "Filas CSV"],
+            filas_idac0,
+        ))
+    else:
+        informe.append(
+            "El CSV no contiene la fase `abba_idac0`; a no puede obtenerse por el método nuevo."
+        )
+
+    p0_limpia = mediana_no_nula(float(r0["limpia"]) if r0["limpia"] is not None else None
+                                for _, r0, _ in resultados_idac0)
+    p2_limpia = mediana_no_nula(float(r2["limpia"]) if r2["limpia"] is not None else None
+                                for _, _, r2 in resultados_idac0)
+    a_limpia = (p2_limpia / p0_limpia
+                if p0_limpia is not None and p2_limpia is not None and
+                abs(p0_limpia) > 1e-12 else None)
+    p0_bruta = mediana_no_nula(float(r0["pendiente"])
+                               if r0["pendiente"] is not None else None
+                               for _, r0, _ in resultados_idac0)
+    p2_bruta = mediana_no_nula(float(r2["pendiente"])
+                               if r2["pendiente"] is not None else None
+                               for _, _, r2 in resultados_idac0)
+    a_bruta = (p2_bruta / p0_bruta
+               if p0_bruta is not None and p2_bruta is not None and abs(p0_bruta) > 1e-12
+               else None)
+    if resultados_idac0:
+        informe.append("")
+        informe.append(
+            f"Medianas limpias: d(ch0)/d(IDAC0)={fmt(p0_limpia, 4, True)} mV/código, "
+            f"d(ch2)/d(IDAC0)={fmt(p2_limpia, 4, True)} mV/código; "
+            f"a={fmt(a_limpia, 5, True)}."
+        )
+
+    resultados_abba: dict[tuple[int, int], dict[str, object]] = {}
+    filas_abba: list[list[str]] = []
+    clavadas_por_canal = {0: 0, 2: 0, 4: 0}
+    for bloque in bloques_idac2:
+        r2 = pendiente_abba(bloque, 2)
+        r4 = pendiente_abba(bloque, 4)
+        if r2["todas_clavadas"]:
+            clavadas_por_canal[2] += 1
+        if r4["todas_clavadas"]:
+            clavadas_por_canal[4] += 1
+        clave = (bloque.pasada, bloque.idac1)
+        grupo = resultados_abba.setdefault(clave, {"ch2": [], "ch4": [], "bloques": []})
+        grupo["ch2"].append(r2)  # type: ignore[union-attr]
+        grupo["ch4"].append(r4)  # type: ignore[union-attr]
+        grupo["bloques"].append(bloque)  # type: ignore[union-attr]
+        filas_abba.append([
+            str(bloque.pasada), fmt_entero(bloque.idac1, True), fmt(bloque.delta, 0),
+            fmt(r2["pendiente"], 4, True), str(r2["estado"]),
+            fmt(r4["pendiente"], 4, True), str(r4["estado"]),
+        ])
+    if filas_abba:
+        informe.extend(["", "Pendientes `abba` de IDAC2 por delta:", ""])
+        informe.extend(tabla_markdown(
+            ["Pasada", "IDAC1", "Delta", "d(ch2)/d(IDAC2) (mV/cód.)",
+             "Estado ch2", "d(ch4)/d(IDAC2) (mV/cód.)", "Estado ch4"],
+            filas_abba,
+        ))
+        informe.append("")
+        informe.append(
+            f"Cuartetos excluidos por tener A1/B1/B2/A2 clavados: "
+            f"en `abba`, ch2={clavadas_por_canal[2]} y ch4={clavadas_por_canal[4]}; "
+            f"en `abba_idac0`, ch0={sum(bool(r0['todas_clavadas']) for _, r0, _ in resultados_idac0)} "
+            f"y ch2={sum(bool(r2['todas_clavadas']) for _, _, r2 in resultados_idac0)}. Se muestran "
+            "para auditoría, pero sus pendientes no entran en las medianas limpias."
+        )
+    elif "posicion" in columnas:
+        informe.append("El formato admite ABBA, pero no hay cuartetos `abba` completos.")
+
+    if "asentamiento_incompleto" in columnas:
+        bloques_presentes = sorted({(c.pasada, c.idac1) for c in capturas
+                                    if c.pasada in PASADAS_PLANEADAS and
+                                    c.fase in {"referencia", "malla", "fino", "abba"}})
+        bloques_sin_asentar = sorted({(c.pasada, c.idac1) for c in capturas
+                                      if c.pasada in PASADAS_PLANEADAS and
+                                      c.asentamiento_incompleto is True})
+        lista_asentamiento = ", ".join(
+            f"P{p}/IDAC1={fmt_entero(i1, True)}" for p, i1 in bloques_sin_asentar
+        ) or "ninguno"
+        informe.extend(["", "### Calidad del asentamiento", ""])
+        informe.append(
+            f"{len(bloques_sin_asentar)} de {len(bloques_presentes)} bloques de IDAC1 "
+            f"llegaron al techo sin verificar estabilidad: {lista_asentamiento}. "
+            "Sus pendientes quedan marcadas y fuera del resumen limpio."
+        )
+    else:
+        informe.extend(["", "### Calidad del asentamiento", ""])
+        informe.append(
+            "No evaluable: el CSV tiene el formato antiguo y no contiene la columna "
+            "`asentamiento_incompleto`."
+        )
+
+    if finos and bloques_idac2:
+        informe.extend(["", "### ABBA frente al barrido monótono", ""])
+        filas_comparacion: list[list[str]] = []
+        for clave in sorted(resultados_abba):
+            pasada, idac1_actual = clave
+            grupo_fino = [c for c in finos if c.pasada == pasada and c.idac1 == idac1_actual]
+            if not grupo_fino:
+                continue
+            datos_abba = resultados_abba[clave]
+            pendientes_abba_limpias = [r["limpia"] for r in datos_abba["ch2"]  # type: ignore[index]
+                                       if r["limpia"] is not None]
+            p_abba = mediana_no_nula(float(p) for p in pendientes_abba_limpias)
+            lecturas_fino = [c.lecturas.get(2) for c in grupo_fino]
+            lecturas_fino = [l for l in lecturas_fino if lectura_util(l, True)]
+            ajuste_fino = regresion_lineal([
+                (float(l.idac2), float(l.real_mv_vs_vref)) for l in lecturas_fino
+                if l is not None and l.real_mv_vs_vref is not None
+            ])
+            filas_comparacion.append([
+                str(pasada), fmt_entero(idac1_actual, True),
+                fmt(ajuste_fino["pendiente"] if ajuste_fino else None, 4, True),
+                fmt(p_abba, 4, True),
+                ("no comparable" if ajuste_fino is None or p_abba is None else
+                 ("mismo signo" if float(ajuste_fino["pendiente"]) * p_abba >= 0
+                  else "signo opuesto")),
+            ])
+        informe.extend(tabla_markdown(
+            ["Pasada", "IDAC1", "fino monótono ch2 (mV/cód.)",
+             "ABBA ch2 mediana (mV/cód.)", "Comparación"], filas_comparacion,
+        ))
+        informe.append(
+            "La comparación usa exactamente el mismo bloque pasada/IDAC1. Un cambio de signo "
+            "del monótono frente a ABBA es evidencia de deriva durante el orden temporal del barrido."
+        )
+
+    filas_b_malla: list[list[str]] = []
+    datos_b_limpios: dict[tuple[int, int], dict[str, object]] = {}
+    datos_b_brutos: dict[tuple[int, int], dict[str, object]] = {}
+    for clave in sorted(resultados_abba):
+        limpio = derivada_malla_local(malla, clave[0], clave[1], True)
+        bruto = derivada_malla_local(malla, clave[0], clave[1], False)
+        datos_b_limpios[clave] = limpio
+        datos_b_brutos[clave] = bruto
+        filas_b_malla.append([
+            str(clave[0]), fmt_entero(clave[1], True),
+            fmt(limpio["ch1"], 4, True), fmt(limpio["ch2"], 4, True),
+            fmt(limpio["b"], 5, True), str(limpio["n"]),
+        ])
+    if filas_b_malla:
+        informe.extend(["", "Derivadas locales de la malla usadas para b:", ""])
+        informe.extend(tabla_markdown(
+            ["Pasada", "IDAC1", "d(ch1)/d(IDAC1)", "d(ch2)/d(IDAC1)",
+             "b = d(ch2)/d(ch1)", "Pares IDAC2"], filas_b_malla,
+        ))
+
+    if resultados_abba:
+        filas_medianas_abba: list[list[str]] = []
+        for clave, datos in sorted(resultados_abba.items()):
+            limpias_ch2 = mediana_no_nula(
+                float(r["limpia"]) if r["limpia"] is not None else None
+                for r in datos["ch2"]  # type: ignore[index]
+            )
+            limpias_ch4 = mediana_no_nula(
+                float(r["limpia"]) if r["limpia"] is not None else None
+                for r in datos["ch4"]  # type: ignore[index]
+            )
+            brutas_ch2 = mediana_no_nula(
+                float(r["pendiente"]) if r["pendiente"] is not None else None
+                for r in datos["ch2"]  # type: ignore[index]
+            )
+            brutas_ch4 = mediana_no_nula(
+                float(r["pendiente"]) if r["pendiente"] is not None else None
+                for r in datos["ch4"]  # type: ignore[index]
+            )
+            filas_medianas_abba.append([
+                str(clave[0]), fmt_entero(clave[1], True),
+                fmt(limpias_ch2, 4, True), fmt(limpias_ch4, 4, True),
+                fmt(brutas_ch2, 4, True), fmt(brutas_ch4, 4, True),
+            ])
+        informe.extend(["", "Medianas ABBA por bloque de IDAC1:", ""])
+        informe.extend(tabla_markdown(
+            ["Pasada", "IDAC1", "ch2 limpia (mV/cód.)", "ch4 limpia (mV/cód.)",
+             "ch2 sin filtro", "ch4 sin filtro"], filas_medianas_abba,
+        ))
+
+    def construir_coeficientes(a: float | None, limpios: bool) -> list[dict[str, object]]:
+        coeficientes: list[dict[str, object]] = []
+        for clave, datos_abba in sorted(resultados_abba.items()):
+            resultados_ch2 = datos_abba["ch2"]  # type: ignore[index]
+            pendientes = [r["limpia" if limpios else "pendiente"] for r in resultados_ch2
+                           if r["limpia" if limpios else "pendiente"] is not None]
+            d_ch2 = mediana_no_nula(float(p) for p in pendientes)
+            dato_b = (datos_b_limpios if limpios else datos_b_brutos).get(clave, {})
+            b = dato_b.get("b")
+            b = float(b) if b is not None else None
+            n = 1.0 + a + b if a is not None and b is not None else None
+            paso = (d_ch2 / n if d_ch2 is not None and n is not None and abs(n) > 1e-12
+                    else None)
+            resistencia = (paso / CORRIENTE_IDAC_UA_POR_CODIGO * 1000.0
+                            if paso is not None else None)
+            k, n_k = calcular_k_bloque(capturas, clave[0], clave[1], a, b, n, paso,
+                                       limpios)
+            coeficientes.append({
+                "clave": clave, "a": a, "b": b, "n": n, "paso": paso,
+                "R": resistencia, "K": k, "n_k": n_k, "d_ch2": d_ch2,
+            })
+        return coeficientes
+
+    coeficientes_limpios = construir_coeficientes(a_limpia, True)
+    coeficientes_brutos = construir_coeficientes(a_bruta, False)
+
+    def agregar_tabla_resumen(titulo: str, coeficientes: Sequence[dict[str, object]],
+                              a: float | None, diagnostica: bool = False) -> None:
+        informe.extend(["", titulo, ""])
+        especificaciones = (
+            ("a", "ganancia del sumador desde SEo", "a", 5, ""),
+            ("b", "ganancia del sumador desde BPo", "b", 5, ""),
+            ("n = 1 + a + b", "ganancia no inversora", "n", 5, ""),
+            ("paso_nodo", "d(ch2)/d(IDAC2) / n", "paso", 5, "mV/código"),
+            ("R", "paso_nodo / 0,125 µA", "R", 1, "Ω"),
+            ("K", "media de ch2 − (n·v2 − a·s − b·p)", "K", 2, "mV"),
+        )
+        filas_resumen: list[list[str]] = []
+        for nombre, descripcion, campo, decimales, unidad in especificaciones:
+            if campo == "a":
+                filas_resumen.append([
+                    nombre, descripcion, fmt(a, decimales, True), unidad,
+                    "no identificable: un solo brazo IDAC0", "1" if a is not None else "0",
+                ])
+                continue
+            valores = [float(c[campo]) for c in coeficientes if c[campo] is not None]
+            disp = dispersion(valores)
+            if disp is None:
+                filas_resumen.append([nombre, descripcion, "—", unidad, "—", "0"])
+            else:
+                mediana, mad, minimo, maximo = disp
+                filas_resumen.append([
+                    nombre, descripcion, fmt(mediana, decimales, True), unidad,
+                    f"MAD {fmt(mad, decimales)}; {fmt(minimo, decimales, True)}…"
+                    f"{fmt(maximo, decimales, True)}", str(len(valores)),
+                ])
+        informe.extend(tabla_markdown(
+            ["Coeficiente", "Significado", "Mediana", "Unidad",
+             "Dispersión entre bloques IDAC1", "N bloques"], filas_resumen,
+        ))
+        valores_por_campo = {
+            campo: [float(c[campo]) for c in coeficientes if c[campo] is not None]
+            for campo in ("b", "n", "paso", "R", "K")
+        }
+        cambiantes: list[str] = []
+        for campo, valores in valores_por_campo.items():
+            disp = dispersion(valores)
+            if disp is None or len(valores) < 2:
+                continue
+            mediana, _, minimo, maximo = disp
+            umbral = max(20.0 if campo == "K" else 0.0, 0.10 * abs(mediana))
+            if maximo - minimo > umbral:
+                cambiantes.append(campo)
+        if cambiantes:
+            informe.append("")
+            informe.append(
+                "Cambian mucho entre bloques (rango mayor que 10 % de la mediana"
+                ", y al menos 20 mV para K): " + ", ".join(cambiantes) +
+                ". La región no es lineal y un único juego de coeficientes no vale."
+            )
+        elif any(valores_por_campo.values()):
+            informe.append("")
+            informe.append(
+                "Ningún coeficiente evaluable supera el criterio descriptivo de cambio grande "
+                "entre bloques (rango > 10 %; para K, además un piso de 20 mV)."
+            )
+        if diagnostica:
+            informe.append("")
+            informe.append(
+                "Esta tabla sólo demuestra la cadena de cálculo: incluye cuartetos clavados o "
+                "bloques sin asentamiento y no debe citarse como medición limpia."
+            )
+
+    agregar_tabla_resumen("### Tabla final — sólo pendientes limpias",
+                          coeficientes_limpios, a_limpia)
+    if not any(c["R"] is not None for c in coeficientes_limpios) and coeficientes_brutos:
+        agregar_tabla_resumen("### Cadena diagnóstica sin filtros", coeficientes_brutos,
+                              a_bruta, True)
+
+    resistencias_limpias = [float(c["R"]) for c in coeficientes_limpios if c["R"] is not None]
+    resistencias_contraste = resistencias_limpias or [
+        float(c["R"]) for c in coeficientes_brutos if c["R"] is not None
+    ]
+    if resistencias_contraste:
+        r_mediana = statistics.median(resistencias_contraste)
+        diferencia_r = abs(r_mediana) - R_OSCILOSCOPIO_OHM
+        etiqueta = "limpia" if resistencias_limpias else "diagnóstica sin filtros"
+        informe.append("")
+        informe.append(
+            f"Contraste con osciloscopio: R ({etiqueta})={fmt(r_mediana, 1, True)} Ω; su módulo "
+            f"se compara con 3294,0 Ω (105 mV/255 códigos y 0,125 µA/código): diferencia "
+            f"{fmt(diferencia_r, 1, True)} Ω ({fmt(100.0 * diferencia_r / R_OSCILOSCOPIO_OHM, 1, True)} %)."
+        )
+    else:
+        informe.append("")
+        informe.append("No hay una R evaluable para contrastar con los 3294 Ω del osciloscopio.")
+
+    informe.extend(["", "## 6. Ajuste del modelo", ""])
     informe.append(
-        "Se ajustó `salida = A·IDAC2 + B·IDAC1 + C·ch0 + K` únicamente con capturas de "
-        "la malla gruesa. La salida y ch0 están en mV físicos respecto de Vref. Para cada "
-        "salida se exigió que esa salida y ch0 fueran válidos y vivos."
+        "Se ajustó `salida = A·IDAC2 + B·IDAC1 + C·ch0 + K`. El ajuste principal usa "
+        "todas las fases registradas; se muestra además la malla gruesa sola para que la "
+        "concentración de puntos finos no oculte el resultado del muestreo espaciado. La salida "
+        "y ch0 están en mV físicos respecto de Vref. Para cada salida se exigió que esa salida "
+        "y ch0 fueran válidos y vivos."
     )
     filas_modelo: list[list[str]] = []
-    ajustes_modelo: dict[int, tuple[dict[str, object], list[Lectura]]] = {}
-    for salida in (2, 4):
-        muestras: list[tuple[float, float, float, float]] = []
-        usadas: list[Lectura] = []
-        for captura in malla:
-            ch0 = captura.lecturas.get(0)
-            y = captura.lecturas.get(salida)
-            if (ch0 is None or y is None or not ch0.vivo or not y.vivo or
-                    ch0.real_mv_vs_vref is None or y.real_mv_vs_vref is None):
+    ajustes_modelo: dict[tuple[int, str], tuple[dict[str, object], list[Lectura]]] = {}
+    dominios = (("todas", capturas), ("malla", malla))
+    for nombre_dominio, capturas_dominio in dominios:
+        for salida in (2, 4):
+            muestras: list[tuple[float, float, float, float]] = []
+            usadas: list[Lectura] = []
+            for captura in capturas_dominio:
+                ch0 = captura.lecturas.get(0)
+                y = captura.lecturas.get(salida)
+                if (ch0 is None or y is None or not ch0.vivo or not y.vivo or
+                        ch0.real_mv_vs_vref is None or y.real_mv_vs_vref is None):
+                    continue
+                muestras.append((float(captura.idac2), float(captura.idac1),
+                                 ch0.real_mv_vs_vref, y.real_mv_vs_vref))
+                usadas.append(y)
+            ajuste = minimos_cuadrados(muestras)
+            ajustes_modelo[(salida, nombre_dominio)] = (ajuste, usadas)
+            if not bool(ajuste["disponible"]):
+                filas_modelo.append([
+                    nombre_dominio, f"ch{salida}", str(ajuste["n"]), "—", "—", "—", "—", "—", "—", "—"
+                ])
                 continue
-            muestras.append((float(captura.idac2), float(captura.idac1),
-                             ch0.real_mv_vs_vref, y.real_mv_vs_vref))
-            usadas.append(y)
-        ajuste = minimos_cuadrados(muestras)
-        ajustes_modelo[salida] = (ajuste, usadas)
-        if not bool(ajuste["disponible"]):
+            diferencia_a = float(ajuste["A"]) - A_PREVIO_MV_POR_CODIGO
             filas_modelo.append([
-                f"ch{salida}", str(ajuste["n"]), "—", "—", "—", "—", "—", "—", "—"
+                nombre_dominio, f"ch{salida}", str(ajuste["n"]), fmt(ajuste["A"], 4, True),
+                fmt(ajuste["B"], 4, True), fmt(ajuste["C"], 4, True),
+                fmt(ajuste["K"], 1, True), fmt(ajuste["rms"], 2),
+                fmt(diferencia_a, 4, True), lineas_csv(usadas),
             ])
-            continue
-        diferencia_a = float(ajuste["A"]) - A_PREVIO_MV_POR_CODIGO
-        filas_modelo.append([
-            f"ch{salida}", str(ajuste["n"]), fmt(ajuste["A"], 4, True),
-            fmt(ajuste["B"], 4, True), fmt(ajuste["C"], 4, True),
-            fmt(ajuste["K"], 1, True), fmt(ajuste["rms"], 2),
-            fmt(diferencia_a, 4, True), lineas_csv(usadas),
-        ])
     informe.extend(tabla_markdown(
-        ["Salida", "N", "A (mV/cód. IDAC2)", "B (mV/cód. IDAC1)",
+        ["Datos", "Salida", "N", "A (mV/cód. IDAC2)", "B (mV/cód. IDAC1)",
          "C (mV/mV ch0)", "K (mV)", "RMS (mV)", "A−9,56", "Filas de salida"],
         filas_modelo,
     ))
     informe.append("")
-    ajuste_ch2 = ajustes_modelo[2][0]
+    ajuste_ch2 = ajustes_modelo[(2, "todas")][0]
     if bool(ajuste_ch2["disponible"]):
         informe.append(
-            f"Para ch2, A cambia {fmt(float(ajuste_ch2['A']) - A_PREVIO_MV_POR_CODIGO, 4, True)} "
-            f"mV/código respecto de +9,56 mV/código. El RMS previo era {fmt(RMS_PREVIO_MV, 1)} mV."
+            f"En el ajuste principal de ch2, A cambia "
+            f"{fmt(float(ajuste_ch2['A']) - A_PREVIO_MV_POR_CODIGO, 4, True)} mV/código "
+            f"respecto de +9,56 mV/código. El RMS previo era {fmt(RMS_PREVIO_MV, 1)} mV."
         )
     for salida in (2, 4):
-        ajuste = ajustes_modelo[salida][0]
+        ajuste = ajustes_modelo[(salida, "todas")][0]
         if not bool(ajuste["disponible"]):
             informe.append(f"No se pudo ajustar ch{salida}: {ajuste['motivo']}.")
         elif float(ajuste["rms"]) > RMS_PREVIO_MV:
@@ -589,7 +1098,7 @@ def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura
                 "15,0 mV del ajuste previo."
             )
 
-    informe.extend(["", "## 6. Ganancia de la etapa LP", ""])
+    informe.extend(["", "## 7. Ganancia de la etapa LP", ""])
     # La ganancia de etapa es una derivada local. Una recta global ch4~ch2
     # mezclaría los distintos niveles de IDAC1 y sus ordenadas. Se centran x e
     # y dentro de cada tramo fino y se ajusta una pendiente común, equivalente
@@ -686,7 +1195,7 @@ def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura
                 "IDAC2 o IDAC3."
             )
 
-    informe.extend(["", "## 7. Límites físicos observados", ""])
+    informe.extend(["", "## 8. Límites físicos observados", ""])
     informe.append(
         "Los extremos siguientes son lecturas de banco. `pp` también está en unidades del banco. "
         "Una lectura bajo 880,4 mV se conserva como evidencia de fuera de rango, no como tensión física."
@@ -758,7 +1267,7 @@ def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura
         informe.append("")
         informe.append("No se observó un grupo clavado del lado alto.")
 
-    informe.extend(["", "## 8. Qué queda sin contestar", ""])
+    informe.extend(["", "## 9. Qué queda sin contestar", ""])
     pendientes_ch4_imposibles = []
     for pasada in sorted({c.pasada for c in finos}):
         for idac1_actual in IDAC1_PLANEADOS:
@@ -767,9 +1276,21 @@ def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura
             if any(c.pasada == pasada and c.idac1 == idac1_actual for c in finos) and len(grupo) < 2:
                 pendientes_ch4_imposibles.append(f"P{pasada}/IDAC1={fmt_entero(idac1_actual, True)}")
     pendientes_texto = ", ".join(pendientes_ch4_imposibles) or "ninguno"
+    pasadas_malla = {c.pasada for c in malla}
+    if set(PASADAS_PLANEADAS).issubset(pasadas_malla):
+        estado_pasadas = (
+            "- Las dos pasadas de malla están presentes; hay pares ida/vuelta para describir "
+            "histéresis dentro de las celdas que resultaron válidas."
+        )
+    else:
+        faltantes_pasada = ", ".join(str(p) for p in PASADAS_PLANEADAS
+                                     if p not in pasadas_malla)
+        estado_pasadas = (
+            f"- Faltan las pasadas de malla {faltantes_pasada}; no hay pares ida/vuelta completos "
+            "y no se infiere histéresis ni ausencia de histéresis."
+        )
     informe.extend([
-        "- La segunda pasada no corrió: no hay pares ida/vuelta y no existe dato de histéresis. "
-        "No se infiere histéresis ni ausencia de histéresis.",
+        estado_pasadas,
         "",
         f"- La malla gruesa tiene {len(celdas_malla_completas)} de {total_malla} celdas. "
         "Los IDAC1 sin sus siete celdas no permiten extender las pendientes ni la diagonal fuera del sector observado.",
@@ -780,7 +1301,7 @@ def generar_informe(ruta_csv: Path, filas: list[Lectura], capturas: list[Captura
         "- IDAC3 quedó fijo en cero. Falta medir `ch4/IDAC3` con ch4 vivo para comparar autoridad y "
         "resolución con la ruta `IDAC2 → ch2 → ch4`; por eso no se asigna el trim final con este archivo.",
         "",
-        "- Los tramos finos se centraron alrededor del mejor ch2, no del mejor ch4. La diagonal de ch4 "
+        "- Los tramos rápidos (`fino` o `abba`) se centraron alrededor del mejor ch2, no del mejor ch4. La diagonal de ch4 "
         "sólo identifica el mejor código entre los códigos efectivamente muestreados.",
     ])
     if bool(ajuste_ch2.get("disponible")) and float(ajuste_ch2["rms"]) > RMS_PREVIO_MV:
@@ -820,10 +1341,10 @@ def main() -> int:
     ruta_csv = args.csv.resolve()
     if not ruta_csv.is_file():
         parser.error(f"no existe el CSV: {ruta_csv}")
-    filas = cargar_csv(ruta_csv)
+    filas, columnas = cargar_csv(ruta_csv)
     capturas = agrupar_capturas(filas)
     metadatos = cargar_json_adyacente(ruta_csv)
-    contenido = generar_informe(ruta_csv, filas, capturas, metadatos)
+    contenido = generar_informe(ruta_csv, filas, capturas, metadatos, columnas)
     args.salida.parent.mkdir(parents=True, exist_ok=True)
     args.salida.write_text(contenido, encoding="utf-8", newline="\n")
     print(f"Informe escrito: {args.salida.resolve()}")
