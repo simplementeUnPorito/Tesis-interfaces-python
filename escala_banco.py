@@ -90,17 +90,39 @@ BANCO_RIEL_ALTO_MEDIDO_MV = 1106.1
 PP_CLAVADO_UV = 300.0
 
 
-def clavado(pp_banco_uv: float | None) -> bool:
-    """True si el tap no tiene ruido propio, o sea si esta pegado a un riel."""
-    if pp_banco_uv is None:
+# Cuanto hay que acercarse al borde de la ventana lineal para que un tap
+# silencioso cuente como pegado. Diez milivoltios de banco son unos 200 mV
+# fisicos: lejos del centro y cerca del punto donde la lectura deja de valer.
+MARGEN_RIEL_BANCO_MV = 10.0
+
+
+def clavado(pp_banco_uv: float | None,
+            banco_mv: float | None = None) -> bool:
+    """True si el tap esta pegado contra un extremo y no se puede excitar.
+
+    La falta de ruido propio es necesaria pero NO suficiente. Medido el
+    2026-09-11 con los cuatro IDAC en cero: ch0 y ch2 quedaron en -302 mV
+    fisicos con pico a pico de 200 uV, o sea silenciosos y perfectamente
+    centrados. Pedir solo ruido bajo los daba por clavados y el calibrador se
+    negaba a identificar pendientes sobre ellos, que es justo lo que hay que
+    poder hacer ahi. Un tap pegado tiene que estar ademas contra un borde de la
+    ventana en la que la lectura del banco todavia significa algo.
+    """
+    if pp_banco_uv is None or pp_banco_uv >= PP_CLAVADO_UV:
         return False
-    return pp_banco_uv < PP_CLAVADO_UV
+    if banco_mv is None:
+        # Sin el valor no se puede decidir. Se elige no acusar: un falso
+        # negativo cuesta una identificacion ruidosa; un falso positivo bloquea
+        # la etapa entera y es el error que costo las corridas de ayer.
+        return False
+    return (banco_mv <= BANCO_MIN_VALIDO_MV + MARGEN_RIEL_BANCO_MV or
+            banco_mv >= BANCO_MAX_VALIDO_MV - MARGEN_RIEL_BANCO_MV)
 
 
 def lectura_utilizable(banco_mv: float | None,
                        pp_banco_uv: float | None) -> bool:
     """Dentro de rango Y con ruido propio. Es el criterio que hay que usar."""
-    return lectura_valida(banco_mv) and not clavado(pp_banco_uv)
+    return lectura_valida(banco_mv) and not clavado(pp_banco_uv, banco_mv)
 
 
 def a_voltios(banco_mv: float | None) -> float | None:
@@ -130,10 +152,18 @@ def pendiente_a_real(uv_por_codigo_banco: float | None) -> float | None:
 
 
 def lectura_valida(banco_mv: float | None) -> bool:
-    """False si la lectura cae fuera del rango donde el ADC tiene sentido."""
+    """False si la lectura cae fuera del rango donde el ADC tiene sentido.
+
+    El limite de arriba es el MENOR entre la ventana del ADC y el riel de salida
+    MEDIDO. Usar solo la ventana dejaba pasar lecturas por encima del riel: el
+    2026-09-11 el lazo de x16 y x24 dio por bueno un LPo de +2115 y +2142 mV,
+    cuando el riel esta en +2084, y siguio adelante creyendo haber centrado algo
+    que estaba apoyado contra el tope.
+    """
     if banco_mv is None:
         return False
-    return BANCO_MIN_VALIDO_MV <= banco_mv <= BANCO_MAX_VALIDO_MV
+    tope = min(BANCO_MAX_VALIDO_MV, BANCO_RIEL_ALTO_MEDIDO_MV)
+    return BANCO_MIN_VALIDO_MV <= banco_mv <= tope
 
 
 def describir(banco_mv: float | None) -> str:

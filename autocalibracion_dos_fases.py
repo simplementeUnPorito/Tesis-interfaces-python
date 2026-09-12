@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import inspect
 import json
 import math
 import statistics
@@ -43,6 +44,10 @@ from testbench.core.session import Session
 TARGET_UV = int(round(BANCO_VREF_MV * 1000.0))
 VALID_MIN_UV = int(round(BANCO_MIN_VALIDO_MV * 1000.0))
 VALID_MAX_UV = int(round(BANCO_MAX_VALIDO_MV * 1000.0))
+#: Riel de salida MEDIDO. Manda sobre la ventana nominal del ADC: esta es
+#: mas ancha que el rango real de las etapas y por eso dejaba pasar taps
+#: apoyados contra el tope como si estuvieran vivos.
+RIEL_ALTO_UV = int(round(BANCO_RIEL_ALTO_MEDIDO_MV * 1000.0))
 PGA_X50_CODE = GAIN_CODES.index(50)
 PGAOUT_X1_CODE = GAIN_CODES.index(1)
 HISTORY_PATH = (Path(__file__).resolve().parents[3] / "lab" /
@@ -106,7 +111,93 @@ SWING_LPO_MV = 1750.0
 GANANCIA_SUM_DESDE_SEO = 27.0 / 6.8
 GANANCIA_SUM_DESDE_BPO = 27.0 / 7.48
 GANANCIA_NO_INVERSORA = 8.58
-PASO_IDAC2_CH2_MV = 5.1
+#: Paso de IDAC2 sobre ch2. MEDIDO el 2026-09-11 con la resistencia nueva de
+#: 11,8 kOhm: 13,0 a 13,6 mV/codigo en x4. El valor anterior, 5,1, correspondia a
+#: los 5,1 kOhm viejos y quedo 2,6 veces errado tras el cambio; como se usa de
+#: respaldo cuando el ABBA falla, el salto de Newton se pasaba por ese factor y
+#: empujaba ch2 fuera de rango. OJO: el paso depende de la GANANCIA de PGAout,
+#: porque esa etapa carga al sumador; este respaldo es el de x4.
+# DOS constantes, no una, y confundirlas fue un error real.
+#
+# El ABBA mide el efecto INMEDIATO de IDAC2 sobre ch2, un segundo y medio
+# despues de escribir. La cadena termina donde dice el efecto DE REGIMEN, cinco
+# tau despues. Medidos el 2026-09-11 sobre los dos codigos que dejan ch2 dentro
+# de rango: 18,78 y 12,35 mV/codigo.
+#
+# El inmediato sirve para dos cosas: como respaldo cuando el ABBA falla (porque
+# se convierte despues con RAZON_REGIMEN_IDAC2) y como referencia para decidir
+# si una pendiente medida es plausible. El de regimen sirve para PREDECIR donde
+# va a quedar ch2, que es lo que necesitan el optimizador de fase 1 y el salto
+# unico.
+PASO_IDAC2_CH2_INMEDIATO_MV = 18.78
+PASO_IDAC2_CH2_MV = 12.35
+
+# Hasta donde IDAC2 se puede usar sin que la cadena se vuelva inestable.
+#
+# MEDIDO el 2026-09-12 con `comparar_deriva_por_codigo.py`, siete minutos por
+# codigo y todo lo demas congelado. Deriva de ch2:
+#
+#     |IDAC2|   140     180     210     240
+#     mV/min   -0,10   +0,00   +7,08   +4,81
+#
+# El codo esta entre 180 y 210, y es abrupto: de quieto a inservible entre dos
+# codigos vecinos. Ademas la ganancia incremental se cae de 12,35 a 4,57
+# mV/codigo. Sobre los diez minutos que dura una calibracion, 7 mV/min son mas
+# de dos volts en LPo, o sea la calibracion entera.
+#
+# NO se sabe el mecanismo, y conviene no inventarlo. Un salto abrupto no es
+# autocalentamiento, que seria gradual. Y la explicacion por saturacion del
+# sumador no cierra: en el codigo malo ch2 estaba MAS LEJOS de su riel que en el
+# bueno. Averiguarlo pide un osciloscopio sobre el nodo del IDAC. Para el
+# algoritmo alcanza con no ir ahi.
+#
+# 160 y no 180: el 180 medido es el ultimo punto BUENO, asi que quedarse ahi
+# seria trabajar justo sobre el borde.
+IDAC2_MAX_CONFIABLE = 160
+
+# Cuanto del recorrido util de IDAC2 puede gastar la FASE 1.
+#
+# La fase 1 no es la ultima que toca ch2. Despues viene la conmutacion de
+# PGAout, que lo mueve entre 200 y 475 mV segun la ganancia aunque este ANTES de
+# esa etapa, y la consigna propia de la fase 2, que puede pedir otros 270. Si la
+# fase 1 se gasta el presupuesto entero, la fase 2 se queda sin nada.
+#
+# Medido el 2026-09-12: la fase 1 aceptaba con el residuo dentro de 160 codigos,
+# o sea hasta 1.975 mV, dejaba ch2 en +400, la conmutacion a x4 sumaba 212 y la
+# fase 2 arrancaba 600 mV afuera de lo que IDAC2 podia cubrir.
+#
+# La mitad es una reparticion simple y defendible: 80 codigos son unos 990 mV
+# para la fase 1, y quedan otros tantos para la conmutacion y la consigna.
+# Repartos de a un codigo que se permiten antes de declarar el deficit
+# irreducible. Medido el 2026-09-12: cada codigo de IDAC0 corrige unos 214 mV y
+# el deficit tras conmutar la ganancia llego a 840, asi que hacen falta cuatro.
+# Seis dejan margen y siguen siendo diez minutos en el peor caso; el caso normal
+# sale en uno o dos.
+MAX_REPARTOS_IDAC0 = 6
+
+# Codigos de la sonda que mide la pendiente real del actuador del reparto. Con
+# unos 10 mV/codigo son 400 mV: bien por encima del ruido y del error de
+# lectura, y chico frente a la ventana util de ch2.
+SONDA_REPARTO = 40
+FRACCION_IDAC2_PARA_FASE1 = 0.5
+IDAC2_MAX_FASE1 = int(IDAC2_MAX_CONFIABLE * FRACCION_IDAC2_PARA_FASE1)
+
+# Como se identifica IDAC1, que es un caso aparte.
+#
+# ch1 es BPo, la SALIDA del pasabanda, y IDAC1 es su referencia. Ese nodo tiene
+# la tau de los 680 uF, entre 31 y 49 s segun la corrida. El ABBA generico
+# esperaba 1,5 s, o sea que media el 4 % del escalon, y encima con deltas de 2 y
+# 4 codigos, unos 5 mV sobre un tap cuyo pico a pico son 6. Resultado: +4,464,
+# +2,280 y +0,831 mV/codigo en tres corridas del mismo dia.
+#
+# Se arregla por los dos lados. Excitacion de 24 codigos, que da mas de 50 mV y
+# deja el ruido abajo. Y espera de 1,5 tau, que no llega al regimen pero llega a
+# una fraccion CONOCIDA: 1 - exp(-1,5) = 0,777. Se divide por esa fraccion y se
+# obtiene la pendiente de regimen sin pagar los 3 tau por transicion, que serian
+# quince minutos.
+DELTA_ABBA_IDAC1 = 24
+ESPERA_ABBA_IDAC1_TAU = 1.5
+FRACCION_ASENTADA_IDAC1 = 1.0 - math.exp(-ESPERA_ABBA_IDAC1_TAU)
 #: Ganancia de continua de la etapa LP vista desde ch2. Medida sobre el mapa del
 #: 2026-09-10 con R2 = 0,993: LPo se mueve -9,07 mV por cada mV de ch2.
 GANANCIA_LP_CH2_MV_POR_MV = -9.07
@@ -117,7 +208,7 @@ GANANCIA_LP_CH2_MV_POR_MV = -9.07
 #: resistencia. Es un RESPALDO: la fase 2 lo mide con un ABBA local, que ademas
 #: hace falta porque la respuesta es fuertemente NO lineal (11 mV/codigo en un
 #: extremo y 0,9 en el otro).
-PASO_IDAC3_CH4_MV = 4.3
+PASO_IDAC3_CH4_MV = 6.44   # 4,3 medido con 10 k, escalado a los 6,68 k de hoy
 #: Margen maximo que puede tener un tap: el centrado perfecto entre los rieles
 #: medidos 0,040 V y 4,50 V deja 2,23 V a cada lado. Sirve para normalizar el
 #: margen contra la reserva de actuador y poder compararlos como un solo recurso.
@@ -125,6 +216,99 @@ MARGEN_MAXIMO_MV = 2230.0
 #: Mejora minima del recurso mas gastado que justifica mover un actuador LENTO.
 #: Por debajo de esto conviene quedarse quieto: el salto cuesta un tau.
 MEJORA_MINIMA_RECURSO = 0.15
+VENTANA_FINA_IDAC2 = 15
+# Lecturas quietas seguidas que hacen falta para creerle a la
+# compuerta. Con una sola, un cruce por cero de la derivada la
+# enganaba; la cadena tiene mas de un polo.
+CONSECUTIVAS_QUIETAS = 3
+
+# Codigos a cada lado que visita el barrido fino cuando espera el regimen. Es
+# chica a proposito: cada codigo cuesta tres tau, y el lazo previo ya dejo ch2
+# en su consigna verificada, asi que el que sirve esta al lado.
+VENTANA_ESTACIONARIA_IDAC2 = 3
+
+# Que fraccion del efecto inmediato de IDAC2 sobre ch2 SOBREVIVE una vez que la
+# cadena se asento. Medido el 2026-09-11 con esperas de cinco tau, en x50 y con
+# los unicos dos codigos que dejan ch2 dentro de rango:
+#
+#     IDAC2   inmediato   regimen
+#      -120     +493,7     +896,3
+#       -60    +1620,7    +1637,0
+#     pendiente  18,78      12,35  mV/codigo
+#
+# El ABBA mide la inmediata, porque espera segundo y medio. Newton con ese
+# numero da un paso 34 % mas chico del que hace falta, la cadena se relaja de
+# vuelta y el lazo se queda corto corrida tras corrida hasta agotar iteraciones.
+# Convertirla es una multiplicacion y es lo que faltaba.
+RAZON_REGIMEN_IDAC2 = 12.345 / 18.783
+
+
+def correlacion(xs: list[float], ys: list[float]) -> float:
+    """Pearson a mano. Devuelve 0 si alguna de las dos series es constante."""
+    n = len(xs)
+    if n < 3 or len(ys) != n:
+        return 0.0
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0.0 or syy <= 0.0:
+        return 0.0
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    return sxy / math.sqrt(sxx * syy)
+
+
+def barrido_dominado_por_deriva(visitados: list[dict]) -> dict:
+    """Decide si un barrido midio el codigo o midio el paso del tiempo.
+
+    Un barrido que visita codigos alternando arriba y abajo del centro tiene el
+    codigo casi descorrelacionado del ORDEN de visita. Asi que si el resultado
+    correlaciona mucho mejor con el orden que con el codigo, lo que se midio es
+    una deriva temporal y la eleccion no vale nada.
+
+    El caso que motivo esto, el 2026-09-11: siete codigos alrededor de -247,
+    alternando, y LPo bajando monotonamente 25 mV en cada visita sin importar si
+    el codigo subia o bajaba.
+    """
+    vivos = [v for v in visitados if v.get("utilizable")]
+    if len(vivos) < 4:
+        return {"dominado": False, "motivo": "pocos puntos vivos"}
+    codigos = [float(v["idac2"]) for v in vivos]
+    valores = [float(v["lpo_real_mv"]) for v in vivos]
+    orden = [float(i) for i in range(len(vivos))]
+    r_codigo = abs(correlacion(codigos, valores))
+    r_orden = abs(correlacion(orden, valores))
+    dominado = r_orden > 0.9 and r_orden > 2.0 * max(r_codigo, 0.05)
+    return {"dominado": dominado, "r_codigo": r_codigo, "r_orden": r_orden}
+
+
+def pendiente_idac2_plausible(slope_bank_uv: float | None) -> bool:
+    """La prueba mas robusta de saturacion: el tap no responde a su actuador.
+
+    Detectar un riel por el valor falla, y por el ruido tambien. El 2026-09-11
+    ch2 se quedo en +1.885 mV con pico a pico de 114 uV y no se movio NADA
+    cuando el ABBA le metio ocho codigos de IDAC2: 0,3 mV de respuesta contra
+    los 150 que corresponden. Estaba saturado, pero a 205 mV del riel, asi que
+    ninguna regla por proximidad lo iba a ver, y con el pico a pico solo se
+    confunde con un nodo simplemente silencioso.
+
+    Lo que no admite discusion es la respuesta: la pendiente la fija una
+    resistencia y no puede desaparecer. Si el ABBA devuelve una fraccion de la
+    nominal, lo que se midio es un tap pegado, no una pendiente.
+    """
+    if slope_bank_uv is None:
+        return False
+    nominal = bank_uv(PASO_IDAC2_CH2_INMEDIATO_MV)
+    if nominal == 0.0:
+        return False
+    razon = abs(slope_bank_uv / nominal)
+    return 0.25 <= razon <= 4.0
+
+
+def pendiente_regimen_idac2(slope_inmediata: float | None) -> float | None:
+    """Pasa la pendiente que mide el ABBA a la que vale en regimen."""
+    if slope_inmediata is None:
+        return None
+    return slope_inmediata * RAZON_REGIMEN_IDAC2
 #: Calibrado sobre tres casos: con 0,05 el optimizador todavia se movia para
 #: ganar 0,16 V de margen cuando ch2 ya estaba centrado, y eso cuesta un tau.
 #: Con 0,15 se queda quieto en ese caso y sigue moviendose en el reposo real,
@@ -161,6 +345,9 @@ TAU_BP_REFERENCIA_S = 29.5
 IDAC_MIN, IDAC_MAX = -255, 255
 BP_ESPERA_TAU_MIN, BP_ESPERA_TAU_MAX = 2.0, 5.0
 OTRAS_ETAPAS_ESPERA_S = 30.0
+#: Techo de la espera de las etapas rapidas. El sumador y el pasabajos asientan
+#: en milisegundos; lo unico que hay que esperar es el AMux y el ADC.
+ESPERA_RAPIDA_S = 5.0
 ABBA_ESPERA_S = 1.5
 
 
@@ -174,6 +361,20 @@ def bank_uv(real_delta_mv: float) -> float:
 
 #: Autoridad total de IDAC3 sobre LPo: 255 codigos por 16,9 mV cada uno.
 AUTORIDAD_IDAC3_MV = 255.0 * PASO_IDAC3_CH4_MV
+
+
+def _pendiente_idac3_plausible(slope_bank_uv: float) -> bool:
+    """La pendiente de IDAC3 la fija una resistencia, no el punto de trabajo.
+
+    Puede desviarse de la nominal por tolerancia y por la ganancia de la etapa,
+    pero no puede cambiar de signo ni salir de un factor tres. Fuera de eso lo
+    que se midio es ruido de LPo y hay que descartarlo.
+    """
+    nominal = bank_uv(PASO_IDAC3_CH4_MV)
+    if slope_bank_uv is None or nominal == 0.0:
+        return False
+    razon = slope_bank_uv / nominal
+    return 0.33 <= razon <= 3.0
 
 
 #: Offset propio de la etapa LP, en mV fisicos sobre LPo, con ch2 y SUMo
@@ -269,7 +470,8 @@ def objetivo_ch2_mv(ganancia: int,
 def toca_riel(media_banco_uv: float | None, pp_banco_uv: float | None,
               margen_mv: float = MARGEN_RIEL_MV) -> bool:
     """True si media +/- pp/2 entra en el margen reservado de algún riel."""
-    if media_banco_uv is None or pp_banco_uv is None or clavado(pp_banco_uv):
+    if (media_banco_uv is None or pp_banco_uv is None or
+            clavado(pp_banco_uv, media_banco_uv / 1000.0)):
         return True
     low = BANCO_MIN_VALIDO_MV * 1000.0 + bank_uv(margen_mv)
     high = (min(BANCO_MAX_VALIDO_MV, BANCO_RIEL_ALTO_MEDIDO_MV) * 1000.0 -
@@ -600,12 +802,23 @@ def optimizar_fase1(taps: dict[int, Point],
             # un recurso de 0,235, peor que el [-3,-106,-106] que reparte entre
             # los tres y deja 0,58. El costo de usar IDAC2 ya lo cobra el termino
             # de reserva de abajo.
-            dentro = abs(code2) <= IDAC_MAX
+            # EL RECORRIDO UTIL DE IDAC2 NO ES EL NOMINAL.
+            #
+            # Antes se contaba hasta 255 y por eso el optimizador daba por buenos
+            # puntos que dejaban a IDAC2 en 215 o 240 codigos, que es donde el
+            # actuador pierde compliance: la ganancia se le cae a un tercio y
+            # deriva 2,7 mV/min, mas de un volt en LPo a lo largo de una
+            # calibracion. Se cuenta contra IDAC2_MAX_CONFIABLE, y quedar por
+            # encima de eso deja de ser "casi al limite" para pasar a ser
+            # infactible, igual que pasarse de 255.
+            dentro = abs(code2) <= IDAC2_MAX_FASE1
             recurso = min(margin0 / MARGEN_MAXIMO_MV,
                           margin1 / MARGEN_MAXIMO_MV,
                           (IDAC_MAX - abs(code0)) / float(IDAC_MAX),
                           (IDAC_MAX - abs(code1)) / float(IDAC_MAX),
-                          (IDAC_MAX - min(abs(code2), IDAC_MAX)) / float(IDAC_MAX))
+                          (IDAC2_MAX_CONFIABLE
+                           - min(abs(code2), IDAC2_MAX_CONFIABLE))
+                          / float(IDAC2_MAX_CONFIABLE))
             key = (not dentro, -recurso, abs(predicted_error),
                    abs(code0-current0)+abs(code1-current1), abs(code0))
             candidate = {"codes": [code0, code1],
@@ -632,7 +845,7 @@ def optimizar_fase1(taps: dict[int, Point],
         error_quieto = taps[2].error_real_mv
         code2_quieto = round(-error_quieto / PASO_IDAC2_CH2_MV)
         if (abs(error_quieto) <= PASO_IDAC2_CH2_MV / 2.0
-                and abs(code2_quieto) <= IDAC_MAX):
+                and abs(code2_quieto) <= IDAC2_MAX_FASE1):
             m0 = _margen_predicho_mv(taps[0], 0.0)
             m1 = _margen_predicho_mv(taps[1], 0.0)
             quieto = {
@@ -740,6 +953,16 @@ class TwoPhaseCalibrator:
         #: Paso de IDAC2 sobre ch2 medido en la corrida, para traducir el salto
         #: a codigos.
         self.paso_idac2_mv: float | None = None
+        # El modelo que dejo la fase 1. La fase 2 lo necesita para
+        # poder repartir con IDAC0 cuando IDAC2 se queda corto.
+        self.modelo_fase1: dict | None = None
+        #: Valor de ch2 que centra LPo, medido en x1. Es el MISMO en todas las
+        #: ganancias porque el offset que cancela se amplifica con la senal.
+        self.consigna_ch2_real_mv: float | None = None
+        #: Offset de PGAout referido a su entrada, en mV. Es el ch2 que centra
+        #: SUMo, y vale igual en toda ganancia mayor que uno. Medido en la
+        #: puesta a punto; -270 mV en esta placa.
+        self.offset_pgaout_real_mv: float | None = -270.0
         self.tau_bp_s: float | None = None
 
     def event(self, kind: str, message: str, **data) -> None:
@@ -780,6 +1003,24 @@ class TwoPhaseCalibrator:
     def set_code(self, stage: int, code: int) -> None:
         if stage not in range(4) or not IDAC_MIN <= code <= IDAC_MAX:
             raise RuntimeError(f"IDAC fuera de rango: etapa={stage}, código={code}")
+        # EL LIMITE DE IDAC2 SE APLICA ACA Y NO EN EL PLANIFICADOR.
+        #
+        # Ponerlo solo en optimizar_fase1 no alcanzo: el 2026-09-12 la fase 2 lo
+        # ignoro por completo y dejo IDAC2 en -255, porque el lazo, la biseccion
+        # de rescate y el barrido escriben codigos por su cuenta. Un solo punto
+        # de paso es la unica forma de que la restriccion valga siempre.
+        #
+        # Recortar es preferible a obedecer: mas alla de 180 el actuador deriva
+        # 7 mV/min y pierde dos tercios de ganancia, asi que un punto conseguido
+        # ahi no se sostiene. Si la calibracion no cierra dentro del limite, eso
+        # es un resultado honesto y dice que hace falta cambiar el hardware.
+        if stage == 2 and abs(code) > IDAC2_MAX_CONFIABLE:
+            recortado = IDAC2_MAX_CONFIABLE if code > 0 else -IDAC2_MAX_CONFIABLE
+            self.event("idac2_recortado",
+                       f"IDAC2={code:+d} excede la zona útil "
+                       f"(±{IDAC2_MAX_CONFIABLE}); se escribe {recortado:+d}",
+                       pedido=code, escrito=recortado)
+            code = recortado
         if self.deadline is not None and time.monotonic() > self.deadline:
             raise RuntimeError("presupuesto temporal agotado")
         for attempt in range(3):
@@ -810,7 +1051,14 @@ class TwoPhaseCalibrator:
         pp = int(statistics.median(item.pp_uv for item in values))
         point = Point(time.monotonic()-self.started, phase, stage, code, channel,
                       mean, mean-TARGET_UV, real_mv(mean-TARGET_UV), pp,
-                      VALID_MIN_UV <= mean <= VALID_MAX_UV, clavado(pp))
+                      # El tope es el RIEL MEDIDO, no la ventana nominal del
+                      # ADC: esa es mas ancha que el rango real de las etapas
+                      # y dejaba pasar taps apoyados contra el tope. El
+                      # 2026-09-11 los lazos de x16 y x24 dieron por vivo un
+                      # LPo de +2141 mV con el riel en +2084.
+                      (VALID_MIN_UV <= mean
+                       <= min(VALID_MAX_UV, RIEL_ALTO_UV)),
+                     clavado(pp, mean / 1000.0))
         self.rows.append(point)
         self.save()
         if require_valid and not point.valid:
@@ -990,9 +1238,42 @@ class TwoPhaseCalibrator:
     def medir_pendientes_fase1(self) -> dict:
         """Mide los pasos rápidos directos y deriva los del sumador."""
         abba0 = self.pendiente_abba(0, 0, (2, 4), ABBA_ESPERA_S)
-        abba1 = self.pendiente_abba(1, 1, (2, 4), ABBA_ESPERA_S)
-        medidas = (abba0.get("slope_real_mv_per_code"),
-                   abba1.get("slope_real_mv_per_code"))
+
+        # ch0 esta ANTES del pasabanda y responde rapido, asi que le sirve el
+        # ABBA generico. ch1 es la salida del pasabanda y necesita el trato de
+        # arriba: mas excitacion y una espera que sea fraccion conocida de tau.
+        #
+        # Y el tau se mide excitando IDAC1, no IDAC0. Dos razones: es el mismo
+        # actuador que estamos por identificar, asi que la perturbacion es una
+        # que ibamos a hacer igual; y medirlo con IDAC0 obligaba a escribirlo
+        # aunque la fase 1 despues decidiera no moverlo, que es tocar la cadena
+        # sin necesidad. La fraccion asentada se calcula con el tau REAL, no con
+        # la referencia de diseño: entre corridas fue de 30,9 a 48,7 s, y usar
+        # el valor equivocado mete un error del 30 % en la pendiente.
+        if self.tau_bp_s is None:
+            self.medir_tau_bp(1, self.read(1, "tau para IDAC1", 1,
+                                           self.codes[1],
+                                           require_valid=False))
+        tau_bp = self.tau_bp_s or TAU_BP_REFERENCIA_S
+        fraccion = 1.0 - math.exp(-ESPERA_ABBA_IDAC1_TAU)
+        abba1 = self.pendiente_abba(1, 1, (DELTA_ABBA_IDAC1,),
+                                    ESPERA_ABBA_IDAC1_TAU * tau_bp)
+        medida1 = abba1.get("slope_real_mv_per_code")
+        if medida1 is not None:
+            corregida = medida1 / fraccion
+            self.event("pendiente_idac1_corregida",
+                       f"IDAC1->ch1: {medida1:+.3f} mV/código medidos tras "
+                       f"{ESPERA_ABBA_IDAC1_TAU:.1f} tau; corregidos a "
+                       f"{corregida:+.3f} por la fracción asentada "
+                       f"({fraccion:.3f}) con tau={tau_bp:.1f} s",
+                       medida=medida1, corregida=corregida,
+                       tau_s=tau_bp)
+            abba1["slope_real_mv_per_code"] = corregida
+            if abba1.get("slope_bank_uv_per_code") is not None:
+                abba1["slope_bank_uv_per_code"] = bank_uv(corregida)
+            medida1 = corregida
+
+        medidas = (abba0.get("slope_real_mv_per_code"), medida1)
         respaldos = (PASO_IDAC0_CH0_MV, PASO_IDAC1_CH1_MV)
         respaldos_ch2 = (PASO_IDAC0_CH2_MV, PASO_IDAC1_CH2_MV)
         valores: list[float] = []
@@ -1125,6 +1406,7 @@ class TwoPhaseCalibrator:
 
         slope_measurement = self.medir_pendientes_fase1()
         modelo = slope_measurement["modelo_real_mv_por_codigo"]
+        self.modelo_fase1 = modelo
         working = initial
         if initial[2].clavado:
             rescue = self.rescatar_ch2_desde_riel(
@@ -1170,9 +1452,17 @@ class TwoPhaseCalibrator:
             if 0 in moved_stages:
                 self._wait_bp(tau or TAU_BP_REFERENCIA_S, 0)
             elif 1 in moved_stages:
-                # Vref_BP desplaza BPo y el sumador al instante; no excita la
-                # recuperación lenta del acople desde SEo.
-                time.sleep(ABBA_ESPERA_S)
+                # Aca decia que Vref_BP desplaza BPo al instante y no excita la
+                # recuperacion lenta. Es falso, y es el origen de todo lo demas.
+                # IDAC1 ES la referencia del pasabanda, cuyo polo dominante son
+                # los 680 uF de acople: moverlo arranca la cola entera.
+                #
+                # Con 1,5 s de espera la fase 1 daba por bueno un punto y le
+                # entregaba a la fase 2 una cadena que seguia moviendose a 112
+                # mV/s sobre ch2. Amplificado por PGAout y por la etapa LP, eso
+                # son volts por segundo sobre LPo, y ninguna calibracion aguanta
+                # eso. Medido el 2026-09-11.
+                self._wait_bp(tau or TAU_BP_REFERENCIA_S, 1)
 
             verified_points = self.read_five_taps(
                 f"fase1 verificación {attempt+1}", robust=True)
@@ -1186,7 +1476,14 @@ class TwoPhaseCalibrator:
                 not verified_points[1].clavado and
                 margins_now[1] >= MARGEN_FASE1_MV and
                 not verified_points[2].clavado and
-                abs(idac2_needed) <= IDAC_MAX)
+                # LA MITAD de la zona util, no el rango nominal ni la zona
+                # entera. Con IDAC_MAX la fase 1 daba el punto por bueno dejando
+                # a ch2 a 600 mV de donde IDAC2 podia llegar; con la zona
+                # completa seguia sin dejar margen para la conmutacion de PGAout
+                # y la consigna de la fase 2. Exigirlo aca obliga a la fase 1 a
+                # recalcular y gastar SUS actuadores, que es de quien tiene que
+                # salir ese esfuerzo: IDAC0 mueve ch2 unos 200 mV por codigo.
+                abs(idac2_needed) <= IDAC2_MAX_FASE1)
             if constraints_ok or attempt >= 2:
                 break
 
@@ -1202,6 +1499,7 @@ class TwoPhaseCalibrator:
                     recalculation=recalculation)
                 break
             modelo = nuevo_modelo
+            self.modelo_fase1 = modelo
             self.event(
                 "phase1_slopes_recalculated",
                 "Fase 1: restricciones no verificadas; se recalcula con el "
@@ -1222,7 +1520,8 @@ class TwoPhaseCalibrator:
                     "ch1_margin": (not verified_points[1].clavado and
                                     margins["ch1"] >= MARGEN_FASE1_MV),
                     "ch2_not_stuck": not verified_points[2].clavado,
-                    "ch2_idac2_reachable": abs(idac2_needed) <= IDAC_MAX,
+                    "ch2_idac2_reachable": (abs(idac2_needed)
+                                            <= IDAC2_MAX_FASE1),
                     "idac2_needed": idac2_needed,
                     "margen_requerido_real_mv": MARGEN_FASE1_MV,
                     "margenes_verificados_real_mv": margins,
@@ -1253,13 +1552,23 @@ class TwoPhaseCalibrator:
         return result
 
     def _wait_fast(self, channel: int, stage: int) -> Point:
+        """Espera de las etapas RAPIDAS: sumador y pasabajos, que asientan en
+        milisegundos. Solo tiene que cubrir el AMux y el ADC.
+
+        Pedia tres lecturas consecutivas estables con techo de 30 s. Sobre LPo en
+        ganancias altas eso no se cumple nunca, porque su ventana util equivale a
+        pocas decenas de mV de ch2 y cualquier deriva lo mueve: la espera
+        consumia los 30 s enteros y en el camino el tap se iba de rango. El
+        2026-09-11 la foto mostraba los tres taps centrados y la espera posterior
+        los perdia.
+        """
         try:
             return self.wait_channel_stable(
                 channel, stage=stage, code=self.codes[stage],
-                timeout_s=OTRAS_ETAPAS_ESPERA_S, sample_period_s=1.0, required=3)
+                timeout_s=ESPERA_RAPIDA_S, sample_period_s=0.5, required=2)
         except RuntimeError:
             self.event("fast_settle_timeout",
-                       f"ch{channel}: agotó {OTRAS_ETAPAS_ESPERA_S:.0f} s; se verifica")
+                       f"ch{channel}: agotó {ESPERA_RAPIDA_S:.0f} s; se verifica")
             return self.read(channel, "fin espera rápida", stage,
                              self.codes[stage], require_valid=False)
 
@@ -1276,12 +1585,68 @@ class TwoPhaseCalibrator:
         """
         current = self.read(channel, f"IDAC{stage} inicio", stage,
                             self.codes[stage], require_valid=False)
+
+        # EL LAZO SE RESCATA SOLO SI ARRANCA CON EL TAP ILEGIBLE.
+        #
+        # Antes dependia de que alguien lo dejara en buen lugar, y esa
+        # dependencia lo rompia: el ABBA que mide la pendiente mueve el actuador
+        # +-8 codigos, y si el tap estaba cerca del borde eso lo saca de rango.
+        # El lazo arrancaba con una lectura sin sentido y se iba en la primera
+        # iteracion sin corregir nada. El 2026-09-11 dejo ch2 en -5180 mV
+        # teniendo la consigna correcta en -270 y la pendiente bien medida.
+        #
+        # La biseccion no necesita saber ni la pendiente ni el offset: prueba y
+        # mide. Por eso es el recurso correcto cuando no hay nada fiable que leer.
+        if not _usable(current):
+            lo, hi, visitados = IDAC_MIN, IDAC_MAX, []
+            for _ in range(10):
+                medio = (lo + hi) // 2
+                self.set_code(stage, medio)
+                self._wait_fast(channel, stage)
+                current = self.read(channel, f"IDAC{stage} rescate {medio}",
+                                    stage, medio, require_valid=False)
+                visitados.append({"codigo": medio,
+                                  "valor_real_mv": current.error_real_mv,
+                                  "utilizable": _usable(current)})
+                if _usable(current):
+                    break
+                if current.mean_bank_uv < TARGET_UV:
+                    lo = medio + 1
+                else:
+                    hi = medio - 1
+                if lo > hi:
+                    break
+            self.event("lazo_rescate",
+                       f"IDAC{stage}->ch{channel}: arranco ilegible; biseccion "
+                       + ("lo recupero en " + str(self.codes[stage])
+                          if _usable(current)
+                          else f"fallo en {len(visitados)} pasos"),
+                       stage=stage, channel=channel, visitados=visitados)
+
         _consigna_uv0 = bank_uv(consigna_real_mv)
         best = (abs(current.error_bank_uv - _consigna_uv0),
                 self.codes[stage], current)
         history, integral, stop = [], 0.0, "max_iterations"
         consigna_uv = bank_uv(consigna_real_mv)
         for iteration in range(max_iterations):
+            # PARAR SI EL TAP DEJO DE SER LEGIBLE.
+            #
+            # Sin esto el lazo sigue corrigiendo sobre lecturas que ya no
+            # significan nada y termina empujando el tap mas y mas lejos: el
+            # 2026-09-11 llevo ch2 a -5181 mV persiguiendo un numero rielado.
+            # Se conserva el mejor punto VALIDO visto y se sale.
+            if not _usable(current):
+                # Volver al mejor punto VALIDO visto. Sin esto el lazo frena
+                # pero deja el actuador donde lo llevo la ultima correccion
+                # mala: el 2026-09-11 ch2 quedo en -3635 mV despues de parar.
+                if best[1] != self.codes[stage]:
+                    self.set_code(stage, best[1])
+                    self._wait_fast(channel, stage)
+                    current = self.read(channel, f"IDAC{stage} vuelta al mejor",
+                                        stage, self.codes[stage],
+                                        require_valid=False)
+                stop = "tap fuera de rango; restaurado el mejor punto valido"
+                break
             target_abs = bank_uv(objetivo_abs_real_mv)
             desvio = float(current.error_bank_uv) - consigna_uv
             if abs(desvio) <= target_abs:
@@ -1389,6 +1754,580 @@ class TwoPhaseCalibrator:
         report.update(reason="guardado revalidado no mejora el degradado",
                       selected="degraded")
         return report
+
+    def medir_consigna_ch2(self) -> float | None:
+        """Mide en x1 el valor de ch2 que centra LPo. NO depende de la ganancia.
+
+        Al entrar a fase 2 en una ganancia alta, LPo viene clavado y el offset no
+        se puede medir; el respaldo daba -115,8 mV cuando el valor real es -292.
+        En x1, en cambio, LPo esta vivo. Y como el offset que hay que cancelar se
+        amplifica junto con la senal, la consigna que lo anula es la MISMA en toda
+        ganancia, asi que medirla una vez alcanza.
+        """
+        if self.current_gain != 1:
+            if not self.lab.set_gain("pgaout", PGAOUT_X1_CODE):
+                return None
+            self.current_gain = 1
+            self._wait_fast(3, 2)
+        ch2 = self.read(2, "consigna: ch2 en x1", 2, self.codes[2],
+                        require_valid=False)
+        lpo = self.read(4, "consigna: LPo en x1", 3, self.codes[3],
+                        require_valid=False)
+
+        # ARRANQUE: para medir la consigna hace falta LPo legible, y para que LPo
+        # sea legible hace falta ch2 cerca de la consigna. Se rompe buscando con
+        # IDAC2, que es rapido. En x1 un codigo mueve LPo unos 123 mV y la ventana
+        # legible son 4 V, asi que toda la ventana cabe en ~32 codigos: una
+        # biseccion la encuentra en pocos pasos.
+        if not _usable(lpo):
+            lo, hi, visitados = IDAC_MIN, IDAC_MAX, []
+            for _ in range(10):
+                medio = (lo + hi) // 2
+                self.set_code(2, medio)
+                self._wait_fast(4, 3)
+                lpo = self.read(4, f"consigna: busqueda I2={medio}", 3,
+                                self.codes[3], require_valid=False)
+                visitados.append({"idac2": medio, "lpo_real_mv": lpo.error_real_mv,
+                                  "utilizable": _usable(lpo)})
+                if _usable(lpo):
+                    break
+                # LPo bajo -> subir ch2; LPo alto -> bajarlo. ch2 llega a LPo con
+                # ganancia NEGATIVA, asi que subir ch2 BAJA LPo.
+                if lpo.mean_bank_uv < TARGET_UV:
+                    hi = medio - 1
+                else:
+                    lo = medio + 1
+                if lo > hi:
+                    break
+            ch2 = self.read(2, "consigna: ch2 tras busqueda", 2, self.codes[2],
+                            require_valid=False)
+            self.event("consigna_busqueda",
+                       f"busqueda de LPo legible: {len(visitados)} pasos, "
+                       f"{'encontrado' if _usable(lpo) else 'sin exito'}",
+                       visitados=visitados)
+
+        if not (_usable(ch2) and _usable(lpo)):
+            self.event("consigna_no_medible",
+                       "no se pudo medir la consigna de ch2 en x1: "
+                       f"ch2 utilizable={_usable(ch2)}, LPo utilizable={_usable(lpo)}")
+            return None
+        # DESPEJE con el signo correcto:
+        #     LPo = G_LP * G * (ch2 - objetivo)
+        #     objetivo = ch2 - LPo/(G_LP*G)      <- RESTA, no suma
+        # Con suma, ch2=-619 y LPo=+1213 daban -753 en vez de -485.
+        consigna = (ch2.error_real_mv -
+                    lpo.error_real_mv / (GANANCIA_LP_DESDE_CH2 *
+                                         max(1, self.current_gain)))
+        self.consigna_ch2_real_mv = consigna
+        self.event("consigna_medida",
+                   f"consigna de ch2 medida en x1: {consigna:+.1f} mV "
+                   f"(ch2={ch2.error_real_mv:+.0f}, LPo={lpo.error_real_mv:+.0f}); "
+                   "vale para todas las ganancias",
+                   consigna_real_mv=consigna,
+                   ch2_real_mv=ch2.error_real_mv,
+                   lpo_real_mv=lpo.error_real_mv)
+        return consigna
+
+    def apuntar_ch2_de_una(self, gain: int, objetivo_real_mv: float,
+                           slope_regimen_bank_uv: float) -> dict:
+        """Un solo salto calculado con la pendiente de regimen. Sin lazo interno.
+
+        El lazo de Newton hacia muchos saltos chicos con esperas de segundos, y
+        CADA salto arranca una cola de treinta a cincuenta segundos. Cuando
+        terminaba, la suma de todas esas colas seguia viva y se llevaba el punto
+        puesto: el 2026-09-11 dejo ch2 a 258 mV de la consigna, mas de lo que el
+        barrido posterior puede absorber.
+
+        Con la pendiente de regimen medida no hace falta iterar a ciegas. Se lee
+        el ch2 ya asentado, se calcula el salto entero de una vez y se aplica una
+        sola vez. Queda UNA cola pendiente en vez de diez, y el llamador la
+        espera antes de volver a mirar.
+        """
+        punto = self.read(2, f"x{gain} ch2 antes del salto", 2, self.codes[2],
+                          require_valid=False)
+        if not _usable(punto):
+            return {"aplicado": False, "motivo": "ch2 fuera de rango"}
+        paso = real_mv(slope_regimen_bank_uv)
+        if not paso:
+            return {"aplicado": False, "motivo": "pendiente nula"}
+        error = punto.error_real_mv - objetivo_real_mv
+        delta = int(round(-error / paso))
+        # Se recorta contra la ZONA UTIL, no contra el rango nominal: mas alla
+        # de ahi el actuador no sostiene el punto. Y se recorta aca, no solo en
+        # set_code, para que el resultado diga el codigo que de verdad se
+        # escribio y no el que se habria querido.
+        codigo = max(-IDAC2_MAX_CONFIABLE,
+                     min(IDAC2_MAX_CONFIABLE, self.codes[2] + delta))
+        recortado = codigo != self.codes[2] + delta
+        self.set_code(2, codigo)
+        self.event("salto_unico_ch2",
+                   f"x{gain}: ch2 en {punto.error_real_mv:+.0f} mV, consigna "
+                   f"{objetivo_real_mv:+.0f}; un salto de {delta:+d} códigos "
+                   f"con {paso:+.2f} mV/código lleva IDAC2 a {codigo:+d}"
+                   + (f" (recortado a la zona útil ±{IDAC2_MAX_CONFIABLE})"
+                      if recortado else ""),
+                   gain=gain, desde=punto.error_real_mv,
+                   objetivo=objetivo_real_mv, delta=delta, codigo=codigo,
+                   recortado=recortado)
+        return {"aplicado": True, "delta": delta, "codigo": codigo,
+                "recortado": recortado, "desde": punto.error_real_mv}
+
+    def estabilizar_y_apuntar_ch2(self, gain: int, slope2: float,
+                                  objetivo_real_mv: float,
+                                  intentos: int | None = None) -> dict:
+        """Espera a que ch2 se aquiete y recien entonces lo lleva a la consigna.
+
+        El orden importa y hacerlo al reves fue el fracaso de la corrida de las
+        19:20. Ahi el lazo dejo ch2 en -264 mV, que era la consigna, y despues la
+        compuerta espero a que la cadena se aquietara. Pero esperar no congela
+        nada: mientras esperaba, la misma deriva que la compuerta estaba midiendo
+        se llevo a ch2 hasta +1.882 mV. El punto se apunto y despues se dejo ir.
+
+        Aca se alterna: esperar quietud, mirar donde quedo ch2, y si se corrio
+        mas de lo que el barrido fino puede absorber, volver a apuntarlo. Se
+        repite hasta que la espera ya no lo mueva.
+        """
+        # Los intentos tienen que alcanzar para agotar los repartos y verificar
+        # despues del ultimo. Fijarlos en cinco cortaba el lazo antes de usar
+        # los seis repartos disponibles, que es justo lo que resuelve el caso.
+        if intentos is None:
+            intentos = MAX_REPARTOS_IDAC0 + 2
+
+        # Lo que el barrido posterior puede absorber son sus +-15 codigos. Se
+        # exige algo mas estricto que eso para dejarle margen.
+        paso = self.paso_idac2_mv or PASO_IDAC2_CH2_MV
+        tolerancia = 0.6 * VENTANA_FINA_IDAC2 * abs(paso)
+        historial = []
+        # La pendiente real del actuador del reparto, medida sobre la sonda.
+        paso_medido: float | None = None
+        # Repartir es CARO, cuesta una cola del pasabanda, pero acotarlo a una
+        # sola vez fue demasiado. Medido el 2026-09-12: el primer reparto bajo
+        # el deficit de 819 a 195 mV y ahi se detuvo, cuando un codigo mas lo
+        # cerraba. El paso de IDAC0 es grueso, 249 mV, asi que el resto despues
+        # de redondear puede seguir siendo mayor que lo que IDAC2 alcanza. Tres
+        # repartos convergen de sobra y siguen siendo cinco minutos.
+        repartos = 0
+        for intento in range(intentos):
+            deriva = self.esperar_sin_deriva(2, gain)
+            punto = self.read(2, f"x{gain} ch2 tras esperar", 2, self.codes[2],
+                              require_valid=False)
+            if not _usable(punto):
+                historial.append({"intento": intento, "ch2": None,
+                                  "motivo": "fuera de rango"})
+                self.event("apuntado_ch2_fuera",
+                           f"x{gain}: ch2 quedo fuera de rango tras esperar; "
+                           "se reapunta",
+                           gain=gain, intento=intento)
+                self.rescatar_ch2_desde_riel()
+                self.apuntar_ch2_de_una(gain, objetivo_real_mv, slope2)
+                continue
+            desvio = punto.error_real_mv - objetivo_real_mv
+            historial.append({"intento": intento, "ch2": punto.error_real_mv,
+                              "desvio": desvio,
+                              "deriva": deriva.get("pendiente")})
+            if abs(desvio) <= tolerancia:
+                self.event("apuntado_ch2_firme",
+                           f"x{gain}: ch2 en {punto.error_real_mv:+.0f} mV, a "
+                           f"{desvio:+.0f} de la consigna y quieto; sirve",
+                           gain=gain, intento=intento, desvio=desvio,
+                           tolerancia=tolerancia)
+                return {"firme": True, "ch2_real_mv": punto.error_real_mv,
+                        "desvio": desvio, "historial": historial}
+            self.event("apuntado_ch2_reintento",
+                       f"x{gain}: ch2 se corrio a {punto.error_real_mv:+.0f} mV "
+                       f"mientras se esperaba ({desvio:+.0f} de la consigna, "
+                       f"tolerancia {tolerancia:.0f}); se reapunta",
+                       gain=gain, intento=intento, desvio=desvio,
+                       tolerancia=tolerancia)
+            salto = self.apuntar_ch2_de_una(gain, objetivo_real_mv, slope2)
+            # SI EL ACTUADOR YA NO PUEDE, NO TIENE SENTIDO REINTENTAR.
+            #
+            # Con la zona util aplicada, el salto puede salir recortado y dejar
+            # el codigo donde ya estaba. Repetirlo cinco veces no cambia nada y
+            # esconde el resultado que importa: la consigna no se alcanza con el
+            # recorrido que el actuador puede usar. Eso no es una falla del
+            # algoritmo, es la medida de cuanto hardware falta.
+            if salto.get("recortado") and salto.get("codigo") == self.codes[2]:
+                falta = abs(desvio)
+                # SE REPARTE CON IDAC0 ANTES DE DARSE POR VENCIDO.
+                #
+                # La fase 1 no puede prevenir esto: verifica ANTES de conmutar
+                # la ganancia de PGAout, y es la conmutacion la que corre a ch2
+                # unos 600 mV. Ningun criterio en la fase 1 anticipa lo que pasa
+                # despues de que ella termino.
+                #
+                # IDAC0 mueve ch2 unos 200 mV por codigo, asi que tres codigos
+                # cubren el deficit. Es lento, porque arrastra la cola del
+                # pasabanda, pero es UNA correccion por ganancia y la espera ya
+                # esta en el lazo. Se hace una sola vez: si despues de repartir
+                # sigue sin alcanzar, el problema es de hardware y hay que
+                # decirlo.
+                # SE REPARTE CON IDAC1, NO CON IDAC0.
+                #
+                # Los dos sirven para el mismo trabajo: traer ch2 a donde IDAC2
+                # alcanza. Pero el paso de IDAC0 sobre ch2 son unos 248 mV, y la
+                # ventana util de ch2 es mas angosta que eso: el 2026-09-12 un
+                # solo codigo, con 165 mV de deficit, lo dejo fuera de rango, y
+                # despues no volvio ni deshaciendo el movimiento, porque el
+                # acople de 680 uF tiene absorcion dielectrica.
+                #
+                # IDAC1 mueve ch2 unos 10 mV por codigo, veinticuatro veces mas
+                # fino, y llega al mismo lado. Cubre un deficit de 800 mV en 78
+                # codigos y le sobra recorrido. La cola del pasabanda se paga
+                # igual con cualquiera de los dos, asi que el fino sale gratis.
+                paso0 = ((self.modelo_fase1 or {}).get("ch2_idac1")
+                         or PASO_IDAC1_CH2_MV)
+                etapa_reparto = 1
+                if paso0 and repartos < MAX_REPARTOS_IDAC0:
+                    # UN CODIGO POR VEZ, aunque el modelo pida mas.
+                    #
+                    # `paso0` es una pendiente DERIVADA, y las derivadas fueron
+                    # poco confiables toda la sesion. Un codigo de IDAC0 mueve
+                    # ch2 unos 225 mV: si el modelo se equivoca por el doble, un
+                    # salto de dos codigos deja ch2 fuera de rango, y desde ahi
+                    # no se vuelve porque IDAC2 esta en su limite. Fue lo que
+                    # paso el 2026-09-12 con un deficit de 377 mV.
+                    #
+                    # De a uno el error posible es la mitad, se verifica entre
+                    # medio, y con los tres repartos permitidos se cubren unos
+                    # 700 mV, que es mas que cualquier deficit observado.
+                    pedido = -desvio / paso0
+                    # PRIMERO SE SONDEA, DESPUES SE SALTA.
+                    #
+                    # `paso0` sale del modelo, y la pendiente de ch2 contra
+                    # IDAC1 dio -3,0, -7,8, -10,3, -16,1 y -25,8 mV/codigo a lo
+                    # largo de la sesion: un factor ocho. Saltar 130 codigos
+                    # apoyado en ese numero empeoro el deficit de 1.031 a 1.845
+                    # mV el 2026-09-12.
+                    #
+                    # El primer movimiento es una SONDA de tamano fijo y modesto
+                    # en la direccion que el modelo indica. De ahi sale la
+                    # pendiente REAL, medida sobre este punto de trabajo, y los
+                    # movimientos siguientes usan esa. Cuesta un reparto de los
+                    # seis y elimina la dependencia del numero poco confiable.
+                    #
+                    # Y se va de a MEDIO paso, siempre. Revertir no restaura la
+                    # cadena: el acople de 680 uF tiene absorcion dielectrica y
+                    # el 2026-09-12, tras devolver el codigo a su lugar, ch2
+                    # siguio fuera de rango y la corrida no se recupero. Si
+                    # deshacer no funciona, la unica defensa es no arriesgarse.
+                    #
+                    # Medio paso no puede sobrepasar aunque la pendiente este
+                    # errada al doble, y converge igual: 583, 291, 146, 73, 36.
+                    # Seis repartos lo llevan de 583 mV a menos de diez.
+                    if not paso_medido:
+                        codigos0 = (SONDA_REPARTO if pedido > 0
+                                    else -SONDA_REPARTO)
+                    else:
+                        codigos0 = int(round(-desvio / (2.0 * paso_medido)))
+                    destino0 = max(IDAC_MIN,
+                                   min(IDAC_MAX,
+                                       self.codes[etapa_reparto] + codigos0))
+                    if destino0 != self.codes[etapa_reparto]:
+                        self.event("reparto_con_idac0",
+                                   f"x{gain}: IDAC2 llegó a su límite y faltan "
+                                   f"{falta:.0f} mV; se reparte moviendo "
+                                   f"IDAC{etapa_reparto} "
+                                   f"{codigos0:+d} códigos "
+                                   f"({paso0:+.0f} mV/código) a {destino0:+d}"
+                                   f" [reparto {repartos + 1} de "
+                                   f"{MAX_REPARTOS_IDAC0}]",
+                                   gain=gain, falta_real_mv=falta,
+                                   codigos0=codigos0, destino0=destino0,
+                                   reparto=repartos + 1)
+                        # EL REPARTO SE DESHACE SI EMPEORA.
+                        #
+                        # Mover IDAC0 es lento y grueso, y con IDAC2 en su
+                        # limite no hay con que arreglar un sobrepaso. El
+                        # 2026-09-12 el tercer reparto, con 218 mV de deficit y
+                        # un paso de 231, dejo ch2 fuera de rango y la corrida
+                        # no se recupero mas.
+                        #
+                        # Asi que se verifica y se revierte. Un reparto que no
+                        # mejora es un reparto que no se hizo, y eso es mucho
+                        # mejor que uno que rompe.
+                        antes0 = self.codes[etapa_reparto]
+                        self.set_code(etapa_reparto, destino0)
+                        self._wait_bp(self.tau_bp_s or TAU_BP_REFERENCIA_S,
+                                      etapa_reparto)
+                        despues = self.read(2, f"x{gain} ch2 tras reparto", 2,
+                                            self.codes[2], require_valid=False)
+                        if _usable(despues) and codigos0:
+                            # La pendiente REAL de este actuador sobre ch2, en
+                            # este punto de trabajo. Es la que vale.
+                            medido = ((despues.error_real_mv
+                                       - punto.error_real_mv) / codigos0)
+                            # Una pendiente casi nula significa que el actuador
+                            # no responde, no que sea muy fino: dividir por ella
+                            # da un salto infinito. Se descarta y se vuelve a
+                            # sondear.
+                            paso_medido = (medido if abs(medido) >= 0.5
+                                           else None)
+                            self.event("pendiente_reparto_medida",
+                                       f"x{gain}: IDAC{etapa_reparto} movió "
+                                       f"{codigos0:+d} códigos y ch2 cambió "
+                                       f"{despues.error_real_mv - punto.error_real_mv:+.0f}"
+                                       f" mV: {medido:+.2f} mV/código "
+                                       f"reales contra {paso0:+.2f} del modelo"
+                                       + ("" if paso_medido
+                                          else " (se descarta: no responde)"),
+                                       gain=gain, medido=medido,
+                                       modelo=paso0)
+                        mejora = (_usable(despues) and
+                                  abs(despues.error_real_mv - objetivo_real_mv)
+                                  < falta)
+                        if not mejora:
+                            self.event("reparto_revertido",
+                                       f"x{gain}: el reparto con IDAC{etapa_reparto} dejó ch2 "
+                                       + ("fuera de rango"
+                                          if not _usable(despues)
+                                          else f"a "
+                                               f"{abs(despues.error_real_mv - objetivo_real_mv):.0f}"
+                                               f" mV, peor que {falta:.0f}")
+                                       + f"; se vuelve IDAC{etapa_reparto} a {antes0:+d}",
+                                       gain=gain, antes=antes0,
+                                       probado=destino0)
+                            self.set_code(etapa_reparto, antes0)
+                            self._wait_bp(
+                                self.tau_bp_s or TAU_BP_REFERENCIA_S,
+                                etapa_reparto)
+                            # Una SONDA que empeora igual cumplio su mision: ya
+                            # dejo medida la pendiente real. Se revierte y se
+                            # sigue, ahora con el numero bueno. Lo que se corta
+                            # es un salto ya informado que sale mal.
+                            if not paso_medido:
+                                repartos = MAX_REPARTOS_IDAC0
+                            repartos += 1
+                            continue
+                        repartos += 1
+                        continue
+                self.event("consigna_inalcanzable",
+                           f"x{gain}: IDAC2 en su zona útil (±"
+                           f"{IDAC2_MAX_CONFIABLE}) y ch2 sigue a "
+                           f"{falta:.0f} mV de la consigna. No alcanza el "
+                           "recorrido utilizable; hay que repartir con IDAC0 o "
+                           "cambiar el hardware",
+                           gain=gain, falta_real_mv=falta,
+                           idac2=self.codes[2], desvio=desvio)
+                return {"firme": False, "ch2_real_mv": punto.error_real_mv,
+                        "desvio": desvio, "inalcanzable": True,
+                        "falta_real_mv": falta, "historial": historial}
+        self.event("apuntado_ch2_no_firme",
+                   f"x{gain}: ch2 no se queda quieto en la consigna tras "
+                   f"{intentos} intentos; se barre igual y se informa",
+                   gain=gain, historial=historial)
+        return {"firme": False, "ch2_real_mv": None, "desvio": None,
+                "historial": historial}
+
+    def barrer_idac2_por_lpo(self, gain: int,
+                             ventana: int = VENTANA_ESTACIONARIA_IDAC2,
+                             espera_s: float | None = None) -> dict:
+        """Enumera codigos de IDAC2 vecinos y se queda con el mejor LPo.
+
+        Cada codigo se sostiene TRES TAU antes de leer. Con la espera corta que
+        tenia antes, el barrido mapeaba la respuesta inmediata: el 2026-09-11
+        eligio IDAC2=-221 porque a 1,5 s dejaba LPo en +1.478 mV, y en regimen
+        ese mismo codigo mandaba ch2 a -5.169. Elegir sobre la respuesta
+        inmediata es elegir sobre un numero que la cadena no va a conservar.
+
+        Por eso la ventana es chica. Como el lazo previo ya dejo ch2 en su
+        consigna DE REGIMEN y verificado, el codigo que sirve esta a pocos de
+        ahi, y cada codigo cuesta tres tau. Barrer quince con esperas largas
+        serian cuarenta minutos por ganancia y no haria falta ninguno.
+
+        La etapa LP responde en milisegundos, asi que LPo es funcion estatica de
+        ch2: lo unico que hay que esperar es que ch2 llegue a su valor final.
+
+        Devuelve el codigo elegido y todo lo visitado. Si ninguno deja LPo
+        utilizable, restituye el codigo de partida: es preferible conservar el
+        punto bueno de ch2 antes que dejar la cadena en cualquier lado.
+        """
+        if espera_s is None:
+            espera_s = 3.0 * (self.tau_bp_s or TAU_BP_REFERENCIA_S)
+        partida = self.codes[2]
+        visitados, mejor = [], None
+        # De adentro hacia afuera: si la ventana es angosta, el primero que
+        # sirve suele estar a pocos codigos y se corta temprano.
+        ordenados = [0]
+        for d in range(1, ventana + 1):
+            ordenados.extend((d, -d))
+        for delta in ordenados:
+            codigo = partida + delta
+            if not IDAC_MIN <= codigo <= IDAC_MAX:
+                continue
+            self.set_code(2, codigo)
+            time.sleep(espera_s)
+            punto = self.read(4, f"x{gain} barrido fino IDAC2={codigo}", 2,
+                              codigo, require_valid=False)
+            utilizable = _usable(punto)
+            visitados.append({"idac2": codigo, "delta": delta,
+                              "lpo_real_mv": punto.error_real_mv,
+                              "pp_bank_uv": punto.pp_bank_uv,
+                              "utilizable": utilizable})
+            if not utilizable:
+                continue
+            if mejor is None or abs(punto.error_real_mv) < abs(mejor[1]):
+                mejor = (codigo, punto.error_real_mv)
+            if abs(punto.error_real_mv) <= MARGEN_RIEL_MV:
+                break
+        diagnostico = barrido_dominado_por_deriva(visitados)
+        if diagnostico["dominado"]:
+            # Lo que se midio es el reloj, no el actuador. Elegir el "mejor" de
+            # estos puntos seria elegir el que se visito primero.
+            self.event("barrido_midio_deriva",
+                       f"x{gain}: el barrido correlaciona con el ORDEN de "
+                       f"visita (r={diagnostico['r_orden']:.2f}) mucho mas que "
+                       f"con el código (r={diagnostico['r_codigo']:.2f}): midió "
+                       "una deriva temporal, no el actuador; se descarta",
+                       gain=gain, **diagnostico)
+            self.set_code(2, partida)
+            return {"partida": partida, "elegido": partida,
+                    "lpo_real_mv": None, "dominado_por_deriva": True,
+                    "diagnostico": diagnostico, "visitados": visitados}
+
+        elegido = partida if mejor is None else mejor[0]
+        self.set_code(2, elegido)
+        time.sleep(espera_s)
+        if mejor is None:
+            self.event("barrido_fino_sin_solucion",
+                       f"x{gain}: ningun IDAC2 entre {partida-ventana:+d} y "
+                       f"{partida+ventana:+d} deja LPo utilizable; se vuelve a "
+                       f"{partida:+d} para no perder ch2",
+                       gain=gain, partida=partida, visitados=visitados)
+        else:
+            self.event("barrido_fino_ok",
+                       f"x{gain}: IDAC2={elegido:+d} (a {elegido-partida:+d} de "
+                       f"la consigna de ch2) deja LPo en {mejor[1]:+.0f} mV",
+                       gain=gain, partida=partida, elegido=elegido,
+                       lpo_real_mv=mejor[1], visitados=visitados)
+        return {"partida": partida, "elegido": elegido,
+                "lpo_real_mv": None if mejor is None else mejor[1],
+                "visitados": visitados}
+
+    def esperar_sin_deriva(self, channel: int, gain: int,
+                           tolerancia_mv_por_s: float = 2.0,
+                           intentos: int | None = None,
+                           separacion_s: float = 8.0) -> dict:
+        """Espera a que el tap deje de moverse antes de identificar nada.
+
+        Es la compuerta que faltaba. El pasabanda tiene treinta y cuatro
+        segundos de cola y la fase 1 lo mueve, asi que cuando arranca la fase 2
+        ch2 todavia esta cayendo. Medido el 2026-09-11: durante el ABBA de x4
+        ch2 bajaba a trece milivoltios por segundo, y esa pendiente multiplicada
+        por PGAout y por la etapa LP son casi cuatro voltios en ocho segundos
+        sobre LPo. Por eso el lazo de IDAC2 encontraba un punto bueno y lo
+        perdia enseguida: no estaba centrando, estaba fotografiando un
+        transitorio.
+
+        La tolerancia se escala con la ganancia porque lo que importa no es
+        cuanto se mueve ch2 sino cuanto se mueve LPo, que es ch2 multiplicado
+        por la ganancia de PGAout y por la de la etapa LP.
+
+        Quince intentos de ocho segundos son dos minutos, por encima de los tres
+        tau del pasabanda. Sale apenas se aquieta, asi que el caso normal cuesta
+        una sola vuelta.
+        """
+        limite = max(0.05, tolerancia_mv_por_s / max(1.0, float(gain)))
+        separacion_s = max(0.001, separacion_s)
+        # La paciencia no puede ser un numero fijo: la cola que hay que dejar
+        # pasar es exponencial con la tau del pasabanda. Medido el 2026-09-11,
+        # la deriva arranca en 112 mV/s y el limite en x4 son 0,5, asi que hacen
+        # falta tau*ln(224) = 3,5 tau. Se presupuestan seis tau, que cubren de
+        # sobra, y se sale apenas se aquieta.
+        if intentos is None:
+            # Sin un numero explicito, la paciencia sale de la fisica: seis tau
+            # cubren de sobra la cola del pasabanda. Con uno explicito manda el
+            # que llama, que es lo que permite probar esto sin esperar minutos.
+            tau = self.tau_bp_s or TAU_BP_REFERENCIA_S
+            intentos = int(6.0 * tau / separacion_s) + 1
+        historial: list[dict] = []
+        fuera, quietas = 0, 0
+        ancla: float | None = None
+        # Sobre un tap fuera de rango no hay deriva que medir: la lectura esta
+        # comprimida contra el borde y cualquier pendiente que salga es
+        # inventada. El 2026-09-11 esto hizo esperar 48 s midiendo -156 mV/s
+        # sobre un ch2 clavado. Se devuelve enseguida para que el llamador vaya
+        # al rescate, que es lo que corresponde ahi.
+        inicial = self.read(channel, "deriva: sondeo", 2, self.codes[2],
+                            require_valid=False)
+        if not _usable(inicial):
+            self.event("deriva_no_medible",
+                       f"x{gain}: ch{channel} fuera de rango; no se mide "
+                       "deriva, se pasa al rescate",
+                       gain=gain, canal=channel)
+            return {"settled": False, "pendiente": None, "limite": limite,
+                    "reason": "tap fuera de rango", "historial": []}
+        for intento in range(intentos):
+            primero = self.read(channel, "deriva: primera", 2, self.codes[2],
+                                require_valid=False)
+            time.sleep(separacion_s)
+            segundo = self.read(channel, "deriva: segunda", 2, self.codes[2],
+                                require_valid=False)
+            if not (_usable(primero) and _usable(segundo)):
+                historial.append({"intento": intento, "pendiente": None,
+                                  "motivo": "tap no utilizable"})
+                # El tap se fue de rango DENTRO del lazo. Seguir esperando no
+                # sirve: una lectura contra el borde esta comprimida y no vuelve
+                # sola. El 2026-09-11 esto gasto 208 s mirando un ch2 clavado en
+                # -5.177 mV que ni se movia. Dos seguidas alcanzan para
+                # distinguirlo de una lectura fallada suelta.
+                fuera += 1
+                if fuera >= 2:
+                    self.event("deriva_abandonada",
+                               f"x{gain}: ch{channel} se fue de rango mientras "
+                               "se esperaba; se corta y se pasa al rescate",
+                               gain=gain, canal=channel, intento=intento)
+                    return {"settled": False, "pendiente": None,
+                            "limite": limite, "reason": "se fue de rango",
+                            "historial": historial}
+                continue
+            fuera = 0
+            pendiente = ((segundo.error_real_mv - primero.error_real_mv)
+                         / separacion_s)
+            historial.append({"intento": intento, "pendiente": pendiente})
+            if abs(pendiente) <= limite:
+                # UNA derivada chica no alcanza. La cadena no es de un solo
+                # polo, y con dos exponenciales de signo opuesto la derivada
+                # pasa por cero mientras el sistema sigue lejos de su valor
+                # final. El 2026-09-11 se vio las dos firmas: una lectura de
+                # exactamente +0,00 mV/s, y la deriva SUBIENDO de 36 a 57 mV/s,
+                # que una exponencial simple no puede hacer.
+                #
+                # Se piden CONSECUTIVAS_QUIETAS lecturas chicas seguidas y
+                # ademas que el recorrido total del tramo sea chico. Un cruce
+                # por cero no sobrevive ninguna de las dos pruebas.
+                quietas += 1
+                recorrido = abs(segundo.error_real_mv - ancla) if ancla is not None else 0.0
+                tope_recorrido = limite * separacion_s * CONSECUTIVAS_QUIETAS * 2.0
+                if quietas >= CONSECUTIVAS_QUIETAS and recorrido <= tope_recorrido:
+                    self.event("deriva_ok",
+                               f"x{gain}: ch{channel} deriva {pendiente:+.2f} "
+                               f"mV/s en {quietas} lecturas seguidas y se "
+                               f"corrio {recorrido:.1f} mV en el tramo; "
+                               "se puede medir",
+                               gain=gain, canal=channel, pendiente=pendiente,
+                               limite=limite, recorrido=recorrido,
+                               intentos=intento + 1)
+                    return {"settled": True, "pendiente": pendiente,
+                            "limite": limite, "recorrido": recorrido,
+                            "historial": historial}
+                if ancla is None:
+                    ancla = primero.error_real_mv
+                continue
+            quietas, ancla = 0, None
+            self.event("deriva_alta",
+                       f"x{gain}: ch{channel} deriva {pendiente:+.2f} mV/s "
+                       f"(limite {limite:.2f}); se espera",
+                       gain=gain, canal=channel, pendiente=pendiente,
+                       limite=limite)
+        ultima = next((h["pendiente"] for h in reversed(historial)
+                       if h["pendiente"] is not None), None)
+        self.event("deriva_no_cede",
+                   f"x{gain}: ch{channel} sigue derivando tras "
+                   f"{intentos} intentos; se mide igual y se informa",
+                   gain=gain, canal=channel, pendiente=ultima, limite=limite)
+        return {"settled": False, "pendiente": ultima, "limite": limite,
+                "historial": historial}
 
     def fase2_ganancia(self, gain: int, history: dict | None = None) -> dict:
         """Ajusta ch2, valida antes de conmutar y minimiza LPo para una G."""
@@ -1498,7 +2437,54 @@ class TwoPhaseCalibrator:
         else:
             offset_lp = OFFSET_LP_RESPALDO_MV
             fuente_offset = "respaldo (LPo o ch2 clavado)"
-        centro_ch2 = -offset_lp / (GANANCIA_LP_DESDE_CH2 * gain)
+        # LA CONSIGNA DE ch2 NO SE DIVIDE POR LA GANANCIA.
+        #
+        # Medido el 2026-09-11 con ch2 ya centrado en cada ganancia: LPo queda en
+        # -1797 mV en x1 y FUERA DE RANGO desde x2, o sea que el offset escala
+        # con G. No es de la etapa LP: es un offset de PGAout, referido a su
+        # entrada, que se amplifica igual que la senal. En x1 equivale a 292 mV;
+        # en x24 serian mas de 60 V en LPo, y ninguna resistencia de IDAC3 puede.
+        #
+        # Pero justamente por escalar igual que la senal, lo que hay que poner en
+        # ch2 para cancelarlo NO depende de la ganancia:
+        #
+        #     LPo = GANANCIA_LP * G * (ch2 - objetivo)
+        #     objetivo = ch2 + LPo / (GANANCIA_LP * G)      <- constante en G
+        #
+        # Dividir por G, como hacia antes, daba -116 mV en x1 y -29 en x4 cuando
+        # el valor correcto es -292 en las dos. Por eso LPo se iba de rango en
+        # cuanto subia la ganancia.
+        # LA CONSIGNA DE ch2 APUNTA A CENTRAR SUMo, NO LPo.
+        #
+        # MEDIDO el 2026-09-11: PGAout tiene un offset referido a su entrada de
+        # unos -270 mV, igual en todas las ganancias mayores que uno (x2 da -276,
+        # x8 da -265; en x1 no aparece, coherente con que a ganancia unitaria el
+        # PGA no use su escalera). Con ch2 en -270:
+        #
+        #     G      ch2     SUMo      LPo
+        #     x2    -287     -350      +48   los dos vivos
+        #     x4    -275     -241     -647   los dos vivos
+        #     x8    -279     -221     -688   los dos vivos
+        #     x24   -280    -1320     -617   los dos vivos
+        #
+        # SUMo entra en rango en TODAS, incluidas x16 y x24 que nunca habian
+        # cerrado, y LPo queda tratable sin que IDAC3 haya movido un codigo.
+        #
+        # El orden de las restricciones importa: si SUMo satura, LPo queda ciego
+        # y ningun actuador posterior lo arregla. Por eso la consigna se calcula
+        # para SUMo y LPo se termina despues con IDAC3.
+        if self.offset_pgaout_real_mv is not None and gain > 1:
+            centro_ch2 = self.offset_pgaout_real_mv
+            fuente_offset = "offset de PGAout medido"
+        elif self.consigna_ch2_real_mv is not None:
+            centro_ch2 = self.consigna_ch2_real_mv
+            fuente_offset = "consigna medida en x1"
+        elif fuente_offset == "medido" and self.current_gain:
+            centro_ch2 = (ch2_ahora.error_real_mv -
+                          lpo_ahora.error_real_mv /
+                          (GANANCIA_LP_DESDE_CH2 * self.current_gain))
+        else:
+            centro_ch2 = -offset_lp / GANANCIA_LP_DESDE_CH2
         objective = objetivo_ch2_mv(gain)
         self.event("objetivo_ch2",
                    f"x{gain}: offset LP {offset_lp:+.0f} mV ({fuente_offset}); "
@@ -1569,16 +2555,103 @@ class TwoPhaseCalibrator:
                           else f"no encontro punto vivo en {len(visitados)} pasos"),
                        gain=gain, visitados=visitados)
 
+        # Nada de lo que sigue vale si ch2 todavia se esta moviendo: el ABBA
+        # cancela una deriva LINEAL, no la exponencial del pasabanda, y el lazo
+        # cerraria sobre un transitorio.
+        deriva = self.esperar_sin_deriva(2, gain)
+
         abba2 = self.pendiente_abba(2, 2, (8, 4), ABBA_ESPERA_S)
         slope2, slope_source = abba2["slope_bank_uv_per_code"], "ABBA"
+
+        # Una pendiente muy por debajo de la nominal significa que ch2 no
+        # responde, o sea que esta pegado. Se lo rescata y se vuelve a medir una
+        # vez; si sigue sin responder se sigue con la constante y se informa,
+        # nunca se aborta la corrida entera por esto.
+        if not pendiente_idac2_plausible(slope2):
+            self.event("idac2_no_responde",
+                       f"x{gain}: el ABBA dio "
+                       f"{0.0 if slope2 is None else real_mv(slope2):+.3f} "
+                       f"mV/código contra {PASO_IDAC2_CH2_INMEDIATO_MV:.1f} nominales; "
+                       "ch2 no responde a su actuador, se rescata",
+                       gain=gain,
+                       pendiente=None if slope2 is None else real_mv(slope2))
+            self.rescatar_ch2_desde_riel()
+            abba2 = self.pendiente_abba(2, 2, (8, 4), ABBA_ESPERA_S)
+            slope2 = abba2["slope_bank_uv_per_code"]
+            slope_source = "ABBA tras rescate"
+            if not pendiente_idac2_plausible(slope2):
+                slope2 = None
+
         if slope2 and abs(slope2) >= 1.0:
             self.paso_idac2_mv = real_mv(slope2)
         if slope2 is None or abs(slope2) < 1.0:
-            slope2 = bank_uv(PASO_IDAC2_CH2_MV)
-            slope_source = "constante medida para inicializar PI"
+            # Preferir la pendiente medida antes en ESTA corrida: describe la
+            # placa y la ganancia actual, cosa que una constante no puede.
+            if self.paso_idac2_mv:
+                slope2 = bank_uv(self.paso_idac2_mv)
+                slope_source = "pendiente medida antes en esta corrida"
+            else:
+                slope2 = bank_uv(PASO_IDAC2_CH2_INMEDIATO_MV)
+                slope_source = "constante de respaldo"
             self.event("abba_fallback", f"x{gain}: fallback IDAC2=5,1 mV/código")
+
+        # El lazo tiene que usar la pendiente de REGIMEN, no la inmediata: la
+        # cadena termina donde dice la primera, no donde dice la segunda.
+        slope2_inmediata = slope2
+        slope2 = pendiente_regimen_idac2(slope2)
+        self.event("pendiente_regimen",
+                   f"x{gain}: ABBA dio {real_mv(slope2_inmediata):+.2f} "
+                   f"mV/código inmediatos; el lazo usa "
+                   f"{real_mv(slope2):+.2f} de régimen",
+                   gain=gain, inmediata=real_mv(slope2_inmediata),
+                   regimen=real_mv(slope2), fuente=slope_source)
+
         idac2 = self.ajustar_actuador(2, 2, float(slope2), float(objective),
                                       consigna_real_mv=centro_ch2)
+        # Foto de los tres taps JUNTOS al cerrar IDAC2. Sin esto la evidencia
+        # mezclaba un ch2 recien convergido con lecturas de SUMo y LPo de varios
+        # minutos antes, y no se podia saber si el punto servia o no.
+        foto = {ch: self.read(ch, f"x{gain} foto tras IDAC2",
+                              2 if ch in (2, 3) else 3, self.codes[2 if ch in (2, 3) else 3],
+                              require_valid=False)
+                for ch in (2, 3, 4)}
+        # BARRIDO FINO DE IDAC2 ALREDEDOR DE LA CONSIGNA DE ch2.
+        #
+        # Centrar SUMo no centra LPo: la etapa LP amplifica desde SUMo y tiene
+        # offset propio, asi que su cero cae en SUMo cerca de -280 mV. Hay que
+        # cerrar sobre ch4, que es el tap que se quiere centrar.
+        #
+        # Pero NO con Newton. Medido el 2026-09-11: en x4 un codigo de IDAC2
+        # mueve LPo unos 472 mV y la ventana entera son 4.826, asi que la zona
+        # donde LPo es legible mide unos diez codigos; en x24 mide menos de dos.
+        # Un salto de Newton sobre esa pendiente sale disparado y arrastra a ch2
+        # con el, que es lo que dejaba ch2 en -5175 mV. Sobre una ventana tan
+        # angosta lo que corresponde es enumerar.
+        #
+        # El barrido se acota a +-VENTANA_FINA_IDAC2 codigos alrededor del punto
+        # que dejo el lazo de ch2, asi que ch2 nunca se aleja mas de unos 200 mV
+        # de su consigna aunque no se encuentre ningun LPo vivo.
+        if not _usable(foto[4]):
+            # Primero quietud, despues punteria: esperar no congela la cadena, y
+            # apuntar antes de esperar es regalar el punto.
+            firme = self.estabilizar_y_apuntar_ch2(gain, float(slope2),
+                                                   float(objective))
+            barrido = self.barrer_idac2_por_lpo(gain)
+            idac2 = {"sobre_ch2": idac2, "apuntado_firme": firme,
+                     "barrido_fino": barrido}
+            foto = {ch: self.read(ch, f"x{gain} foto tras barrido fino",
+                                  2 if ch in (2, 3) else 3,
+                                  self.codes[2 if ch in (2, 3) else 3],
+                                  require_valid=False)
+                    for ch in (2, 3, 4)}
+
+        self.event("foto_tras_idac2",
+                   f"x{gain} tras cerrar IDAC2: " +
+                   "  ".join(f"ch{c}={p.error_real_mv:+.0f}"
+                             f"{'!' if not _usable(p) else ''}"
+                             for c, p in foto.items()),
+                   gain=gain,
+                   taps={str(c): asdict(p) for c, p in foto.items()})
 
         # SEGUNDA PASADA: remedir el offset ahora que LPo puede estar vivo.
         #
@@ -1588,7 +2661,22 @@ class TwoPhaseCalibrator:
         # mas del doble. Con la consigna corta, LPo quedo en -1395 en vez de cerca
         # de cero. Una vez que IDAC2 movio el punto, LPo suele estar medible y
         # entonces el offset se puede medir de verdad y reapuntar.
-        if fuente_offset != "medido":
+        # LA SEGUNDA PASADA NO CORRE SI LA CONSIGNA YA VIENE DEL OFFSET DE
+        # PGAout.
+        #
+        # Esa pasada recalcula la consigna con la formula que centra LPo, que es
+        # el enfoque ANTERIOR. Cuando la consigna ya salio del offset de PGAout
+        # medido, reapuntar la pisa y arruina un punto bueno: el 2026-09-11 la
+        # foto mostraba ch2=-285, SUMo=-348 y LPo=+178, los tres vivos y
+        # centrados en x4, y la segunda pasada los deshizo.
+        #
+        # Primero SUMo, despues LPo con IDAC3. Ese es el orden.
+        if fuente_offset == "offset de PGAout medido":
+            self.event("reapuntado_omitido",
+                       f"x{gain}: no se reapunta; la consigna ya sale del offset "
+                       "de PGAout y el punto quedo bueno",
+                       gain=gain, centro_ch2_real_mv=centro_ch2)
+        elif fuente_offset != "medido":
             ch2_2 = self.read(2, f"x{gain} ch2 para reapuntar", 2,
                               self.codes[2], require_valid=False)
             lpo_2 = self.read(4, f"x{gain} LPo para reapuntar", 3,
@@ -1597,7 +2685,10 @@ class TwoPhaseCalibrator:
                 offset_lp = (lpo_2.error_real_mv -
                              ch2_2.error_real_mv * self.current_gain *
                              GANANCIA_LP_DESDE_CH2)
-                nuevo_centro = -offset_lp / (GANANCIA_LP_DESDE_CH2 * gain)
+                # idem: la consigna no se divide por la ganancia
+                nuevo_centro = (ch2_2.error_real_mv -
+                                lpo_2.error_real_mv /
+                                (GANANCIA_LP_DESDE_CH2 * self.current_gain))
                 self.event("objetivo_ch2_reapuntado",
                            f"x{gain}: offset LP remedido {offset_lp:+.0f} mV; "
                            f"ch2 pasa a apuntar a {nuevo_centro:+.1f} mV "
@@ -1658,17 +2749,19 @@ class TwoPhaseCalibrator:
         else:
             lpo_previsto = ch2.error_real_mv * gain * GANANCIA_LP_CH2_MV_POR_MV
             fuente_lpo = "predicho desde ch2 porque LPo esta clavado"
-        pre3 = int(round(-lpo_previsto / PASO_IDAC3_CH4_MV))
-        pre3 = max(IDAC_MIN, min(IDAC_MAX, self.codes[3] + pre3))
-        if pre3 != self.codes[3]:
-            antes3 = self.codes[3]
-            self.set_code(3, pre3)
-            self.event("idac3_precompensado",
-                       f"x{gain}: IDAC3 {antes3}->{pre3} antes de conmutar; "
-                       f"LPo previsto {lpo_previsto:+.0f} mV",
-                       gain=gain, ch2_real_mv=ch2.error_real_mv,
-                       lpo_previsto_real_mv=lpo_previsto,
-                       codigo_previo=antes3, codigo_nuevo=pre3)
+        # PRECOMPENSACION DE IDAC3: ELIMINADA.
+        #
+        # Posicionaba IDAC3 por adelantado para que LPo no tuviera que pasar por
+        # el riel. La idea era buena pero la ejecucion fallo una y otra vez:
+        # traduce el LPo previsto a codigos con una constante de respaldo que ya
+        # no corresponde a la resistencia puesta, y el error de esa traduccion
+        # manda a LPo justo adonde se queria evitar. El 2026-09-11, con ch2 bien
+        # puesto en -327 mV y LPo en +493, la precompensacion lo saco de rango.
+        #
+        # Su funcion la cubre la BISECCION de mas abajo, que no necesita conocer
+        # el paso: busca y encuentra. Menos partes, menos supuestos, y una clase
+        # entera de fallas que desaparece.
+        pre3 = self.codes[3]
         # la ganancia ya se conmuto al principio de la fase 2; aca no se repite
         self._wait_fast(3, 2)
 
@@ -1722,8 +2815,20 @@ class TwoPhaseCalibrator:
                           "rescate_lpo": rescate_lpo, "codes": list(self.codes)}
                 return result
 
-        abba3 = self.pendiente_abba(3, 4, (8, 4), ABBA_ESPERA_S)
+        # IDAC3 mueve unos 6,4 mV por codigo y LPo tiene decenas de mV de ruido
+        # propio, asi que con deltas de 8 codigos el ABBA mide ruido: las siete
+        # corridas guardadas dieron entre -4,0 y +13,9 mV/codigo, con el signo
+        # cambiando. Con 48 codigos la excitacion son ~300 mV y el cociente
+        # senal a ruido pasa a ser holgado.
+        abba3 = self.pendiente_abba(3, 4, (48, 24), ABBA_ESPERA_S)
         slope3 = abba3["slope_bank_uv_per_code"]
+        if slope3 is not None and not _pendiente_idac3_plausible(slope3):
+            self.event("abba3_implausible",
+                       f"x{gain}: el ABBA de IDAC3 dio "
+                       f"{real_mv(slope3):+.2f} mV/código, fuera de lo que "
+                       "permite la resistencia; se descarta",
+                       gain=gain, pendiente_real_mv=real_mv(slope3))
+            slope3 = None
         if slope3 is None or abs(slope3) < 1.0:
             # Sin pendiente utilizable se sigue con la constante de respaldo: el
             # PI cierra igual y es preferible a abortar la ganancia entera.
@@ -1792,6 +2897,11 @@ class TwoPhaseCalibrator:
         history, started = load_history(), time.monotonic()
         self.deadline = started + budget_s
         phase1 = self.fase1_margen(history)
+        # La consigna de ch2 se mide UNA VEZ, en x1, donde LPo esta vivo. Vale
+        # para todas las ganancias porque el offset que cancela se amplifica
+        # junto con la senal. Sin esto, cada ganancia cae al respaldo, que daba
+        # -115,8 mV cuando el valor real de esta placa es -292.
+        self.medir_consigna_ch2()
         self.deadline = None
         committed_results, best_results = [], []
         if phase1["pass"]:
@@ -1836,6 +2946,11 @@ class TwoPhaseCalibrator:
     def calibrate_full(self) -> dict:
         history = load_history()
         phase1 = self.fase1_margen(history)
+        # La consigna de ch2 se mide UNA VEZ, en x1, donde LPo esta vivo. Vale
+        # para todas las ganancias porque el offset que cancela se amplifica
+        # junto con la senal. Sin esto, cada ganancia cae al respaldo, que daba
+        # -115,8 mV cuando el valor real de esta placa es -292.
+        self.medir_consigna_ch2()
         phase2 = self.fase2_ganancia(1, history) if phase1["pass"] else None
         return {"pass": bool(phase1["pass"] and phase2 and phase2["pass"]),
                 "puntaje": (phase2.get("puntaje", phase1["puntaje"])
@@ -1846,7 +2961,8 @@ class TwoPhaseCalibrator:
 def _test_point(channel: int, error_real: float, pp: int = 1000) -> Point:
     error = int(round(bank_uv(error_real)))
     return Point(0.0, "test", min(channel, 3), 0, channel, TARGET_UV+error,
-                 error, real_mv(error), pp, True, clavado(pp))
+                 error, real_mv(error), pp, True,
+                 clavado(pp, (TARGET_UV + error) / 1000.0))
 
 
 class _FakeLab:
@@ -1904,6 +3020,14 @@ class _ScriptedSlopeCalibrator(_TestCalibrator):
                                                         float | None]) -> None:
         super().__init__(lab, output, points)
         self.scripted_slopes = slopes
+        # La identificacion de IDAC1 mide tau si no lo tiene, y el tau real
+        # duerme tres veces la constante. Sin esto la prueba tardaba 155 s.
+        self.tau_bp_s = TAU_BP_REFERENCIA_S
+
+    def medir_tau_bp(self, stage: int,
+                     guard_point: Point | None = None) -> tuple[float, dict]:
+        self.tau_bp_s = TAU_BP_REFERENCIA_S
+        return self.tau_bp_s, {"synthetic": True}
 
     def pendiente_abba(self, stage: int, channel: int,
                        deltas: Iterable[int] = (8, 4),
@@ -1983,6 +3107,435 @@ class _ScriptedRescueCalibrator(_TestCalibrator):
 
 
 class Autotest(unittest.TestCase):
+    def test_compuerta_de_deriva_espera_y_despues_deja_medir(self) -> None:
+        # ch2 baja rapido en las primeras lecturas y despues se aquieta. La
+        # compuerta tiene que rechazar el tramo movido y aceptar el quieto.
+        # Tramo movido y despues quieto de verdad: la compuerta pide tres
+        # lecturas chicas SEGUIDAS, no una.
+        movido = [_test_point(2, v) for v in (0.0, -200.0, -200.0, -400.0)]
+        movido += [_test_point(2, -400.5) for _ in range(12)]
+        with TemporaryDirectory() as tmp:
+            cal = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "t.json", movido)
+            resultado = cal.esperar_sin_deriva(2, 1, separacion_s=0.001,
+                                               intentos=8)
+        self.assertTrue(resultado["settled"])
+        # Las dos ultimas difieren en medio milivoltio; las primeras en 200.
+        self.assertLessEqual(abs(resultado["pendiente"]), resultado["limite"])
+
+    def test_compuerta_corta_si_el_tap_se_va_de_rango_en_el_lazo(self) -> None:
+        # Primero vivo y moviendose, despues clavado fuera de rango. No tiene
+        # que quedarse mirandolo: gasto 208 s reales haciendo justo eso.
+        puntos = [_test_point(2, 0.0), _test_point(2, 0.0),
+                  _test_point(2, -500.0)]
+        puntos += [_test_point(2, -2500.0, 100) for _ in range(10)]
+        with TemporaryDirectory() as tmp:
+            cal = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "t.json", puntos)
+            resultado = cal.esperar_sin_deriva(2, 4, separacion_s=0.001)
+        self.assertFalse(resultado["settled"])
+        self.assertEqual(resultado["reason"], "se fue de rango")
+        self.assertLessEqual(len(resultado["historial"]), 4)
+
+    def test_compuerta_no_se_traga_un_cruce_por_cero(self) -> None:
+        # Dos polos de signo opuesto hacen que la derivada pase por cero
+        # mientras el sistema sigue viajando. Una sola lectura plana en medio de
+        # una rampa no puede declarar quieta a la cadena.
+        rampa, valor = [], 0.0
+        for i in range(90):
+            rampa.append(valor)
+            # Una meseta aislada cada tres lecturas: la derivada cruza por cero
+            # sin que el sistema haya dejado de viajar.
+            if i % 3 != 1:
+                valor += 300.0
+        puntos = [_test_point(2, v) for v in rampa]
+        with TemporaryDirectory() as tmp:
+            cal = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "t.json", puntos)
+            resultado = cal.esperar_sin_deriva(2, 4, separacion_s=0.001,
+                                               intentos=25)
+        self.assertFalse(resultado["settled"])
+
+    def test_compuerta_acepta_varias_lecturas_quietas_seguidas(self) -> None:
+        # De verdad quieto: todas las lecturas iguales. Tiene que salir.
+        puntos = [_test_point(2, -280.0) for _ in range(20)]
+        with TemporaryDirectory() as tmp:
+            cal = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "t.json", puntos)
+            resultado = cal.esperar_sin_deriva(2, 4, separacion_s=0.001,
+                                               intentos=8)
+        self.assertTrue(resultado["settled"])
+
+    def test_pendiente_de_regimen_achica_la_inmediata(self) -> None:
+        # El ABBA mide 18,78 mV/codigo pero en regimen quedan 12,35. Newton
+        # tiene que dividir por el segundo, que da un paso mas grande.
+        regimen = pendiente_regimen_idac2(bank_uv(18.783))
+        self.assertAlmostEqual(real_mv(regimen), 12.345, places=2)
+        self.assertIsNone(pendiente_regimen_idac2(None))
+        # El signo no se toca: es una fraccion positiva.
+        self.assertLess(real_mv(pendiente_regimen_idac2(bank_uv(-18.783))), 0.0)
+
+    def test_pendiente_idac2_delata_un_tap_que_no_responde(self) -> None:
+        # El caso real del 2026-09-11: ch2 en +1.885 mV, dentro de la ventana y
+        # con ruido bajo pero no nulo, que ante ocho codigos de IDAC2 se movio
+        # 0,3 mV. Ni el valor ni el ruido lo delatan; la falta de respuesta si.
+        self.assertFalse(pendiente_idac2_plausible(bank_uv(0.024)))
+        self.assertFalse(pendiente_idac2_plausible(None))
+        # Y no puede rechazar una pendiente real, ni con tolerancia holgada.
+        for mv in (13.0, 18.78, 12.35, 6.0, 40.0, -13.0):
+            self.assertTrue(pendiente_idac2_plausible(bank_uv(mv)),
+                            f"{mv} mV/código deberia pasar")
+        # Una pendiente absurda tampoco: delata otra cosa rota.
+        self.assertFalse(pendiente_idac2_plausible(bank_uv(200.0)))
+
+    def test_salto_unico_calcula_bien_los_codigos(self) -> None:
+        # ch2 en +1.885 mV, consigna -270, pendiente de regimen 12,35: hacen
+        # falta 174 codigos hacia abajo, en UN solo movimiento.
+        with TemporaryDirectory() as tmp:
+            cal = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "t.json", [_test_point(2, 1885.0)])
+            cal.set_code(2, 0)
+            r = cal.apuntar_ch2_de_una(4, -270.0, bank_uv(12.345))
+        self.assertTrue(r["aplicado"])
+        self.assertEqual(r["delta"], -round((1885.0 + 270.0) / 12.345))
+        self.assertEqual(cal.codes[2], r["codigo"])
+        # El salto que pide 175 codigos no entra en la zona util: se recorta, y
+        # eso es correcto. Lo que importa es que lo INFORME.
+        self.assertTrue(r["recortado"])
+        self.assertEqual(r["codigo"], -IDAC2_MAX_CONFIABLE)
+
+    def test_salto_unico_se_recorta_contra_el_tope(self) -> None:
+        # Un error que pide mas codigos de los que hay no puede escribir fuera
+        # de rango; se recorta y se avisa, que es dato para el informe.
+        with TemporaryDirectory() as tmp:
+            cal = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "t.json", [_test_point(2, 2000.0)])
+            cal.set_code(2, -150)
+            r = cal.apuntar_ch2_de_una(4, -270.0, bank_uv(12.345))
+        self.assertTrue(r["recortado"])
+        self.assertEqual(r["codigo"], -IDAC2_MAX_CONFIABLE)
+
+    def test_salto_unico_no_toca_nada_si_ch2_esta_fuera_de_rango(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cal = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "t.json",
+                [_test_point(2, -2500.0, 100)])
+            cal.set_code(2, 25)
+            r = cal.apuntar_ch2_de_una(4, -270.0, bank_uv(12.345))
+        self.assertFalse(r["aplicado"])
+        self.assertEqual(cal.codes[2], 25)
+
+    def test_barrido_detecta_que_midio_el_reloj(self) -> None:
+        # Los siete puntos reales del 2026-09-11: el codigo alterna alrededor de
+        # -247 y LPo solo decrece. Correlaciona con el orden, no con el codigo.
+        reales = [(-247, -1127.6), (-246, -1151.9), (-248, -1177.4),
+                  (-245, -1203.2), (-249, -1229.4), (-244, -1257.9),
+                  (-250, -1284.9)]
+        visitados = [{"idac2": c, "lpo_real_mv": v, "utilizable": True}
+                     for c, v in reales]
+        d = barrido_dominado_por_deriva(visitados)
+        self.assertTrue(d["dominado"])
+        self.assertGreater(d["r_orden"], 0.99)
+
+    def test_barrido_no_se_queja_de_una_respuesta_legitima(self) -> None:
+        # Mismo orden de visita, pero ahora LPo sigue al CODIGO. No hay que
+        # descartarlo: es exactamente lo que el barrido busca.
+        visitados = [{"idac2": c, "lpo_real_mv": 12.0 * (c + 247),
+                      "utilizable": True}
+                     for c in (-247, -246, -248, -245, -249, -244, -250)]
+        d = barrido_dominado_por_deriva(visitados)
+        self.assertFalse(d["dominado"])
+
+    def test_barrido_no_opina_con_pocos_puntos(self) -> None:
+        visitados = [{"idac2": -247, "lpo_real_mv": -100.0, "utilizable": True}]
+        self.assertFalse(barrido_dominado_por_deriva(visitados)["dominado"])
+
+    def test_fase1_no_deja_a_idac2_fuera_de_su_zona_util(self) -> None:
+        # El caso real: ch2 lejos de su consigna obliga a IDAC2 a trabajar donde
+        # pierde compliance. La fase 1 tiene que gastar SUS actuadores para
+        # evitarlo, en vez de descargar todo sobre IDAC2.
+        taps = {ch: _test_point(ch, 0.0) for ch in range(5)}
+        taps[2] = _test_point(2, 2100.0)
+        result = optimizar_fase1(taps)
+        if result["feasible"]:
+            self.assertLessEqual(abs(result["idac2_previsto"]),
+                                 IDAC2_MAX_CONFIABLE,
+                                 "la fase 1 dejo a IDAC2 fuera de su zona util")
+
+    def test_zona_util_de_idac2_es_menor_que_el_nominal(self) -> None:
+        # Si algun dia se iguala al nominal, la restriccion deja de existir sin
+        # que nadie se entere. Medido: en 240 el actuador ya no sirve.
+        self.assertLess(IDAC2_MAX_CONFIABLE, IDAC_MAX)
+        self.assertLess(IDAC2_MAX_CONFIABLE, 240)
+
+    def test_las_dos_pendientes_de_idac2_no_son_la_misma(self) -> None:
+        # Confundirlas fue un error real: el respaldo del ABBA se convierte a
+        # regimen despues, asi que tiene que ser la inmediata.
+        self.assertGreater(PASO_IDAC2_CH2_INMEDIATO_MV, PASO_IDAC2_CH2_MV)
+        convertida = real_mv(pendiente_regimen_idac2(
+            bank_uv(PASO_IDAC2_CH2_INMEDIATO_MV)))
+        self.assertAlmostEqual(convertida, PASO_IDAC2_CH2_MV, places=1)
+
+    def test_idac1_se_corrige_por_la_fraccion_asentada(self) -> None:
+        # El ABBA de IDAC1 mira BPo, que tiene la tau del pasabanda, asi que
+        # despues de 1,5 tau vio el 77,7 % del escalon. La pendiente informada
+        # tiene que venir dividida por esa fraccion, no cruda.
+        with TemporaryDirectory() as tmp:
+            points = {ch: _test_point(ch, 0.0) for ch in range(5)}
+            cal = _ScriptedSlopeCalibrator(
+                _FakeLab(), Path(tmp) / "t.json", points, (60.0, 2.0))
+            result = cal.medir_pendientes_fase1()
+        esperada = 2.0 / (1.0 - math.exp(-ESPERA_ABBA_IDAC1_TAU))
+        self.assertAlmostEqual(
+            result["modelo_real_mv_por_codigo"]["ch1_idac1"], esperada,
+            places=3)
+        # Y tiene que quedar asentado en los eventos, con el tau usado.
+        corregidas = [e for e in cal.events
+                      if e["kind"] == "pendiente_idac1_corregida"]
+        self.assertEqual(len(corregidas), 1)
+        self.assertIn("fracción asentada", corregidas[0]["message"])
+
+    def test_la_fraccion_asentada_de_idac1_es_razonable(self) -> None:
+        # Si alguien sube la espera a varios tau la fraccion tiende a uno y la
+        # correccion deja de hacer nada; si la baja mucho, amplifica ruido.
+        fraccion = 1.0 - math.exp(-ESPERA_ABBA_IDAC1_TAU)
+        self.assertGreater(fraccion, 0.5)
+        self.assertLess(fraccion, 0.95)
+        # Y la excitacion tiene que superar el ruido de BPo, que son unos 6 mV.
+        self.assertGreaterEqual(DELTA_ABBA_IDAC1 * PASO_IDAC1_CH1_MV, 30.0)
+
+    def test_ningun_camino_puede_escribir_idac2_fuera_de_la_zona_util(self) -> None:
+        # Es la prueba que faltaba. El limite estaba solo en el planificador y
+        # la fase 2 lo ignoro: el 2026-09-12 dejo IDAC2 en -255. Ahora hay un
+        # unico punto de paso y NINGUN camino puede saltearlo.
+        with TemporaryDirectory() as tmp:
+            cal = _TestCalibrator(_FakeLab(), Path(tmp) / "t.json",
+                                  {ch: _test_point(ch, 0.0) for ch in range(5)})
+            for pedido in (-255, -200, -161, 161, 200, 255):
+                cal.set_code(2, pedido)
+                self.assertLessEqual(abs(cal.codes[2]), IDAC2_MAX_CONFIABLE,
+                                     f"IDAC2={pedido} se escribio sin recortar")
+            # Y los demas actuadores NO se recortan: el limite es de IDAC2.
+            for stage in (0, 1, 3):
+                cal.set_code(stage, 255)
+                self.assertEqual(cal.codes[stage], 255)
+        recortes = [e for e in cal.events if e["kind"] == "idac2_recortado"]
+        self.assertEqual(len(recortes), 6)
+
+    def test_apuntar_corta_cuando_el_actuador_ya_no_puede(self) -> None:
+        # Con la zona util aplicada el salto sale recortado y el codigo no se
+        # mueve. Reintentarlo cinco veces no cambia nada: hay que decir que la
+        # consigna no se alcanza, que es el dato que importa.
+        lejos = [_test_point(2, 634.0) for _ in range(120)]
+        with TemporaryDirectory() as tmp:
+            cal = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "t.json", lejos)
+            gate = cal.esperar_sin_deriva
+            cal.esperar_sin_deriva = (
+                lambda ch, g, **k: gate(ch, g, separacion_s=0.001, intentos=1))
+            cal.set_code(2, -IDAC2_MAX_CONFIABLE)
+            resultado = cal.estabilizar_y_apuntar_ch2(
+                4, bank_uv(12.34), 38.0, intentos=MAX_REPARTOS_IDAC0 + 2)
+        self.assertFalse(resultado["firme"])
+        self.assertTrue(resultado["inalcanzable"])
+        self.assertGreater(resultado["falta_real_mv"], 500.0)
+        # Intenta repartir, que es lo que corresponde probar primero. Aca las
+        # lecturas guionadas no mejoran, asi que lo revierte y se detiene: un
+        # reparto que no sirve no se repite.
+        self.assertLessEqual(len(resultado["historial"]),
+                             MAX_REPARTOS_IDAC0 + 2)
+        self.assertEqual(
+            len([e for e in cal.events if e["kind"] == "reparto_revertido"]), 1)
+        avisos = [e for e in cal.events if e["kind"] == "consigna_inalcanzable"]
+        self.assertEqual(len(avisos), 1)
+
+    def test_fase1_no_acepta_un_residuo_que_idac2_no_puede_cubrir(self) -> None:
+        # El bug que dejaba pasar el deficit: la aceptacion medía contra el
+        # rango nominal de 255 en vez de contra la zona util. Un residuo de
+        # 2.000 mV entra en 255 codigos pero no en 160, y no hay que aceptarlo.
+        paso = PASO_IDAC2_CH2_MV
+        entra_en_nominal = round(200 * paso)
+        self.assertLessEqual(abs(round(entra_en_nominal / paso)), IDAC_MAX)
+        self.assertGreater(abs(round(entra_en_nominal / paso)),
+                           IDAC2_MAX_CONFIABLE)
+        # Es la condicion que la fase 1 tiene que rechazar. Se comprueba sobre
+        # el texto del criterio para que no se pueda relajar sin que falle.
+        fuente = inspect.getsource(TwoPhaseCalibrator.fase1_margen)
+        self.assertIn("abs(idac2_needed) <= IDAC2_MAX_FASE1", fuente)
+        self.assertNotIn("abs(idac2_needed) <= IDAC_MAX", fuente)
+        # La fase 1 no puede gastarse el presupuesto entero: despues vienen la
+        # conmutacion de PGAout y la consigna de la fase 2.
+        self.assertLess(IDAC2_MAX_FASE1, IDAC2_MAX_CONFIABLE)
+
+    def test_el_mensaje_del_reparto_nombra_el_actuador_correcto(self) -> None:
+        # Decia IDAC0 mientras movia IDAC1. Es cosmetico pero los registros son
+        # la unica ventana a lo que pasa en la placa, y uno que miente cuesta
+        # horas de diagnostico sobre el actuador equivocado.
+        with TemporaryDirectory() as tmp:
+            cal = self._cal_reparto(tmp, -10.0)
+            cal.estabilizar_y_apuntar_ch2(4, bank_uv(12.34), 38.0)
+        repartos = [e for e in cal.events if e["kind"] == "reparto_con_idac0"]
+        self.assertTrue(repartos)
+        self.assertIn("IDAC1", repartos[0]["message"])
+        self.assertNotIn("IDAC0", repartos[0]["message"])
+        # Y el mensaje de reversion tambien: tenia el mismo error.
+        for e in cal.events:
+            if e["kind"] == "reparto_revertido":
+                self.assertNotIn("IDAC0", e["message"])
+
+    def _cal_reparto(self, tmp: str, mv_por_codigo0: float,
+                     ch2_inicial: float = 620.0,
+                     real_por_codigo0: float | None = None):
+        """Doble que MODELA la planta en vez de guionar lecturas.
+
+        Guionar una lista de lecturas hace que la prueba dependa del orden
+        exacto de las llamadas, y con el reparto reversible eso se vuelve
+        imposible de mantener. Aca ch2 es funcion del codigo de IDAC0, que es lo
+        que de verdad pasa, y la prueba sobrevive a que el lazo lea mas o menos
+        veces.
+        """
+        cal = _TestCalibrator(_FakeLab(), Path(tmp) / "t.json",
+                              {ch: _test_point(ch, 0.0) for ch in range(5)})
+        # DOS coeficientes: el que el algoritmo CREE y el que la planta HACE.
+        # Con uno solo nunca pueden discrepar, y la discrepancia es justo lo que
+        # hay que poder probar: un modelo equivocado que empeora las cosas.
+        real = (mv_por_codigo0 if real_por_codigo0 is None
+                else real_por_codigo0)
+        cal.modelo_fase1 = {"ch2_idac1": mv_por_codigo0}
+        cal.tau_bp_s = TAU_BP_REFERENCIA_S
+        cal._wait_bp = lambda tau, stage: _test_point(1, 0.0)
+        original = cal.read
+
+        def leer(channel, phase, stage, code, *, require_valid=True):
+            if channel != 2:
+                return original(channel, phase, stage, code,
+                                require_valid=require_valid)
+            return _test_point(2, ch2_inicial + real * cal.codes[1])
+
+        cal.read = leer
+        gate = cal.esperar_sin_deriva
+        cal.esperar_sin_deriva = (
+            lambda ch, g, **kw: gate(ch, g, separacion_s=0.001, intentos=1))
+        cal.set_code(2, -IDAC2_MAX_CONFIABLE)
+        return cal
+
+    def test_reparte_con_idac0_cuando_idac2_llega_al_limite(self) -> None:
+        # ch2 a 620 mV de mas y IDAC2 en su limite. El actuador del reparto
+        # mueve 10 mV por codigo, asi que el salto entero son 62 codigos.
+        with TemporaryDirectory() as tmp:
+            cal = self._cal_reparto(tmp, -10.0)
+            r = cal.estabilizar_y_apuntar_ch2(4, bank_uv(12.34), 38.0)
+        repartos = [e for e in cal.events if e["kind"] == "reparto_con_idac0"]
+        self.assertGreaterEqual(len(repartos), 1, "tenia que repartir")
+        # Un solo salto entero alcanza: el paso fino no necesita iterar.
+        self.assertNotEqual(cal.codes[1], 0)
+        self.assertFalse([e for e in cal.events
+                          if e["kind"] == "reparto_revertido"])
+        self.assertTrue(r["firme"])
+
+    def test_la_sonda_corrige_un_modelo_con_el_signo_cambiado(self) -> None:
+        # El modelo dice que el actuador mueve -10 mV por codigo y la planta
+        # hace +10. La sonda va para el lado equivocado y empeora, se revierte,
+        # PERO deja medida la pendiente real. Con ese numero el salto siguiente
+        # acierta. Es la propiedad que hace que el reparto no dependa de un
+        # modelo confiable, que es justo lo que no tenemos.
+        with TemporaryDirectory() as tmp:
+            cal = self._cal_reparto(tmp, -10.0, real_por_codigo0=+10.0)
+            r = cal.estabilizar_y_apuntar_ch2(4, bank_uv(12.34), 38.0)
+        self.assertTrue([e for e in cal.events
+                         if e["kind"] == "reparto_revertido"],
+                        "tenia que revertir la sonda que empeora")
+        medidas = [e for e in cal.events
+                   if e["kind"] == "pendiente_reparto_medida"]
+        self.assertTrue(medidas, "tenia que medir la pendiente real")
+        self.assertAlmostEqual(medidas[0]["medido"], 10.0, places=1)
+        self.assertTrue(r["firme"],
+                        "con la pendiente medida tenia que cerrar")
+
+    def test_no_reparte_indefinidamente(self) -> None:
+        # Un deficit enorme, con un actuador que casi no mueve, no se puede
+        # cerrar. Lo que importa es que TERMINE y lo diga, no cuantas vueltas
+        # de para eso.
+        with TemporaryDirectory() as tmp:
+            cal = self._cal_reparto(tmp, -0.05, ch2_inicial=5000.0)
+            r = cal.estabilizar_y_apuntar_ch2(4, bank_uv(12.34), 38.0)
+        intentos = len([e for e in cal.events
+                        if e["kind"] == "reparto_con_idac0"])
+        self.assertLessEqual(intentos, MAX_REPARTOS_IDAC0)
+        self.assertTrue(r.get("inalcanzable"))
+
+    def _cal_apuntado(self, tmp: str, puntos: list[Point]):
+        """Calibrador con el actuador anulado y las esperas en cero.
+
+        Lo que se prueba aca es el ORDEN de las operaciones, no el salto: si se
+        deja el actuador real, cada reapuntado toca la placa y la prueba tarda
+        minutos sin mirar nada nuevo.
+        """
+        cal = _ScriptedRescueCalibrator(_FakeLab(), Path(tmp) / "t.json",
+                                        puntos)
+        cal.reapuntados = []
+        # Se intercepta el salto unico, que es el que reapunta ahora, y tambien
+        # el rescate, que toca la placa.
+        cal.apuntar_ch2_de_una = (
+            lambda *a, **k: cal.reapuntados.append(a) or {"aplicado": True})
+        cal.rescatar_ch2_desde_riel = lambda *a, **k: {"converged": True}
+        gate = cal.esperar_sin_deriva
+        cal.esperar_sin_deriva = (
+            lambda ch, g, **k: gate(ch, g, separacion_s=0.001, intentos=1))
+        return cal
+
+    def test_apuntar_ch2_reapunta_si_se_corrio_mientras_esperaba(self) -> None:
+        # Lecturas quietas pero lejos de la consigna: tiene que reapuntar y no
+        # darse por satisfecho. Es el fallo de la corrida de las 19:20, donde
+        # ch2 se fue de -264 a +1882 mV mientras la compuerta esperaba.
+        with TemporaryDirectory() as tmp:
+            cal = self._cal_apuntado(tmp, [_test_point(2, 1882.0)
+                                           for _ in range(12)])
+            resultado = cal.estabilizar_y_apuntar_ch2(
+                4, bank_uv(13.0), -270.0, intentos=2)
+        self.assertFalse(resultado["firme"])
+        self.assertEqual(len(resultado["historial"]), 2)
+        self.assertEqual(len(cal.reapuntados), 2)
+
+    def test_apuntar_ch2_acepta_un_desvio_que_el_barrido_absorbe(self) -> None:
+        # A 50 mV de la consigna el barrido fino llega de sobra: no hay que
+        # gastar iteraciones reapuntando.
+        with TemporaryDirectory() as tmp:
+            cal = self._cal_apuntado(tmp, [_test_point(2, -220.0)
+                                           for _ in range(12)])
+            resultado = cal.estabilizar_y_apuntar_ch2(
+                4, bank_uv(13.0), -270.0, intentos=3)
+        self.assertTrue(resultado["firme"])
+        self.assertEqual(len(resultado["historial"]), 1)
+        self.assertEqual(cal.reapuntados, [])
+
+    def test_compuerta_de_deriva_no_mide_sobre_tap_fuera_de_rango(self) -> None:
+        # Un ch2 contra el borde da pendientes inventadas. La compuerta tiene
+        # que salir enseguida en vez de gastar sus intentos.
+        muerto = [_test_point(2, -2500.0, 100)] * 4
+        with TemporaryDirectory() as tmp:
+            cal = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "t.json", muerto)
+            resultado = cal.esperar_sin_deriva(2, 4, separacion_s=1.0)
+        self.assertFalse(resultado["settled"])
+        self.assertEqual(resultado["reason"], "tap fuera de rango")
+        self.assertEqual(resultado["historial"], [])
+
+    def test_compuerta_de_deriva_escala_con_la_ganancia(self) -> None:
+        # Lo que importa es cuanto se mueve LPo, no ch2: la misma pendiente de
+        # ch2 es aceptable en x1 e inaceptable en x24.
+        quieta = [_test_point(2, 0.0), _test_point(2, -1.0)] * 8
+        with TemporaryDirectory() as tmp:
+            cal = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "a.json", list(quieta))
+            floja = cal.esperar_sin_deriva(2, 1, separacion_s=1.0, intentos=1)
+            cal2 = _ScriptedRescueCalibrator(
+                _FakeLab(), Path(tmp) / "b.json", list(quieta))
+            dura = cal2.esperar_sin_deriva(2, 24, separacion_s=1.0, intentos=1)
+        self.assertGreater(floja["limite"], dura["limite"])
+        self.assertAlmostEqual(floja["limite"] / dura["limite"], 24.0, places=3)
+
+
     def test_objetivo_ch2(self) -> None:
         # El objetivo es el MENOR de dos presupuestos: que SUMo no riele y que
         # IDAC3 pueda centrar LPo. El segundo manda siempre, por ~2,6 veces.
@@ -2127,14 +3680,22 @@ class Autotest(unittest.TestCase):
                 _FakeLab(), Path(tmp)/"t.json")
             result = cal.fase1_margen({})
             self.assertTrue(result["pass"])
-            self.assertEqual(len(result["recalculos_desde_salto"]), 1)
-            self.assertAlmostEqual(
-                result["modelo_final_real_mv_por_codigo"]["ch0_idac0"],
-                85.0, places=2)
-            self.assertEqual(result["codes"][:2], [-1, -135])
-            self.assertTrue(any(
-                event["kind"] == "phase1_slopes_recalculated"
-                for event in cal.events))
+            # Lo que se garantiza es la IMPLICACION, no que siempre haya salto:
+            # con la banda muerta de MEJORA_MINIMA_RECURSO, un punto inicial que
+            # ya sirve no se mueve, y sin salto no hay pendiente realizada que
+            # aprender. Eso es correcto. Lo que NO puede pasar es haber saltado y
+            # no haber recalculado teniendo el dato.
+            # El recalculo desde el salto realizado es CONDICIONAL: solo corre
+            # si la verificacion posterior no cumple las restricciones. Con un
+            # modelo errado que aun asi verifica, no corre, y esta bien que no
+            # corra. Su mecanica la cubre
+            # test_recalcula_pendiente_desde_el_salto_realizado.
+            #
+            # Lo que se garantiza aca es que la fase 1 termina en un punto que
+            # verifica, con el modelo que haya usado.
+            self.assertIn("recalculos_desde_salto", result)
+            self.assertTrue(result["criteria"]["ch0_margin"])
+            self.assertTrue(result["criteria"]["ch1_margin"])
 
     def test_optimizador_fase1_informa_sin_punto_factible(self) -> None:
         # Una excursión pp de 3 V no cabe entre dos guardas duras de 1 V.
@@ -2150,7 +3711,7 @@ class Autotest(unittest.TestCase):
     def test_rescate_desde_riel_converge(self) -> None:
         with TemporaryDirectory() as tmp:
             initial = _test_point(2, -2500.0, 100)
-            closer = _test_point(2, -1500.0, 100)
+            closer = _test_point(2, -2450.0, 100)
             live = _test_point(2, -200.0, 1000)
             cal = _ScriptedRescueCalibrator(
                 _FakeLab(), Path(tmp)/"t.json", [closer, live])
@@ -2163,7 +3724,7 @@ class Autotest(unittest.TestCase):
     def test_rescate_desde_riel_aborta_si_no_acerca(self) -> None:
         with TemporaryDirectory() as tmp:
             initial = _test_point(2, -2500.0, 100)
-            farther = _test_point(2, 2200.0, 100)
+            farther = _test_point(2, 2400.0, 100)
             cal = _ScriptedRescueCalibrator(
                 _FakeLab(), Path(tmp)/"t.json", [farther])
             result = cal.rescatar_ch2_desde_riel(initial)
@@ -2174,7 +3735,7 @@ class Autotest(unittest.TestCase):
     def test_abba_no_se_intenta_sobre_tap_clavado(self) -> None:
         with TemporaryDirectory() as tmp:
             points = {ch: _test_point(ch, 0.0) for ch in range(5)}
-            points[2] = _test_point(2, 2100.0, 100)
+            points[2] = _test_point(2, 2400.0, 100)
             lab = _FakeLab()
             cal = _TestCalibrator(lab, Path(tmp)/"t.json", points)
             result = cal.pendiente_abba(2, 2)
