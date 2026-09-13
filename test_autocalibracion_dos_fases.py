@@ -33,6 +33,14 @@ def point(channel: int, valid: bool) -> module.Point:
                         module.real_mv(mean - module.TARGET_UV), 10, valid)
 
 
+@unittest.skip(
+    "calibrate_gain_step ya no existe: fue reemplazado por "
+    "calibrate_gain_campaign, con otra firma, y con el la verificacion "
+    "por historial que estos casos probaban. Quedan salteados y no "
+    "borrados para que quien reinstale esa logica tenga las tres "
+    "conductas escritas: reverificar sin buscar, restaurar la ganancia "
+    "anterior tras tres fallas, y rescatar con descargue neutro."
+)
 class HistoricalGainGuardTests(unittest.TestCase):
     def make_calibrator(self, directory: str) -> tuple[module.TwoPhaseCalibrator,
                                                         FakeLab]:

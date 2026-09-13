@@ -1,0 +1,38 @@
+{
+  "id_placa": "geo-01",
+  "fecha": "2026-09-13",
+  "pendientes": {
+    "IDAC3->ch4@x1": 6.684,
+    "IDAC0->ch0@x50": 61.35,
+    "IDAC1->ch1@x50": 1.986,
+    "IDAC1->ch2@x50": -9.229,
+    "IDAC0->ch0@x1": 1.1664625489999503,
+    "IDAC0->ch1@x1": -0.13283771899998328,
+    "IDAC0->ch2@x1": -4.277095731999977,
+    "IDAC0->ch3@x1": -4.186280140000042,
+    "IDAC1->ch0@x1": 0.0037839830000029905,
+    "IDAC1->ch1@x1": 2.1538829550000083,
+    "IDAC1->ch2@x1": -7.832844810000008,
+    "IDAC1->ch3@x1": -7.650416997999998,
+    "IDAC2->ch0@x1": 0.09539620300000934,
+    "IDAC2->ch1@x1": -0.08723076600001832,
+    "IDAC2->ch2@x1": 12.595883621999974,
+    "IDAC2->ch3@x1": 12.489732940999993,
+    "IDAC3->ch0@x1": -0.007567966000003708,
+    "IDAC3->ch1@x1": -0.011351949000004424,
+    "IDAC3->ch2@x1": 0.0,
+    "IDAC3->ch3@x1": 0.03047102100002661
+  },
+  "tau_bp_s": 28.8,
+  "vdda_mv": 4826.0,
+  "puntos": {
+    "pga1_x1": [
+      11,
+      -111,
+      -95,
+      85
+    ]
+  },
+  "validados": [],
+  "notas": "Vref_LP con 10 kOhm. IDAC3 medido con PGA y PGAout en x1 y LPo dentro de ventana, ABBA de 4 bloques. IDAC0 NO figura contra ch2: el capacitor de 680 uF bloquea su continua y los 244 mV/codigo que informa la fase 1 son el resto de un transitorio. IDAC1->ch1 es la pendiente CRUDA: la correccion por fraccion asentada la infla 36 % porque el efecto de IDAC1 decrece al asentar, no crece. Punto de trabajo hallado el 2026-09-13 08:53 con PGA x1 y PGAout x1: los cinco taps dentro de ventana y LPo en +35 mV."
+}
