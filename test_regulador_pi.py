@@ -153,9 +153,15 @@ class TestConvergencia(unittest.TestCase):
                                tau_s=34.0)
         planta = PlantaSimulada(-12.0, -8.0, 34.0, valor_inicial=200.0)
         correr(reg, planta, 100)
-        self.assertEqual(abs(reg.codigo_fino), LIMITE_FINO,
-                         "con el signo al reves el fino tiene que terminar "
-                         "clavado, y esta prueba existe para documentarlo")
+        # Desde el 2026-09-13 el descargue neutro tambien corre cuando el fino
+        # satura, asi que ya no queda EXACTAMENTE en el limite: lo despega unos
+        # pocos codigos. Lo que la prueba documenta sigue en pie -con el signo
+        # al reves el fino se va contra su tope y se queda ahi- y por eso el
+        # margen es de un puñado de codigos y no una tolerancia generosa.
+        self.assertGreaterEqual(
+            abs(reg.codigo_fino), LIMITE_FINO - 5,
+            "con el signo al reves el fino tiene que terminar contra su "
+            "limite, y esta prueba existe para documentarlo")
 
 
 class TestCascada(unittest.TestCase):

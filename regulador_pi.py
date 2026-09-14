@@ -361,11 +361,21 @@ class ReguladorCascada:
             exceso = (abs(nuevo_fino) - self.zona_comoda) * (
                 1 if nuevo_fino > 0 else -1)
 
-            if usar_vernier:
+            if usar_vernier or saturado:
                 # DESCARGUE NEUTRO. Mover el grueso solo seria una patada de
                 # miles de milivolts que el fino no puede compensar. Se mueven
                 # los dos juntos con efecto neto casi nulo: el fino se acerca al
                 # centro y el tap casi no se entera.
+                #
+                # Y ES OBLIGATORIO CUANDO EL FINO SE QUEDO SIN RECORRIDO, este
+                # o no en modo vernier. Antes solo corria en vernier, y el
+                # 2026-09-13 a ganancia 64 eso dejo al lazo paralizado veinte
+                # minutos: IDAC3 clavado en +255 y IDAC2 quieto en +59, con
+                # LPo entre -200 y -320 mV. La cuenta del camino de abajo daba
+                # 0,039 codigos de grueso contra un paso minimo de 0,4, asi que
+                # nunca se movia; y el fino, en su tope, no podia hacer nada.
+                # Un actuador saturado no necesita que le transfieran de a
+                # poco: necesita recuperar rango ya.
                 m_fino, m_grueso = paso_neutro(self.ganancia_fina,
                                                self.ganancia_gruesa)
                 signo = -1 if nuevo_fino > 0 else 1

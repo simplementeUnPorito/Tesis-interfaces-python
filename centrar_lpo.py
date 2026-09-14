@@ -58,7 +58,7 @@ from autocalibracion_dos_fases import TwoPhaseCalibrator
 from cerrar_lazo import (CANAL_LPO, CANAL_SUM, SALIDA, TAU_REFERENCIA_S,
                          real_mv)
 from escala_banco import BANCO_VREF_MV, FACTOR, clavado, lectura_valida
-from perfil_placa import PerfilPlaca, resumen
+from perfil_placa import TAU_BP_FIJO_S, PerfilPlaca, resumen
 from testbench.core.console import Console
 from testbench.core.lab import GAIN_CODES, Lab
 from testbench.core.session import Session
@@ -260,7 +260,8 @@ def sondar_asentado(lab: Lab, etapa: int, codigo: int, canal: int,
 
 def buscar_par_idac1_idac2(lab: Lab, idac1: int, ancho: int, paso: int,
                            tolerancia_mv: float, espera_rapida: float,
-                           registro):
+                           registro, tope_s: float = 1200.0,
+                           idac2_base: int = 0):
     """Busca el PAR (IDAC1, IDAC2) que mete a SUMo en su ventana.
 
     POR QUE ANIDADO Y NO UNO DESPUES DEL OTRO
@@ -283,16 +284,54 @@ def buscar_par_idac1_idac2(lab: Lab, idac1: int, ancho: int, paso: int,
     entero cuesta un minuto y medio. Asi que por cada codigo de IDAC1 -pocos, y
     caros- se recorre IDAC2 completo -muchos, y baratos-.
     """
-    for i in range(-(ancho // paso), ancho // paso + 1):
+    # TOPE DE TIEMPO. Cada codigo de IDAC1 cuesta hasta dos minutos y medio de
+    # asentamiento, y trece codigos son media hora. El presupuesto de campo son
+    # diez minutos: una busqueda que se pasa de veinte no sirve aunque termine
+    # encontrando algo, porque para entonces el punto ya se corrio.
+    limite = time.time() + tope_s
+
+    # SE BUSCA HACIA AFUERA DESDE LA SEMILLA, no de un extremo al otro.
+    #
+    # El punto guardado es la mejor conjetura que hay sobre donde esta el par
+    # bueno; empezar por el extremo opuesto y avanzar en linea gasta el
+    # presupuesto en la zona menos probable. El 2026-09-13 a las 15:33 la
+    # busqueda de x2 arranco en IDAC1=-110, llego hasta -70 y ahi se le acabo el
+    # tope: nunca probo -50, que era la semilla, ni -53, que era el punto que
+    # habia funcionado esa manana. Se reporto como "no llega" algo que en
+    # realidad no se habia mirado.
+    #
+    # En orden 0, +1, -1, +2, -2... el presupuesto se gasta primero donde mas
+    # probable es encontrar, y si alcanza para todo el resultado es el mismo.
+    n = ancho // paso
+    orden = [0]
+    for k in range(1, n + 1):
+        orden += [k, -k]
+
+    for i in orden:
+        if time.time() > limite:
+            registro(f"   se agoto el tope de {tope_s / 60:.0f} min de "
+                     "busqueda; se corta")
+            return idac1, 0, 0.0, False, "la busqueda no entra en el presupuesto"
         codigo1 = max(-255, min(255, idac1 + i * paso))
         registro(f"   IDAC1={codigo1:+d}")
         poner_idac(lab, 1, codigo1, registro)
-        poner_idac(lab, 2, 0, registro)
+        # IDAC2 NO SE PONE EN CERO: se lo deja donde el perfil lo dejo.
+        #
+        # Ponerlo en cero parecia lo prolijo -arrancar cada candidato desde el
+        # mismo estado- y es justo lo que arruinaba la busqueda. Medido el
+        # 2026-09-13: en el punto que funciono a PGA x50, IDAC2 valia -95, y
+        # con IDAC1 en +164 ponerlo en cero manda ch2 a +1.674 mV, que engancha
+        # el sumador contra su riel. De ahi no vuelve en minutos.
+        #
+        # O sea que la busqueda destruia el punto antes de poder medirlo.
+        poner_idac(lab, 2, idac2_base, registro)
         time.sleep(10.0)
         esperar_quieto(lab, CANAL_SUM, registro, maximo_s=150.0)
 
+        vistos = []
         for codigo2 in range(-IDAC2_LIMITE, IDAC2_LIMITE + 1, 32):
             valor, vivo = sondar(lab, 2, codigo2, CANAL_SUMO, espera_rapida)
+            vistos.append(valor)
             # NO ALCANZA CON QUE LA LECTURA SEA "VALIDA": TIENE QUE ESTAR CERCA
             # DEL CENTRO.
             #
@@ -322,7 +361,20 @@ def buscar_par_idac1_idac2(lab: Lab, idac1: int, ancho: int, paso: int,
                 registro(f"      confirmado: ch3 {valor:+9.1f} mV   DENTRO")
                 return codigo1, codigo2, valor, True, ""
             registro(f"      no sobrevivio al asentamiento: {valor:+9.1f} mV")
-        registro("      IDAC2 recorrido entero sin meter ch3 en ventana")
+        # SE INFORMA EL RECORRIDO, no solo el fracaso.
+        #
+        # "IDAC2 recorrido entero sin meter ch3 en ventana" no distingue dos
+        # situaciones muy distintas: que IDAC2 mueva ch3 por todos lados sin
+        # que la ventana caiga ahi, o que ch3 no se mueva nada porque esta
+        # clavado. La primera es un problema de rango; la segunda, de que la
+        # etapa no responde. Sin el dato no se puede saber cual es.
+        if vistos:
+            registro(f"      IDAC2 recorrido entero: ch3 fue de "
+                     f"{min(vistos):+.0f} a {max(vistos):+.0f} mV "
+                     f"({max(vistos) - min(vistos):.0f} mV de recorrido), "
+                     "sin entrar en ventana")
+        else:
+            registro("      IDAC2 recorrido entero sin ninguna lectura de ch3")
     return idac1, 0, 0.0, False, "ningun par de IDAC1 e IDAC2 mete SUMo adentro"
 
 
@@ -576,12 +628,15 @@ def main() -> int:
     ap.add_argument("--port", default="COM8")
     ap.add_argument("--pga", type=int, default=50)
     ap.add_argument("--pgaout", type=int, default=4)
-    # 50 mV, no 25. La corrida del 2026-09-13 a las 08:53 dejo LPo en
-    # +35 mV con los cinco taps adentro, y en el minuto de reposo la
-    # planta se corrio 15 mV sola. Pedir 25 es pedir mas fineza que la
-    # que el circuito sostiene: sobre una ventana de +-2 V, 50 mV son el
-    # 2,5 %, y lo que sobra de margen no se usa para nada.
-    ap.add_argument("--tolerancia", type=float, default=50.0)
+    # 200 mV, criterio de Elias del 2026-09-13.
+    #
+    # Sobre una ventana de +-2 V son el 10 %, y la planta se corre entre 15 y
+    # 65 mV por minuto ella sola: pedir menos es pedir mas fineza que la que el
+    # circuito sostiene, y hace que un punto perfectamente usable se reporte
+    # como fallo. La corrida de las 16:43 dejo los cinco taps en ventana con el
+    # sumador en +7,4 mV y LPo a 79 del centro, y el veredicto automatico decia
+    # "no llega" por 29 mV.
+    ap.add_argument("--tolerancia", type=float, default=200.0)
     ap.add_argument("--espera", type=float, default=ESPERA_RAPIDA_S)
     ap.add_argument("--csv", default=None)
     ap.add_argument("--perfil", default=None,
@@ -589,6 +644,9 @@ def main() -> int:
                          "saltea la caracterizacion de la fase 1")
     ap.add_argument("--guardar-perfil", action="store_true",
                     help="escribe el punto encontrado en el perfil")
+    ap.add_argument("--tope-minutos", type=float, default=20.0,
+                    help="corta y reporta si se pasa; el presupuesto de campo "
+                         "son 10 minutos y nada por arriba de 20 sirve")
     ap.add_argument("--sin-reposo", action="store_true",
                     help="no espera el minuto de verificacion; solo para "
                          "depurar, un PASS asi no vale")
@@ -615,7 +673,13 @@ def main() -> int:
 
         perfil = PerfilPlaca.cargar(args.perfil) if args.perfil else None
         punto = perfil.punto_de_entrada(args.pgaout) if perfil else None
-        tau = perfil.tau_bp_s if perfil and perfil.tau_bp_s else TAU_REFERENCIA_S
+        # TAU FIJO, NO MEDIDO. 102 mediciones el 2026-09-13: media 30,9 y
+        # desvio 6,8, y se toma media mas dos desvios. Medirlo cuesta dos
+        # respuestas al escalon -unos cinco minutos- y ademas una medicion
+        # mala es peor que el valor fijo: el maximo observado fue 85,6 s,
+        # casi el triple de la media, y salio de medir con la etapa
+        # saturada.
+        tau = TAU_BP_FIJO_S
         punto_probado = bool(perfil) and perfil.probado(args.pgaout)
 
         if punto and perfil.vigente():
@@ -690,7 +754,9 @@ def main() -> int:
         registro("\n2) Se busca el PAR (IDAC1, IDAC2) que mete SUMo adentro")
         codigo1, codigo2, ch3, ch3_ok, motivo = buscar_par_idac1_idac2(
             lab, idac1, IDAC1_BRACKET, IDAC1_PASO_ESCANEO,
-            TOLERANCIA_CH3_MV, args.espera, registro)
+            TOLERANCIA_CH3_MV, args.espera, registro,
+            tope_s=args.tope_minutos * 60.0,
+            idac2_base=(punto[2] if punto else 0))
         if motivo:
             registro(f"   {motivo}. A esta ganancia la cadena no llega.")
             return 1

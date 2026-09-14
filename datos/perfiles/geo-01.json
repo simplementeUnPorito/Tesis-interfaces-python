@@ -1,11 +1,11 @@
 {
   "id_placa": "geo-01",
-  "fecha": "2026-09-13",
+  "fecha": "2026-09-14",
   "pendientes": {
     "IDAC3->ch4@x1": 6.684,
-    "IDAC0->ch0@x50": 61.35,
-    "IDAC1->ch1@x50": 1.986,
-    "IDAC1->ch2@x50": -9.229,
+    "IDAC0->ch0@x50": 59.46,
+    "IDAC1->ch1@x50": 2.9,
+    "IDAC1->ch2@x50": -10.48,
     "IDAC0->ch0@x1": 1.1664625489999503,
     "IDAC0->ch1@x1": -0.13283771899998328,
     "IDAC0->ch2@x1": -4.277095731999977,
@@ -21,9 +21,13 @@
     "IDAC3->ch0@x1": -0.007567966000003708,
     "IDAC3->ch1@x1": -0.011351949000004424,
     "IDAC3->ch2@x1": 0.0,
-    "IDAC3->ch3@x1": 0.03047102100002661
+    "IDAC3->ch3@x1": 0.03047102100002661,
+    "IDAC0->ch2@x50": -236.09,
+    "ganancia_conjunta@default": 96.0,
+    "pga@default": 4.0,
+    "pgaout@default": 24.0
   },
-  "tau_bp_s": 28.8,
+  "tau_bp_s": 44.0,
   "vdda_mv": 4826.0,
   "puntos": {
     "pga1_x1": [
@@ -31,8 +35,81 @@
       -111,
       -95,
       85
+    ],
+    "x2": [
+      0,
+      164,
+      -95,
+      0
+    ],
+    "x4": [
+      0,
+      164,
+      -95,
+      0
+    ],
+    "x8": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "x16": [
+      0,
+      33,
+      0,
+      0
+    ],
+    "x24": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "x1": [
+      0,
+      164,
+      -95,
+      255
+    ],
+    "default": [
+      0,
+      164,
+      75,
+      -87
+    ],
+    "pga8_pgaout8": [
+      0,
+      164,
+      56,
+      -145
+    ],
+    "pga50_pgaout1": [
+      0,
+      164,
+      -95,
+      255
+    ],
+    "pga4_pgaout24": [
+      0,
+      164,
+      75,
+      -87
+    ],
+    "pga4_pgaout16": [
+      0,
+      164,
+      76,
+      81
     ]
   },
-  "validados": [],
-  "notas": "Vref_LP con 10 kOhm. IDAC3 medido con PGA y PGAout en x1 y LPo dentro de ventana, ABBA de 4 bloques. IDAC0 NO figura contra ch2: el capacitor de 680 uF bloquea su continua y los 244 mV/codigo que informa la fase 1 son el resto de un transitorio. IDAC1->ch1 es la pendiente CRUDA: la correccion por fraccion asentada la infla 36 % porque el efecto de IDAC1 decrece al asentar, no crece. Punto de trabajo hallado el 2026-09-13 08:53 con PGA x1 y PGAout x1: los cinco taps dentro de ventana y LPo en +35 mV."
+  "validados": [
+    "x1",
+    "pga8_pgaout8",
+    "pga50_pgaout1",
+    "default",
+    "pga4_pgaout24",
+    "pga4_pgaout16"
+  ],
+  "notas": "Pendientes = media de 25 corridas del 2026-09-13 a PGA x50; dispersion 5 % en las de IDAC0 y 12 % en las de IDAC1, contra una tolerancia del lazo de 9x. NO caducan: son del cobre. Lo que SI caduca es el punto de trabajo, que a x50 se corre mas que la ventana del sumador en decenas de minutos. Matriz de acople medida a PGA x1 el mismo dia: IDAC2->ch2 = +12,60, IDAC1->ch1 = +2,15, y la fila de IDAC3 sobre los taps de arriba es CERO (no hay acople por el nodo Vref, como habia supuesto)."
 }

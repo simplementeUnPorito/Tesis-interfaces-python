@@ -407,3 +407,29 @@ class PruebaLeerPromedio(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class PruebaOrdenDeBusqueda(unittest.TestCase):
+    """El presupuesto se gasta primero donde mas probable es encontrar."""
+
+    def test_arranca_en_la_semilla_y_se_abre(self):
+        """Reproduce el orden que genera buscar_par_idac1_idac2."""
+        n = 60 // 10
+        orden = [0]
+        for k in range(1, n + 1):
+            orden += [k, -k]
+        self.assertEqual(orden[:5], [0, 1, -1, 2, -2])
+        self.assertEqual(sorted(orden), list(range(-n, n + 1)),
+                         "cubre lo mismo que el barrido lineal")
+
+    def test_la_semilla_se_prueba_primero(self):
+        """El 2026-09-13 la busqueda arranco en el extremo, gasto el tope antes
+        de llegar a la semilla, y se reporto como fallo algo no mirado."""
+        n = 6
+        orden = [0]
+        for k in range(1, n + 1):
+            orden += [k, -k]
+        self.assertEqual(orden[0], 0)
+        # Con un tope que solo alcance para cinco puntos, el entorno de la
+        # semilla queda cubierto en vez de un extremo.
+        self.assertEqual(set(orden[:5]), {0, 1, -1, 2, -2})

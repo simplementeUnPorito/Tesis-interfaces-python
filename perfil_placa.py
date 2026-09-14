@@ -30,6 +30,62 @@ from pathlib import Path
 #: Donde viven los perfiles. Uno por placa.
 CARPETA = Path(__file__).resolve().parent / "datos" / "perfiles"
 
+# --------------------------------------------------------------------------
+# LO QUE NO SE MIDE NUNCA MAS
+# --------------------------------------------------------------------------
+# Son constantes de la topologia y del cobre. Medirlas en cada puesta a punto
+# cuesta minutos y da siempre lo mismo dentro de una dispersion que al lazo no
+# le mueve la aguja.
+
+#: Tau del pasabanda, en segundos. 102 mediciones el 2026-09-13: media 30,9 y
+#: desvio 6,8. Se fija en media mas dos desvios.
+#:
+#: Un valor fijo y conservador es MAS confiable que medirlo cada vez. El maximo
+#: observado fue 85,6 s, casi tres veces la media, y sale de una medicion hecha
+#: con la etapa saturada; con ese numero el algoritmo espera cinco minutos de
+#: mas o, peor, calcula mal una fraccion asentada.
+TAU_BP_FIJO_S = 44.0
+
+#: Signos de cada actuador sobre cada tap. Son TOPOLOGIA: no pueden cambiar sin
+#: que se rompa algo. Consistentes en las 25 corridas del 2026-09-13.
+#:
+#: Se guardan para verificarlos, no para confiar en ellos a ciegas. Es el punto
+#: 4 de ARQUITECTURA_CALIBRACION_CAMPO.md: comprobar un signo es barato y
+#: detecta una resistencia mal soldada o un componente muerto. Si uno cambio,
+#: el nodo tiene que NEGARSE a calibrar y reportarlo, no seguir adelante.
+SIGNOS = {
+    (0, 0): +1,   # IDAC0 -> SEo
+    (0, 2): -1,   # IDAC0 -> OPA_SUMo
+    (1, 1): +1,   # IDAC1 -> BPo
+    (1, 2): -1,   # IDAC1 -> OPA_SUMo
+    (2, 2): +1,   # IDAC2 -> OPA_SUMo
+    (2, 3): +1,   # IDAC2 -> SUMo
+    (3, 4): +1,   # IDAC3 -> LPo
+}
+
+
+def signo_esperado(etapa: int, canal: int) -> int | None:
+    """El signo que la topologia obliga, o None si ese par no esta caracterizado."""
+    return SIGNOS.get((etapa, canal))
+
+
+def signos_sospechosos(medidos: dict[tuple[int, int], float]) -> list[str]:
+    """Los pares cuyo signo medido contradice a la topologia.
+
+    Devolver una lista y no un booleano es a proposito: cual de los siete se dio
+    vuelta dice DONDE mirar en la placa.
+    """
+    malos = []
+    for (etapa, canal), valor in medidos.items():
+        esperado = signo_esperado(etapa, canal)
+        if esperado is None or valor == 0.0:
+            continue
+        if (valor > 0.0) != (esperado > 0):
+            malos.append(f"IDAC{etapa}->ch{canal}: se esperaba "
+                         f"{'+' if esperado > 0 else '-'} y midio {valor:+.2f}")
+    return malos
+
+
 #: Vencimiento sugerido. No es una regla fisica: es el plazo tras el cual
 #: conviene volver a medir porque nadie sabe que le paso a la placa mientras
 #: tanto. La fecha esta guardada, asi que quien quiera otro criterio lo aplica.

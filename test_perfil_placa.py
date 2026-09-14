@@ -9,7 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from perfil_placa import PerfilPlaca, resumen
+from perfil_placa import (SIGNOS, TAU_BP_FIJO_S, PerfilPlaca,
+                          resumen, signo_esperado,
+                          signos_sospechosos)
 
 
 def _perfil() -> PerfilPlaca:
@@ -116,3 +118,35 @@ class PruebaPersistencia(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class PruebaSignosFijos(unittest.TestCase):
+    """Los signos son topologia: verificarlos es diagnostico de hardware."""
+
+    def test_estan_los_siete_pares_caracterizados(self):
+        self.assertEqual(len(SIGNOS), 7)
+        self.assertEqual(signo_esperado(3, 4), +1, "IDAC3 sube LPo")
+        self.assertEqual(signo_esperado(1, 2), -1, "IDAC1 baja el sumador")
+
+    def test_un_par_no_caracterizado_no_inventa_signo(self):
+        self.assertIsNone(signo_esperado(3, 0))
+
+    def test_no_reporta_nada_cuando_todo_coincide(self):
+        medidos = {(0, 0): +59.5, (1, 2): -10.5, (2, 2): +12.6, (3, 4): +6.7}
+        self.assertEqual(signos_sospechosos(medidos), [])
+
+    def test_senala_cual_se_dio_vuelta(self):
+        """Cual de los siete, no si hay alguno: eso dice donde mirar."""
+        medidos = {(0, 0): +59.5, (1, 2): +10.5}
+        malos = signos_sospechosos(medidos)
+        self.assertEqual(len(malos), 1)
+        self.assertIn("IDAC1->ch2", malos[0])
+
+    def test_ignora_los_pares_sin_medicion(self):
+        """Un cero es "no se midio", no "se dio vuelta"."""
+        self.assertEqual(signos_sospechosos({(3, 4): 0.0}), [])
+
+    def test_el_tau_fijo_es_conservador(self):
+        """Media 30,9 mas dos desvios de 6,8, sobre 102 mediciones."""
+        self.assertGreater(TAU_BP_FIJO_S, 30.9)
+        self.assertLess(TAU_BP_FIJO_S, 60.0)
