@@ -1065,11 +1065,13 @@ class TwoPhaseCalibrator:
             raise RuntimeError(f"ch{channel} {TAP_NAMES[channel]} fuera de ventana")
         return point
 
-    def configure_neutral(self) -> None:
+    def configure_neutral(self, pga: int = 50) -> None:
+        if pga not in GAIN_CODES:
+            raise ValueError(f"ganancia PGA no soportada: x{pga}")
         if not self.lab.set_adc_config(1):
             raise RuntimeError("sin ACK ADC +/-2,5 V")
-        if not self.lab.set_gain("pga", PGA_X50_CODE):
-            raise RuntimeError("sin ACK PGA x50")
+        if not self.lab.set_gain("pga", GAIN_CODES.index(pga)):
+            raise RuntimeError(f"sin ACK PGA x{pga}")
         if not self.lab.set_gain("pgaout", PGAOUT_X1_CODE):
             raise RuntimeError("sin ACK PGAout x1")
         self.current_gain = 1
@@ -1392,9 +1394,9 @@ class TwoPhaseCalibrator:
                    result=result)
         return result
 
-    def fase1_margen(self, history: dict | None = None) -> dict:
+    def fase1_margen(self, history: dict | None = None, *, pga: int = 50) -> dict:
         """Mide y optimiza IDAC0/1 con margen duro en ch0/ch1."""
-        self.configure_neutral()
+        self.configure_neutral(pga=pga)
         self.wait_channel_stable(1, stage=1, code=0)
         initial = self.read_five_taps("fase1 inicial", robust=True)
         status = {str(i): {"moved": False, "from": 0, "to": 0,
@@ -1532,7 +1534,8 @@ class TwoPhaseCalibrator:
                            criteria["ch2_not_stuck"],
                            criteria["ch2_idac2_reachable"])))
         score = puntaje(verified_points)
-        result = {"pass": passed, "codes": list(self.codes), "idacs": status,
+        result = {"pass": passed, "pga": pga,
+                  "codes": list(self.codes), "idacs": status,
                   "puntaje": score,
                   "initial": {ch: asdict(p) for ch, p in initial.items()},
                   "verified": verified, "tau_s": tau,
@@ -3802,7 +3805,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--save-eeprom", action="store_true")
     parser.add_argument("--keep-on-pass", action="store_true",
-                        help="obsoleto: finally siempre restaura neutro")
+                        help="deja la ganancia y los IDAC finales aplicados si "
+                             "la ultima corrida termina en PASS")
     args = parser.parse_args()
     if args.autotest:
         return run_autotest()
@@ -3831,7 +3835,10 @@ def main() -> int:
             else:
                 result = cal.calibrate_gain_campaign(gains, budget_s=args.budget_s)
             runs.append({"run": index, "pass": result["pass"], "result": result})
-            _restore_neutral(cal)
+            conservar = (args.keep_on_pass and result["pass"] and
+                         index == repeats)
+            if not conservar:
+                _restore_neutral(cal)
         exit_code = 0 if all(run["pass"] for run in runs) else 1
         cal.event("campaign_summary",
                   f"Corridas: {sum(r['pass'] for r in runs)}/{len(runs)} PASS",
@@ -3854,9 +3861,14 @@ def main() -> int:
         cal.event("abort", f"ABORT: {type(exc).__name__}: {exc}")
         exit_code = 1
     finally:
-        _restore_neutral(cal)
+        conservar = bool(args.keep_on_pass and exit_code == 0 and runs)
+        if not conservar:
+            _restore_neutral(cal)
         cal.save()
         console.close()
+        if conservar:
+            print("Se dejan aplicados la ganancia y los IDAC finales.",
+                  flush=True)
         print(f"Evidencia: {output}", flush=True)
     return exit_code
 

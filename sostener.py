@@ -110,7 +110,8 @@ def medir_pendiente(lab: Lab, etapa: int, base: int, canal: int, espera: float,
 
 def tramo(lab: Lab, minutos: float, periodo: float, tolerancia: float,
           reg: ReguladorCascada | None, codigos: list[int], titulo: str,
-          registro) -> dict:
+          registro, paso_rescate: int = PASO_RESCATE,
+          espera_rescate: float = 0.0) -> dict:
     """Corre un tramo y devuelve lo que se midio. reg=None es el congelado."""
     registro(f"\n--- {titulo}: {minutos:.0f} min, una lectura cada "
              f"{periodo:.0f} s ---")
@@ -119,6 +120,19 @@ def tramo(lab: Lab, minutos: float, periodo: float, tolerancia: float,
     valores: list[float] = []
     dentro = pasos = 0
     c2, c3 = codigos[2], codigos[3]
+    proximo_rescate = 0.0
+
+    def estado_idac(paso2: int = 0, paso3: int = 0) -> str:
+        """Tupla completa y efecto estimado del ultimo movimiento sobre LPo."""
+        tupla = f"({codigos[0]:+d},{codigos[1]:+d},{c2:+d},{c3:+d})"
+        if reg is None:
+            return f"IDAC={tupla}"
+        dv2 = paso2 * reg.ganancia_gruesa / 1000.0
+        dv3 = paso3 * reg.ganancia_fina / 1000.0
+        return (f"IDAC={tupla}  correccion=(IDAC2 d{paso2:+d} "
+                f"{dv2:+.3f} V, IDAC3 d{paso3:+d} {dv3:+.3f} V, "
+                f"total {dv2 + dv3:+.3f} V)")
+
     while time.time() < fin:
         lpo, vivo = leer_promedio(lab, CANAL_LPO, n=3)
         pasos += 1
@@ -139,16 +153,41 @@ def tramo(lab: Lab, minutos: float, periodo: float, tolerancia: float,
             # signo alcanza para saber para donde ir. Asi que mientras este
             # afuera se avanza a pasos fijos en la direccion que reduce el
             # modulo, que es la biseccion de signo de siempre.
-            paso = -PASO_RESCATE if lpo > 0 else PASO_RESCATE
-            if reg.ganancia_fina < 0:
-                paso = -paso
-            c3 = max(-255, min(255, c3 + paso))
-            poner_idac(lab, 3, c3)
-            reg.codigo_fino = c3
-            reg.ultimo_bueno = None
+            paso2 = 0
+            paso3 = 0
+            ahora = time.time()
+            if ahora < proximo_rescate:
+                accion = ("esperando respuesta del rescate "
+                          f"({proximo_rescate - ahora:.0f} s)")
+            else:
+                direccion_salida = -1 if lpo > 0 else 1
+                paso = (paso_rescate if
+                        direccion_salida * reg.ganancia_fina > 0
+                        else -paso_rescate)
+                nuevo_c3 = max(-255, min(255, c3 + paso))
+                paso3 = nuevo_c3 - c3
+                c3 = nuevo_c3
+                if paso3:
+                    poner_idac(lab, 3, c3)
+                else:
+                    # Si el fino ya llego al extremo correcto, un codigo del
+                    # grueso aporta recorrido. Nunca se apilan pasos: tambien
+                    # queda sujeto a la espera de respuesta de la planta.
+                    paso_grueso = (
+                        1 if direccion_salida * reg.ganancia_gruesa > 0 else -1)
+                    nuevo_c2 = max(-255, min(255, c2 + paso_grueso))
+                    paso2 = nuevo_c2 - c2
+                    c2 = nuevo_c2
+                    if paso2:
+                        poner_idac(lab, 2, c2)
+                reg.codigo_fino = c3
+                reg.codigo_grueso = c2
+                reg.ultimo_bueno = None
+                proximo_rescate = ahora + espera_rescate
+                accion = "rescate con espera de respuesta"
             registro(f"  t={time.time() - t0:6.0f}s  LPo {lpo:+9.1f} mV"
-                     f"   FUERA, rescate por signo   IDAC2={c2:+4d} "
-                     f"IDAC3={c3:+4d}")
+                     f"   FUERA, {accion}   "
+                     + estado_idac(paso2=paso2, paso3=paso3))
             time.sleep(periodo)
             continue
         if reg is not None:
@@ -160,7 +199,10 @@ def tramo(lab: Lab, minutos: float, periodo: float, tolerancia: float,
             c2, c3 = salida.codigo_grueso, salida.codigo_fino
         registro(f"  t={time.time() - t0:6.0f}s  LPo {lpo:+9.1f} mV"
                  + ("" if vivo else "   FUERA")
-                 + f"   IDAC2={c2:+4d} IDAC3={c3:+4d}")
+                 + "   "
+                 + estado_idac(
+                     paso2=salida.paso_grueso if reg is not None else 0,
+                     paso3=salida.paso_fino if reg is not None else 0))
         time.sleep(periodo)
     codigos[2], codigos[3] = c2, c3
     return {"titulo": titulo, "valores": valores, "dentro": dentro,
@@ -287,8 +329,10 @@ def main() -> int:
         registro("\n=== VEREDICTO ===")
         registro(f"Ganancia conjunta {total}")
         if control is not None:
-            informar(control, args.tolerancia, registro)
-        bien = informar(prueba, args.tolerancia, registro)
+            informar(control, args.tolerancia, registro,
+                     periodo=args.periodo)
+        bien = informar(prueba, args.tolerancia, registro,
+                        periodo=args.periodo)
         registro(f"   correccion aplicada: IDAC3 de {antes[3]:+d} a "
                  f"{codigos[3]:+d} ({codigos[3] - antes[3]:+d} codigos), "
                  f"IDAC2 de {antes[2]:+d} a {codigos[2]:+d} "

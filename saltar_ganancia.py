@@ -575,7 +575,7 @@ def main() -> int:
                 r = tramo(lab, args.congelado, 10.0, args.tolerancia, None,
                           list(codigos), f"CONGELADO a ganancia {total}",
                           registro)
-                informar(r, args.tolerancia, registro)
+                informar(r, args.tolerancia, registro, periodo=10.0)
                 registro("   estado al terminar el congelado:")
                 estado(lab, registro)
             if not gana:
@@ -633,7 +633,8 @@ def main() -> int:
             codigos = list(cod)
             r = tramo(lab, args.sostener, args.periodo, args.tolerancia, reg,
                       codigos, f"CON EL PI a ganancia {total}", registro)
-            sostuvo = informar(r, args.tolerancia, registro)
+            sostuvo = informar(r, args.tolerancia, registro,
+                                periodo=args.periodo)
             registro(f"   la ganancia {total} "
                      + ("SE SOSTIENE" if sostuvo else "NO se sostiene"))
             registro("   estado al terminar:")
