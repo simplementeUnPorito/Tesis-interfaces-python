@@ -190,12 +190,12 @@ IDAC2_MAX_FASE1 = int(IDAC2_MAX_CONFIABLE * FRACCION_IDAC2_PARA_FASE1)
 # 4 codigos, unos 5 mV sobre un tap cuyo pico a pico son 6. Resultado: +4,464,
 # +2,280 y +0,831 mV/codigo en tres corridas del mismo dia.
 #
-# Se arregla por los dos lados. Excitacion de 24 codigos, que da mas de 50 mV y
+# Se arregla por los dos lados. Excitacion de 48 codigos, que da mas de 100 mV y
 # deja el ruido abajo. Y espera de 1,5 tau, que no llega al regimen pero llega a
 # una fraccion CONOCIDA: 1 - exp(-1,5) = 0,777. Se divide por esa fraccion y se
 # obtiene la pendiente de regimen sin pagar los 3 tau por transicion, que serian
 # quince minutos.
-DELTA_ABBA_IDAC1 = 24
+DELTA_ABBA_IDAC1 = 48
 ESPERA_ABBA_IDAC1_TAU = 1.5
 FRACCION_ASENTADA_IDAC1 = 1.0 - math.exp(-ESPERA_ABBA_IDAC1_TAU)
 #: Ganancia de continua de la etapa LP vista desde ch2. Medida sobre el mapa del
@@ -964,6 +964,7 @@ class TwoPhaseCalibrator:
         #: puesta a punto; -270 mV en esta placa.
         self.offset_pgaout_real_mv: float | None = -270.0
         self.tau_bp_s: float | None = None
+        self.phase1_pga = 50
 
     def event(self, kind: str, message: str, **data) -> None:
         self.events.append({"at": datetime.now().isoformat(timespec="milliseconds"),
@@ -1025,6 +1026,7 @@ class TwoPhaseCalibrator:
             raise RuntimeError("presupuesto temporal agotado")
         for attempt in range(3):
             if self.lab.set_idac(stage, int(code)):
+                print(f"  IDAC{stage}={int(code):+d} aceptado", flush=True)
                 self.codes[stage] = int(code)
                 return
             self.event("write_retry", f"reintento IDAC{stage}={code}", attempt=attempt+1)
@@ -1074,6 +1076,7 @@ class TwoPhaseCalibrator:
             raise RuntimeError(f"sin ACK PGA x{pga}")
         if not self.lab.set_gain("pgaout", PGAOUT_X1_CODE):
             raise RuntimeError("sin ACK PGAout x1")
+        self.phase1_pga = pga
         self.current_gain = 1
         for stage in range(4):
             self.set_code(stage, 0)
@@ -1103,6 +1106,8 @@ class TwoPhaseCalibrator:
                              int(bank_uv(1.0))) / 2.0
             consecutive = consecutive + 1 if abs(
                 current.mean_bank_uv-previous.mean_bank_uv) <= resolution else 0
+            print(f"  esperando ch{channel}: {current.error_real_mv:+.1f} mV, "
+                  f"quietas {consecutive}/{required}", flush=True)
             if consecutive >= required:
                 self.event("stable", f"ch{channel} estable por observación",
                            elapsed_s=time.monotonic()-started)
@@ -1111,7 +1116,10 @@ class TwoPhaseCalibrator:
         raise RuntimeError(f"ch{channel} no se estabilizó en {timeout_s:.0f} s")
 
     def _wait_bp(self, tau: float, stage: int) -> Point:
-        time.sleep(BP_ESPERA_TAU_MIN * tau)
+        demora = BP_ESPERA_TAU_MIN * tau
+        print(f"  esperando {demora:.1f} s ({BP_ESPERA_TAU_MIN:.1f} tau) "
+              f"por la cola lenta de IDAC{stage}", flush=True)
+        time.sleep(demora)
         return self.wait_channel_stable(
             1, stage=stage, code=self.codes[stage],
             timeout_s=(BP_ESPERA_TAU_MAX-BP_ESPERA_TAU_MIN)*tau,
@@ -1128,7 +1136,13 @@ class TwoPhaseCalibrator:
         # rechaza por "excursion insuficiente". Con cuatro codigos la excursion
         # inicial son ~216 mV fisicos, holgadamente por encima del ruido, y
         # sigue siendo reversible.
-        magnitude = 4 if stage == 0 else 8
+        # IDAC0 se caracterizaba con cuatro codigos porque la fase nominal era
+        # PGA x50. En x4 eso produce apenas unos 15 mV y no excita ni muestra
+        # la dinamica con claridad. Se escala la sonda inversamente con PGA.
+        # IDAC1 usa 32 codigos: unos 150 mV medidos en esta placa.
+        scale = max(1.0, 50.0 / float(self.phase1_pga))
+        magnitude = (max(4, min(64, round(4 * scale)))
+                     if stage == 0 else 32)
         known_slope = PASO_IDAC0_CH0_MV if stage == 0 else PASO_IDAC1_CH1_MV
         # Si el tap ya está desplazado, excitar hacia Vref y nunca más adentro
         # del riel. El signo medido de ambos pasos es positivo.
@@ -1145,11 +1159,19 @@ class TwoPhaseCalibrator:
             while time.monotonic()-started <= 3.2*TAU_BP_REFERENCIA_S:
                 p = self.read(1, "medición tau BP", stage, origin+delta,
                               require_valid=False)
-                series.append((time.monotonic()-started, float(p.mean_bank_uv)))
+                elapsed = time.monotonic()-started
+                series.append((elapsed, float(p.mean_bank_uv)))
+                print(f"  tau t={elapsed:5.1f}s  BPo={p.error_real_mv:+8.1f} mV  "
+                      f"IDAC{stage}={origin+delta:+d}", flush=True)
                 time.sleep(3.0)
         finally:
             self.set_code(stage, origin)
         tau, metrics = fit_first_order(series)
+        if tau is not None and not 15.0 <= tau <= 60.0:
+            metrics = dict(metrics or {})
+            metrics["reason"] = f"tau implausible: {tau:.1f} s"
+            metrics["tau_rechazado_s"] = tau
+            tau = None
         if tau is None:
             # Un diagnostico que no cierra NO puede tumbar la campana cuando hay
             # un valor de diseno conocido: tau = R4*C1 = 43k * 680uF = 29,2 s, y
@@ -1213,6 +1235,8 @@ class TwoPhaseCalibrator:
                         time.sleep(settle_s)
                     p = self.read(channel, f"ABBA {label} IDAC{stage}", stage,
                                   code, require_valid=False)
+                    print(f"  ABBA {label}  ch{channel}={p.error_real_mv:+8.1f} mV  "
+                          f"IDAC{stage}={code:+d}", flush=True)
                     (a_points if label.startswith("A") else b_points).append(p)
                     records.append({"delta": delta, "label": label,
                                     "point": asdict(p)})
@@ -1237,9 +1261,25 @@ class TwoPhaseCalibrator:
                     f"ABBA {real_mv(slope):+.3f} mV/código"), result=result)
         return result
 
-    def medir_pendientes_fase1(self) -> dict:
+    def medir_pendientes_fase1(self, *, esperar_cola_idac0: bool = False) -> dict:
         """Mide los pasos rápidos directos y deriva los del sumador."""
-        abba0 = self.pendiente_abba(0, 0, (2, 4), ABBA_ESPERA_S)
+        # Conserva aproximadamente la misma excursion analógica al cambiar la
+        # ganancia de PGA. En x4 resulta (25, 50): ~100 y ~200 mV en SEo,
+        # suficientemente grande para verla en el osciloscopio y medirla.
+        scale = max(1.0, 50.0 / float(self.phase1_pga))
+        deltas0 = (max(2, min(64, round(2 * scale))),
+                   max(4, min(96, round(4 * scale))))
+        self.event("phase1_excitation",
+                   f"Excitación lenta visible: IDAC0 ABBA {deltas0}; "
+                   f"IDAC1 tau 32 y ABBA {DELTA_ABBA_IDAC1} códigos",
+                   pga=self.phase1_pga, idac0_deltas=list(deltas0),
+                   idac1_tau_delta=32,
+                   idac1_abba_delta=DELTA_ABBA_IDAC1)
+        abba0 = self.pendiente_abba(0, 0, deltas0, ABBA_ESPERA_S)
+        # Aunque el ABBA mira el tap directo ch0, sus escalones también excitan
+        # el acople lento hacia BPo. No empezar la sonda de IDAC1 sobre esa cola.
+        if esperar_cola_idac0:
+            self._wait_bp(self.tau_bp_s or TAU_BP_REFERENCIA_S, 0)
 
         # ch0 esta ANTES del pasabanda y responde rapido, asi que le sirve el
         # ABBA generico. ch1 es la salida del pasabanda y necesita el trato de

@@ -347,6 +347,25 @@ class TestConvergido(unittest.TestCase):
         self.assertFalse(reg.convergido(30.0))
 
 
+class TestProteccionesDeAfinado(unittest.TestCase):
+    def test_banda_muerta_no_gasta_codigos(self) -> None:
+        reg = ReguladorCascada(ganancia_fina=7.0, ganancia_gruesa=-1400.0,
+                               tau_s=30.0, codigo_fino=20,
+                               codigo_grueso=75,
+                               banda_muerta_real_mv=100.0)
+        salida = reg.paso(-73.0)
+        self.assertEqual((salida.codigo_fino, salida.codigo_grueso), (20, 75))
+        self.assertEqual((salida.paso_fino, salida.paso_grueso), (0, 0))
+        self.assertIn("banda muerta", salida.motivo)
+
+    def test_limite_de_paso_frena_una_correccion_valida(self) -> None:
+        reg = ReguladorCascada(ganancia_fina=7.0, ganancia_gruesa=-1400.0,
+                               tau_s=30.0, max_paso_fino=30,
+                               kp_relativo=0.0)
+        salida = reg.paso(-2000.0)
+        self.assertEqual(salida.paso_fino, 30)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
 

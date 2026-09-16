@@ -53,6 +53,7 @@ from testbench.core.lab import GAIN_CODES, Lab
 from testbench.core.session import Session
 
 NOMBRES = {0: "SEo", 1: "BPo", 2: "OPA_SUMo", 3: "SUMo", 4: "LPo"}
+CANAL_SUMO = 3
 #: Cuantos codigos del actuador fino se mueven de una vez cuando el tap esta
 #: fuera de ventana y solo se conoce el signo del error. Con 6,8 mV por
 #: codigo son unos 200 mV por paso: suficiente para salir en pocos pasos de
@@ -111,7 +112,10 @@ def medir_pendiente(lab: Lab, etapa: int, base: int, canal: int, espera: float,
 def tramo(lab: Lab, minutos: float, periodo: float, tolerancia: float,
           reg: ReguladorCascada | None, codigos: list[int], titulo: str,
           registro, paso_rescate: int = PASO_RESCATE,
-          espera_rescate: float = 0.0) -> dict:
+          espera_rescate: float = 0.0, vigilar_sumo: bool = False,
+          objetivo_sumo_mv: float = 0.0,
+          banda_sumo_mv: float = 1500.0,
+          paso_rescate_sumo: int = 1) -> dict:
     """Corre un tramo y devuelve lo que se midio. reg=None es el congelado."""
     registro(f"\n--- {titulo}: {minutos:.0f} min, una lectura cada "
              f"{periodo:.0f} s ---")
@@ -134,12 +138,46 @@ def tramo(lab: Lab, minutos: float, periodo: float, tolerancia: float,
                 f"total {dv2 + dv3:+.3f} V)")
 
     while time.time() < fin:
+        if vigilar_sumo:
+            sumo, sumo_vivo = leer_promedio(lab, CANAL_SUMO, n=3)
+            sumo_controlable = (sumo_vivo and
+                                abs(sumo - objetivo_sumo_mv) <= banda_sumo_mv)
+        else:
+            sumo, sumo_vivo, sumo_controlable = 0.0, True, True
         lpo, vivo = leer_promedio(lab, CANAL_LPO, n=3)
         pasos += 1
-        if vivo:
+        if vivo and sumo_controlable:
             valores.append(lpo)
             if abs(lpo) <= tolerancia:
                 dentro += 1
+        if reg is not None and not sumo_controlable:
+            # JERARQUIA DE SATURACION: IDAC3 no puede arreglar una etapa que
+            # ya llega saturada desde PGAout. Primero se devuelve SUMo a la
+            # franja desde la cual el pasabajos tiene autoridad, usando IDAC2.
+            # La pendiente IDAC2->SUMo tiene signo opuesto a IDAC2->LPo porque
+            # el pasabajos es inversor.
+            k_sumo = reg.ganancia_gruesa / -4.8
+            direccion = 1 if objetivo_sumo_mv - sumo > 0 else -1
+            paso2_pedido = (paso_rescate_sumo if direccion * k_sumo > 0
+                            else -paso_rescate_sumo)
+            nuevo_c2 = max(-255, min(255, c2 + paso2_pedido))
+            paso2 = nuevo_c2 - c2
+            if paso2 and poner_idac(lab, 2, nuevo_c2, registro):
+                c2 = nuevo_c2
+                reg.codigo_grueso = c2
+                reg.ultimo_bueno = None
+            else:
+                paso2 = 0
+            proximo_rescate = 0.0
+            registro(f"  t={time.time() - t0:6.0f}s  "
+                     f"SUMo {sumo:+9.1f} mV"
+                     + ("" if sumo_vivo else " FUERA")
+                     + f"  LPo {lpo:+9.1f} mV"
+                     + ("" if vivo else " FUERA")
+                     + "   rescate PGAout con IDAC2   "
+                     + estado_idac(paso2=paso2))
+            time.sleep(periodo)
+            continue
         if reg is not None and not vivo:
             # RESCATE POR SIGNO.
             #
@@ -185,7 +223,9 @@ def tramo(lab: Lab, minutos: float, periodo: float, tolerancia: float,
                 reg.ultimo_bueno = None
                 proximo_rescate = ahora + espera_rescate
                 accion = "rescate con espera de respuesta"
-            registro(f"  t={time.time() - t0:6.0f}s  LPo {lpo:+9.1f} mV"
+            registro(f"  t={time.time() - t0:6.0f}s  "
+                     + (f"SUMo {sumo:+9.1f} mV  " if vigilar_sumo else "")
+                     + f"LPo {lpo:+9.1f} mV"
                      f"   FUERA, {accion}   "
                      + estado_idac(paso2=paso2, paso3=paso3))
             time.sleep(periodo)
@@ -197,7 +237,9 @@ def tramo(lab: Lab, minutos: float, periodo: float, tolerancia: float,
             if salida.paso_grueso:
                 poner_idac(lab, 2, salida.codigo_grueso)
             c2, c3 = salida.codigo_grueso, salida.codigo_fino
-        registro(f"  t={time.time() - t0:6.0f}s  LPo {lpo:+9.1f} mV"
+        registro(f"  t={time.time() - t0:6.0f}s  "
+                 + (f"SUMo {sumo:+9.1f} mV  " if vigilar_sumo else "")
+                 + f"LPo {lpo:+9.1f} mV"
                  + ("" if vivo else "   FUERA")
                  + "   "
                  + estado_idac(

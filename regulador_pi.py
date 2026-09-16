@@ -232,6 +232,14 @@ class ReguladorCascada:
     # Peso del proporcional, en unidades de alpha. Con 1,0 la respuesta del
     # primer paso pasa de alpha a 1,5 alpha: 50 % mas rapida.
     kp_relativo: float = KP_RELATIVO
+    # Dentro de esta ventana no se integra ni se diferencia. Además de evitar
+    # cazar ruido, impide que el mid-ranging siga gastando recorrido después
+    # de haber llegado a una precisión suficiente.
+    banda_muerta_real_mv: float = 0.0
+    # Slew-rate del actuador fino por muestra. El rescate de una lectura fuera
+    # de rango vive fuera de esta clase y puede seguir usando saltos grandes;
+    # este límite sólo evita patadas durante el afinado con lectura válida.
+    max_paso_fino: int | None = None
 
     def __post_init__(self) -> None:
         if not self.ganancia_fina:
@@ -290,6 +298,17 @@ class ReguladorCascada:
 
         error = self.referencia_real_mv - medido_real_mv
 
+        if abs(error) <= self.banda_muerta_real_mv:
+            # Olvidar el error previo evita que, al salir de la banda, el
+            # término Kp interprete toda la separación como una derivada.
+            self.error_previo_mv = None
+            salida = SalidaPI(codigo_fino=self.codigo_fino,
+                              codigo_grueso=self.codigo_grueso,
+                              error_real_mv=error,
+                              motivo="dentro de banda muerta")
+            self.historial.append(salida)
+            return salida
+
         # LAZO INTERNO: el fino sigue la referencia.
         #
         # Se corrige una fraccion del camino, no el camino entero. Eso es lo que
@@ -340,6 +359,10 @@ class ReguladorCascada:
                 # Sin esto el lazo se queda quieto ante errores chicos porque el
                 # redondeo se los come, y nunca llega. Un codigo es un codigo.
                 paso_fino = 1 if deseado > 0 else -1
+
+        if self.max_paso_fino is not None:
+            limite_paso = max(1, int(self.max_paso_fino))
+            paso_fino = max(-limite_paso, min(limite_paso, paso_fino))
 
         nuevo_fino = self.codigo_fino + paso_fino
         saturado = abs(nuevo_fino) > self.limite_fino

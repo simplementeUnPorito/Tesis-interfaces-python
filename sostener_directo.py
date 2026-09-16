@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -61,6 +62,14 @@ def main() -> int:
                     help="segundos sin acumular otra orden tras cada rescate "
                          "(por defecto: 40)")
     ap.add_argument("--tolerancia", type=float, default=200.0)
+    ap.add_argument("--asentar", type=float, default=0.0,
+                    help="segundos de espera visible antes de arrancar el PI")
+    ap.add_argument("--banda-muerta", type=float, default=100.0)
+    ap.add_argument("--kp-relativo", type=float, default=0.25)
+    ap.add_argument("--tau-pi", type=float, default=30.0)
+    ap.add_argument("--max-paso-pi", type=int, default=30)
+    ap.add_argument("--banda-sumo-rescate", type=float, default=1500.0)
+    ap.add_argument("--paso-rescate-sumo", type=int, default=1)
     ap.add_argument("--pendiente-idac3", type=float,
                     default=PENDIENTE_IDAC3_MV,
                     help="mV de LPo por codigo de IDAC3, con signo")
@@ -80,6 +89,14 @@ def main() -> int:
         ap.error("--paso-rescate debe estar entre 1 y 510")
     if args.espera_rescate < 0:
         ap.error("--espera-rescate no puede ser negativo")
+    if args.asentar < 0 or args.tau_pi <= 0 or args.kp_relativo < 0:
+        ap.error("espera o sintonia PI invalida")
+    if not 0 <= args.banda_muerta <= args.tolerancia:
+        ap.error("--banda-muerta debe estar entre 0 y --tolerancia")
+    if args.max_paso_pi < 1 or args.banda_sumo_rescate <= 0:
+        ap.error("limites del PI invalidos")
+    if args.paso_rescate_sumo < 1:
+        ap.error("--paso-rescate-sumo debe ser al menos 1")
     if not args.pendiente_idac3:
         ap.error("--pendiente-idac3 no puede ser cero")
 
@@ -121,6 +138,22 @@ def main() -> int:
                  "si llega al limite, IDAC2 de a 1 codigo; "
                  f"espera {args.espera_rescate:g} s entre movimientos")
 
+        if args.asentar:
+            registro(f"Asentamiento previo al PI: {args.asentar:g} s; "
+                     "IDAC congelados")
+            inicio = time.monotonic()
+            while time.monotonic() - inicio < args.asentar:
+                restante = args.asentar - (time.monotonic() - inicio)
+                time.sleep(min(5.0, restante))
+                valores = []
+                for canal in (1, 2, 3):
+                    valor, vivo = leer_promedio(lab, canal, n=3)
+                    valores.append((valor, vivo))
+                registro(f"  t={time.monotonic()-inicio:5.1f}s  "
+                         f"BPo={valores[0][0]:+8.1f}  "
+                         f"OPA_SUM={valores[1][0]:+8.1f}  "
+                         f"SUMo={valores[2][0]:+8.1f} mV")
+
         registro("Estado inmediatamente despues del adelanto:")
         lpo_vivo = False
         for canal in (0, 1, 2, 3, 4):
@@ -138,20 +171,28 @@ def main() -> int:
         reg = ReguladorCascada(
             ganancia_fina=args.pendiente_idac3,
             ganancia_gruesa=k2,
-            tau_s=max(10.0, args.periodo * 2.0),
+            tau_s=args.tau_pi,
             periodo_s=args.periodo,
             referencia_real_mv=0.0,
             tolerancia_real_mv=args.tolerancia,
             codigo_fino=codigos[3], codigo_grueso=codigos[2],
-            limite_fino=255, zona_comoda=200)
-        registro(f"PI arrancando ya: alpha={reg.alpha:.3f}, una correccion "
-                 f"cada {args.periodo:g} s durante {args.sostener:g} min")
+            limite_fino=255, zona_comoda=200,
+            kp_relativo=args.kp_relativo,
+            banda_muerta_real_mv=args.banda_muerta,
+            max_paso_fino=args.max_paso_pi)
+        registro(f"PI arrancando: alpha={reg.alpha:.3f}, "
+                 f"Kp_relativo={args.kp_relativo:.2f}, "
+                 f"banda muerta=+/-{args.banda_muerta:g} mV, "
+                 f"max paso IDAC3={args.max_paso_pi}; una correccion cada "
+                 f"{args.periodo:g} s durante {args.sostener:g} min")
 
         resultado = tramo(
             lab, args.sostener, args.periodo, args.tolerancia, reg, codigos,
             f"PI DIRECTO a ganancia {total}", registro,
             paso_rescate=args.paso_rescate,
-            espera_rescate=args.espera_rescate)
+            espera_rescate=args.espera_rescate, vigilar_sumo=True,
+            banda_sumo_mv=args.banda_sumo_rescate,
+            paso_rescate_sumo=args.paso_rescate_sumo)
         sostuvo = informar(resultado, args.tolerancia, registro,
                            periodo=args.periodo)
         registro("IDAC final=(" + ",".join(f"{c:+d}" for c in codigos)
