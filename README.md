@@ -9,6 +9,9 @@ Aplicaciones de adquisición, revisión de campo y análisis MASW. Este reposito
   `REQUIREMENTS_TRACEABILITY.md` registran el estado del port.
 - `sink/`: receptor/almacenamiento auxiliar de datos.
 - `third-party/`: motores MASW externos como submódulos.
+- `testbench/` y los scripts sueltos de la raíz: banco de laboratorio de la
+  cadena analógica GEO (autocalibración, PI, planta, deriva). Catálogo por
+  propósito en `LABORATORIO_SCRIPTS.md`.
 
 Los cálculos offline y utilidades que no controlan hardware viven en el
 repositorio hermano `src/calculos_modelados/python`; ya no deben agregarse aquí.
