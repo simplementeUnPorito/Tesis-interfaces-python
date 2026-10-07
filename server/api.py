@@ -76,16 +76,23 @@ def create_app(pipeline: Pipeline, *, read_only: bool = False) -> FastAPI:
     app.state.started_at = datetime.now(timezone.utc)
     app.state.read_only = bool(read_only)
 
+    import inspect
+
     from fastapi.middleware.cors import CORSMiddleware
 
-    app.add_middleware(
-        CORSMiddleware,
+    cors_kwargs = dict(
         allow_origins=["*"],
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type", "X-Geo-Filename"],
+        allow_headers=["Content-Type", "X-Geo-Filename", "X-Geo-Campaign"],
         max_age=86400,
     )
+    # La SPA se sirve desde el maestro (10.x, red privada) y sube a la IP de
+    # Tailscale: Chrome manda el preflight con Access-Control-Request-Private-
+    # Network y, si el servidor no lo permite, Starlette lo rechaza con 400.
+    if "allow_private_network" in inspect.signature(CORSMiddleware.__init__).parameters:
+        cors_kwargs["allow_private_network"] = True
+    app.add_middleware(CORSMiddleware, **cors_kwargs)
 
     @app.middleware("http")
     async def no_store(request: Request, call_next):

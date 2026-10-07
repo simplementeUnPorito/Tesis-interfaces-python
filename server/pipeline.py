@@ -18,6 +18,7 @@ import json
 import hashlib
 import os
 import queue
+import re
 import shutil
 import threading
 import time
@@ -71,6 +72,7 @@ class Job:
     started_at: str = ""
     finished_at: str = ""
     folder: str = ""                # carpeta del dataset que quedó
+    campaign: str = ""              # campaña destino ("" = raíz de raw)
     captures: int = 0
     nodes: int = 0
     shots: int = 0
@@ -94,6 +96,7 @@ class Job:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "folder": self.folder,
+            "campaign": self.campaign,
             "captures": self.captures,
             "nodes": self.nodes,
             "shots": self.shots,
@@ -103,6 +106,21 @@ class Job:
             "duplicate_of": self.duplicate_of,
             "log": self.log[-20:],
         }
+
+
+_CAMPAIGN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.\- ]{0,63}")
+
+
+def normalize_campaign(name: str | None) -> str:
+    """Nombre de campaña destino válido, o "" (raíz). Rechaza rutas."""
+    name = (name or "").strip()
+    if not name or name == ".":
+        return ""
+    if not _CAMPAIGN_RE.fullmatch(name) or name.endswith((".", " ")):
+        raise ValueError(f"campaña inválida: {name!r}")
+    if name.lower() in {".ingest_staging", "zips", "incoming"}:
+        raise ValueError(f"campaña reservada: {name!r}")
+    return name
 
 
 class Pipeline:
@@ -161,6 +179,7 @@ class Pipeline:
                 started_at=d.get("started_at", ""),
                 finished_at=d.get("finished_at", ""),
                 folder=d.get("folder", ""),
+                campaign=d.get("campaign", ""),
                 captures=int(d.get("captures", 0)),
                 nodes=int(d.get("nodes", 0)),
                 shots=int(d.get("shots", 0)),
@@ -201,7 +220,7 @@ class Pipeline:
             return j.to_dict() if j else None
 
     # ── ingesta ─────────────────────────────────────────────────────────────
-    def submit_zip(self, data: bytes, filename: str) -> Job:
+    def submit_zip(self, data: bytes, filename: str, campaign: str = "") -> Job:
         """Guarda el ZIP y encola su procesamiento. Devuelve enseguida.
 
         El ZIP crudo se conserva siempre, incluso si el procesado falla: es el
@@ -213,7 +232,8 @@ class Pipeline:
             f"upload-{os.getpid()}-{threading.get_ident()}-{time.time_ns()}.tmp"
         )
         tmp.write_bytes(data)
-        return self.submit_zip_file(tmp, filename, digest=digest, size=len(data))
+        return self.submit_zip_file(tmp, filename, digest=digest, size=len(data),
+                                    campaign=campaign)
 
     def submit_zip_file(
         self,
@@ -222,9 +242,11 @@ class Pipeline:
         *,
         digest: str,
         size: int,
+        campaign: str = "",
     ) -> Job:
         """Publica una subida ya transmitida y la encola de forma idempotente."""
         temp_path = Path(temp_path)
+        campaign = normalize_campaign(campaign)
         # Validación estructural rápida antes de responder al ESP. El CRC
         # completo exige descomprimir el archivo entero y se hace en el worker,
         # para que la recepción no quede bloqueada por un ZIP grande.
@@ -252,6 +274,7 @@ class Pipeline:
                     filename=safe,
                     bytes_received=int(size),
                     sha256=digest,
+                    campaign=campaign,
                 )
                 job.log.append(
                     f"{_now()} ZIP guardado en {dest.name} "
@@ -361,14 +384,19 @@ class Pipeline:
             started_at=_now(),
             log_line="validando y descomprimiendo",
         )
-        folder = self._extract(zip_path, job_id)
+        campaign = self._jobs[job_id].campaign
+        # Cada campaña es su propia raíz de datos (ver campaigns.py): los
+        # shot_id y las anotaciones se calculan relativos a ella.
+        data_root = self.raw_root / campaign if campaign else self.raw_root
+        folder = self._extract(zip_path, job_id, campaign)
+        where = f"{campaign}/{folder.name}" if campaign else folder.name
         self._set(job_id, folder=folder.name, stage="cataloging", progress=0.55,
-                  log_line=f"extraído en raw/{folder.name}")
+                  log_line=f"extraído en raw/{where}")
 
         self._set(job_id, state="procesando", stage="cataloging", progress=0.65,
                   log_line="descubriendo el dataset")
         t0 = time.time()
-        dataset = frd.discover_dataset(self.raw_root)
+        dataset = frd.discover_dataset(data_root)
         # Solo los disparos de esta carpeta: el dataset abarca todo el raw_root.
         shots = [s for s in dataset.shots if s.folder.name == folder.name]
         self._set(job_id, shots=len(shots),
@@ -380,7 +408,7 @@ class Pipeline:
         # picar. Eso no invalida la captura — queda catalogada y visible como
         # cualquier otra (ver catalog.py); lo único que no corre es el picking.
         if not shots:
-            cat = scan_catalog(self.raw_root)
+            cat = scan_catalog(data_root)
             mias = next((f for f in cat["folders"] if f["folder"] == folder.name), None)
             caps = len(mias["captures"]) if mias else 0
             nodos = sum(len(c["nodes"]) for c in mias["captures"]) if mias else 0
@@ -395,7 +423,7 @@ class Pipeline:
                   log_line="picking automático del primer arribo")
         # Mismo archivo que usa la app PyQt (procesados/field_review_annotations
         # .json): así lo que preprocesa el servidor lo ve la app y al revés.
-        picks_path = frd.default_annotations_path(self.raw_root)
+        picks_path = frd.default_annotations_path(data_root)
         annotations = frd.load_annotations(picks_path)
         hechos = 0
         for index, shot in enumerate(shots):
@@ -530,7 +558,7 @@ class Pipeline:
         except zipfile.BadZipFile as exc:
             raise ValueError(f"ZIP inválido: {exc}") from exc
 
-    def _extract(self, zip_path: Path, job_id: str) -> Path:
+    def _extract(self, zip_path: Path, job_id: str, campaign: str = "") -> Path:
         """Extrae el ZIP a raw/<carpeta>.
 
         El ZIP que arma la SPA ya trae la estructura que consume
@@ -538,7 +566,9 @@ class Pipeline:
         acá no se reordena nada: solo se elige el nombre de la carpeta contenedora
         y se saca el prefijo si el ZIP ya venía con uno.
         """
-        for candidate in self.raw_root.iterdir():
+        target_root = self.raw_root / campaign if campaign else self.raw_root
+        target_root.mkdir(parents=True, exist_ok=True)
+        for candidate in target_root.iterdir():
             marker = candidate / ".ingest_job"
             if candidate.is_dir() and marker.is_file():
                 try:
@@ -556,13 +586,13 @@ class Pipeline:
             single_root = len(tops) == 1 and all("/" in n for n in names)
             base = (tops.pop() if single_root
                     else Path(zip_path.stem).name)
-            dest = self.raw_root / Path(base).name
+            dest = target_root / Path(base).name
             # Nunca sobrescribir una carpeta existente: dos capturas del mismo
             # punto son dos datos, no una corrección.
             n = 1
             while dest.exists():
                 n += 1
-                dest = self.raw_root / f"{base}_{n}"
+                dest = target_root / f"{base}_{n}"
             stage = self.staging_root / job_id
             if stage.exists():
                 shutil.rmtree(stage)

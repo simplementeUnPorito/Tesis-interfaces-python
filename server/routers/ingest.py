@@ -61,6 +61,7 @@ async def ingest(request: Request, pipeline: Pipeline = Depends(get_pipeline)):
             return PlainTextResponse("no parece un ZIP\n", status_code=415)
 
         name = (request.headers.get("X-Geo-Filename") or "captura.zip").strip()
+        campaign = request.headers.get("X-Geo-Campaign") or ""
         try:
             job = await run_in_threadpool(
                 pipeline.submit_zip_file,
@@ -68,6 +69,7 @@ async def ingest(request: Request, pipeline: Pipeline = Depends(get_pipeline)):
                 name,
                 digest=digest.hexdigest(),
                 size=received,
+                campaign=campaign,
             )
         except ValueError as exc:
             return PlainTextResponse(f"ZIP rechazado: {exc}\n", status_code=400)
