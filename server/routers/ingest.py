@@ -6,12 +6,12 @@ import hashlib
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..limits import MAX_UPLOAD_BYTES
-from ..pipeline import Pipeline
+from ..pipeline import Pipeline, normalize_campaign
 from ..api import get_pipeline
 
 router = APIRouter()
@@ -82,3 +82,36 @@ async def ingest(request: Request, pipeline: Pipeline = Depends(get_pipeline)):
         f"OK {job.job_id} encolado ({received} B)\n",
         headers={"X-Geo-Job": job.job_id},
     )
+
+
+def _folder_names(pipeline: Pipeline) -> list[str]:
+    """Subdirectorios de raw_root usables como destino (incluye los vacíos)."""
+    names = []
+    for p in sorted(pipeline.raw_root.iterdir()):
+        if not p.is_dir():
+            continue
+        try:
+            normalize_campaign(p.name)
+        except ValueError:
+            continue
+        names.append(p.name)
+    return names
+
+
+@router.get("/api/folders")
+def folders_list(pipeline: Pipeline = Depends(get_pipeline)):
+    """Carpetas destino de raw/. Las usa el maestro para sincronizar su lista."""
+    return {"folders": _folder_names(pipeline)}
+
+
+@router.post("/api/folders")
+def folders_create(body: dict, pipeline: Pipeline = Depends(get_pipeline)):
+    """Crea una carpeta destino (idempotente) y devuelve la lista completa."""
+    try:
+        name = normalize_campaign(str(body.get("name", "")))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not name:
+        raise HTTPException(400, "falta name")
+    (pipeline.raw_root / name).mkdir(parents=True, exist_ok=True)
+    return {"ok": True, "name": name, "folders": _folder_names(pipeline)}

@@ -138,7 +138,7 @@ export function mount(root) {
           <details class="foot-details">
             <summary>Subidas</summary>
             <div class="wrap"><table id="jobs"><thead><tr>
-              <th>Cuándo</th><th>Archivo</th><th class="num">kB</th><th>Estado</th>
+              <th>Fecha y hora de captura</th><th>Archivo</th><th class="num">kB</th><th>Estado</th>
               <th>Carpeta</th><th class="num">Disparos</th><th class="num">Picks</th><th>Detalle</th>
             </tr></thead><tbody></tbody></table></div>
             <div id="jobs-empty" class="empty" hidden>Todavía no llegó ninguna captura.
@@ -564,6 +564,15 @@ export function mount(root) {
   };
 }
 
+// Fecha y hora local (del navegador) en que el servidor recibió la captura.
+function fmtRecibido(iso) {
+  const d = new Date(iso);
+  if (!iso || Number.isNaN(d.getTime())) return '—';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+         `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 function renderJobs(root, rows) {
   const tb = root.querySelector('#jobs tbody');
   root.querySelector('#jobs-empty').hidden = rows.length > 0;
@@ -573,7 +582,7 @@ function renderJobs(root, rows) {
     const detalle = j.error ? j.error.split('\n').slice(-1)[0]
                             : (j.log && j.log.length ? j.log[j.log.length - 1] : '');
     tr.innerHTML =
-      `<td class="mono">${(j.created_at || '').replace('T', ' ').replace('+00:00', '')}</td>` +
+      `<td class="mono">${fmtRecibido(j.created_at)}</td>` +
       `<td>${j.filename}</td>` +
       `<td class="num">${(j.bytes / 1024).toFixed(0)}</td>` +
       `<td><span class="tag ${j.state}">${j.state}</span></td>` +
