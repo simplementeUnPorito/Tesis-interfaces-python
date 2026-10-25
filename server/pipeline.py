@@ -574,6 +574,28 @@ class Pipeline:
                         raise ValueError(
                             "estructura inesperada: noise_signatures.json debe contener types"
                         )
+                for node in metadata.get("nodes", []):
+                    if not isinstance(node, dict):
+                        continue
+                    marks_file = node.get("time_marks_file")
+                    if not marks_file:
+                        continue
+                    canonical = str(marks_file).replace("\\", "/").strip("/")
+                    marks_info = normalized.get(canonical)
+                    if marks_info is None:
+                        raise ValueError(
+                            f"estructura inesperada: falta time_marks declarado ({canonical})"
+                        )
+                    try:
+                        header = zf.read(marks_info).decode("utf-8-sig").splitlines()[0]
+                    except (UnicodeDecodeError, IndexError) as exc:
+                        raise ValueError(f"time_marks inválido: {canonical}") from exc
+                    columns = {part.strip() for part in header.split(",")}
+                    required = {"sample", "master_us", "uncert", "kind", "ok"}
+                    if not required.issubset(columns):
+                        raise ValueError(
+                            f"time_marks inválido en {canonical}: faltan columnas {sorted(required - columns)}"
+                        )
                 if verify_crc:
                     bad = zf.testzip()
                     if bad:

@@ -84,6 +84,31 @@ def _procesados_dir_for(raw_root: str | Path) -> Path:
 
 
 @dataclass(frozen=True)
+class TimeMark:
+    """Vínculo entre un índice de muestra y el reloj MAC del maestro."""
+
+    sample: int
+    master_us: int
+    uncert_ns: int
+    kind: str
+    ok: bool
+
+
+@dataclass(frozen=True)
+class TimeMarkFit:
+    """Recta ``master_us = offset_us + sample * sample_period_us``."""
+
+    offset_us: float
+    sample_period_us: float
+    fs_hz: float
+    residual_rms_us: float
+    samples_used: int
+
+    def master_time_us(self, samples: Any) -> np.ndarray:
+        return self.offset_us + np.asarray(samples, dtype=np.float64) * self.sample_period_us
+
+
+@dataclass(frozen=True)
 class ChannelRef:
     role: str
     node_index: int | None
@@ -96,6 +121,8 @@ class ChannelRef:
     label: str = ""
     noise_marks_file: Path | None = None
     noise_marks: tuple[tuple[int, int], ...] = ()
+    time_marks_file: Path | None = None
+    time_marks: tuple[TimeMark, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict, compare=False)
 
     def signal_file(self, prefer_filtered: bool = False) -> Path | None:
@@ -2147,6 +2174,7 @@ def _discover_channels(folder: Path, capture_dir: Path) -> list[ChannelRef]:
         raw_file = _resolve_node_file(folder, capture_dir, node, "raw_file", "raw_f32le.bin")
         filt_file = _resolve_node_file(folder, capture_dir, node, "filt_file", "filt_f32le.bin")
         marks_file = _resolve_node_file(folder, capture_dir, node, "noise_marks_file", "noise_marks.csv")
+        time_marks_file = _resolve_node_file(folder, capture_dir, node, "time_marks_file", "time_marks.csv")
         if raw_file is None and filt_file is None:
             continue
         node_metadata = dict(node)
@@ -2163,7 +2191,9 @@ def _discover_channels(folder: Path, capture_dir: Path) -> list[ChannelRef]:
                 pcb_id=str(node.get("pcb_id") or node.get("slave_id") or ""),
                 raw_file=raw_file,
                 filt_file=filt_file,
-                fs=float(node.get("fs") or meta.get("fs") or 0.0),
+                fs=(float(node["sample_rate_mhz"]) / 1000.0
+                    if node.get("sample_rate_mhz") else
+                    float(node.get("fs") or meta.get("fs") or 0.0)),
                 position_m=_float_or_none(
                     node.get("position_m", node.get("offset_m_from_hammer", node.get("hammer_offset_m")))
                 ),
@@ -2180,6 +2210,8 @@ def _discover_channels(folder: Path, capture_dir: Path) -> list[ChannelRef]:
                 label=str(node.get("type") or node.get("name") or ""),
                 noise_marks_file=marks_file,
                 noise_marks=marks,
+                time_marks_file=time_marks_file,
+                time_marks=_read_time_marks(time_marks_file),
                 metadata=node_metadata,
             )
         )
@@ -2221,6 +2253,10 @@ def _discover_channels_by_dirs(folder: Path, capture_dir: Path) -> list[ChannelR
                 noise_marks=_read_noise_marks(
                     (child / "noise_marks.csv") if (child / "noise_marks.csv").is_file() else None,
                     None,
+                ),
+                time_marks_file=(child / "time_marks.csv") if (child / "time_marks.csv").is_file() else None,
+                time_marks=_read_time_marks(
+                    (child / "time_marks.csv") if (child / "time_marks.csv").is_file() else None
                 ),
             )
         )
@@ -2313,6 +2349,109 @@ def _read_noise_marks(
     return tuple(marks)
 
 
+def _read_time_marks(path: Path | None) -> tuple[TimeMark, ...]:
+    """Lee marcas temporales nuevas; un ZIP antiguo simplemente devuelve vacío."""
+    if path is None or not path.is_file():
+        return ()
+    marks: list[TimeMark] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                sample = int(row.get("sample", ""))
+                master_us = int(row.get("master_us", ""))
+                uncert_ns = int(row.get("uncert", "0") or 0)
+                kind = str(row.get("kind", "periodic") or "periodic")
+                ok_text = str(row.get("ok", "1") or "1").strip().lower()
+                ok = ok_text not in {"0", "false", "no"}
+                if sample >= 0 and 0 <= master_us <= 0xFFFFFFFF:
+                    marks.append(TimeMark(sample, master_us, max(0, uncert_ns), kind, ok))
+    except (OSError, TypeError, ValueError):
+        return ()
+    marks.sort(key=lambda mark: (mark.sample, mark.master_us))
+    return tuple(marks)
+
+
+def _unwrap_master_us(marks: Iterable[TimeMark]) -> tuple[np.ndarray, np.ndarray]:
+    ordered = sorted((mark for mark in marks if mark.ok), key=lambda mark: mark.sample)
+    if len(ordered) < 2:
+        raise ValueError("se necesitan al menos dos marcas temporales válidas")
+    samples = np.asarray([mark.sample for mark in ordered], dtype=np.float64)
+    raw = [mark.master_us for mark in ordered]
+    unwrapped = np.empty(len(raw), dtype=np.float64)
+    epoch = 0
+    previous = raw[0]
+    unwrapped[0] = previous
+    for index, current in enumerate(raw[1:], start=1):
+        delta = current - previous
+        if delta < -(1 << 31):
+            epoch += 1 << 32
+        elif delta > (1 << 31):
+            epoch -= 1 << 32
+        unwrapped[index] = current + epoch
+        previous = current
+    return samples, unwrapped
+
+
+def fit_time_marks(marks: Iterable[TimeMark]) -> TimeMarkFit:
+    """Ajusta muestra→reloj maestro por mínimos cuadrados, incluyendo el wrap."""
+    samples, master_us = _unwrap_master_us(marks)
+    if np.unique(samples).size < 2:
+        raise ValueError("las marcas temporales deben cubrir índices distintos")
+    sample_origin = float(samples.mean())
+    time_origin = float(master_us.mean())
+    centered = samples - sample_origin
+    slope = float(np.dot(centered, master_us - time_origin) / np.dot(centered, centered))
+    if not math.isfinite(slope) or slope <= 0.0:
+        raise ValueError("las marcas temporales no forman un reloj creciente")
+    offset = time_origin - slope * sample_origin
+    residual = master_us - (offset + samples * slope)
+    return TimeMarkFit(
+        offset_us=offset,
+        sample_period_us=slope,
+        fs_hz=1_000_000.0 / slope,
+        residual_rms_us=float(np.sqrt(np.mean(np.square(residual)))),
+        samples_used=int(samples.size),
+    )
+
+
+def master_time_axis(channel: ChannelRef, sample_count: int) -> np.ndarray:
+    """Instante maestro, en us desenrollados, de cada muestra de un canal."""
+    if sample_count < 0:
+        raise ValueError("sample_count no puede ser negativo")
+    return fit_time_marks(channel.time_marks).master_time_us(np.arange(sample_count))
+
+
+def align_channels_to_master_grid(
+    channels: Iterable[tuple[ChannelRef, np.ndarray]],
+    *,
+    target_fs: float | None = None,
+) -> tuple[np.ndarray, dict[int | str, np.ndarray]]:
+    """Interpola varios canales sobre la intersección de sus relojes maestros."""
+    prepared: list[tuple[ChannelRef, np.ndarray, np.ndarray]] = []
+    for channel, values in channels:
+        signal = np.asarray(values, dtype=np.float64)
+        if signal.ndim != 1 or signal.size == 0:
+            raise ValueError("cada señal debe ser un vector no vacío")
+        prepared.append((channel, signal, master_time_axis(channel, signal.size)))
+    if not prepared:
+        raise ValueError("no hay canales para alinear")
+    fs = float(target_fs or min(fit_time_marks(channel.time_marks).fs_hz for channel, _, _ in prepared))
+    if not math.isfinite(fs) or fs <= 0.0:
+        raise ValueError("target_fs debe ser positiva")
+    start = max(axis[0] for _, _, axis in prepared)
+    stop = min(axis[-1] for _, _, axis in prepared)
+    if stop < start:
+        raise ValueError("los canales no se superponen en el reloj maestro")
+    step_us = 1_000_000.0 / fs
+    count = int(math.floor((stop - start) / step_us + 1e-9)) + 1
+    grid = start + np.arange(count, dtype=np.float64) * step_us
+    aligned: dict[int | str, np.ndarray] = {}
+    for channel, signal, axis in prepared:
+        key: int | str = channel.node_index if channel.node_index is not None else channel.pcb_id
+        aligned[key] = np.interp(grid, axis, signal)
+    return grid, aligned
+
+
 def _capture_order(capture_dir: Path, meta: dict[str, Any]) -> int:
     order = _int_or_none(meta.get("order"))
     if order is not None:
@@ -2377,6 +2516,11 @@ def read_noise_marks(
 ) -> tuple[tuple[int, int], ...]:
     """API pública para las marcas de interferencia del export web."""
     return _read_noise_marks(Path(path) if path is not None else None, fallback)
+
+
+def read_time_marks(path: str | Path | None) -> tuple[TimeMark, ...]:
+    """API pública para las marcas muestra↔reloj maestro del export web."""
+    return _read_time_marks(Path(path) if path is not None else None)
 
 
 def format_channel_metadata(channel: ChannelRef) -> str:

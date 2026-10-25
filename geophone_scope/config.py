@@ -43,7 +43,7 @@ PSOC_CAPTURE_MAX_BATCHES: int = 512  # PSoC store-and-forward RAM limit
 TEST_DEFAULT_SECONDS: float = 0.2    # Short directed debug burst
 TEST_MIN_SECONDS: float = 0.1
 TEST_MAX_SECONDS: float = 1.0
-DEFAULT_SAMPLE_RATE_HZ: int = 2604 # Native N=1 default before exact HELLO arrives
+DEFAULT_SAMPLE_RATE_HZ: int = 2604 # Fallback para placas viejas sin Fs exacta en HELLO
 DISP_SAMP: int    = DEFAULT_SAMPLE_RATE_HZ * 3   # Startup placeholder; ~3 s
 MAX_BUF_S: int    = 10             # Default circular buffer length, seconds
 MAX_BUF: int      = DEFAULT_SAMPLE_RATE_HZ * MAX_BUF_S  # Startup placeholder; ~10 s
@@ -64,12 +64,12 @@ VDAC_MAX: int    = 255
 VDAC_FULL_SCALE_V: float = VDAC_MAX * VDAC_STEP
 
 # ── ADC scaling ──────────────────────────────────────────────────────────────
-# PSoC ADC configs exposed by the firmware/web UI. All run at 2604 Hz for N=1.
+# Rangos del ADC expuestos por firmware/web; la frecuencia viene en el HELLO.
 ADC_CONFIGS = [
-    {"code": 1, "label": "+/-2.5 V", "range_v": 2.5, "fs_hz": 2604, "counts_per_volt": 131_072 / 2.5},
-    {"code": 2, "label": "+/-0.512 V", "range_v": 0.512, "fs_hz": 2604, "counts_per_volt": 131_072 / 0.512},
-    {"code": 3, "label": "+/-1.024 V", "range_v": 1.024, "fs_hz": 2604, "counts_per_volt": 131_072 / 1.024},
-    {"code": 4, "label": "+/-0.625 V", "range_v": 0.625, "fs_hz": 2604, "counts_per_volt": 131_072 / 0.625},
+    {"code": 1, "label": "+/-2.5 V", "range_v": 2.5, "counts_per_volt": 131_072 / 2.5},
+    {"code": 2, "label": "+/-0.512 V", "range_v": 0.512, "counts_per_volt": 131_072 / 0.512},
+    {"code": 3, "label": "+/-1.024 V", "range_v": 1.024, "counts_per_volt": 131_072 / 1.024},
+    {"code": 4, "label": "+/-0.625 V", "range_v": 0.625, "counts_per_volt": 131_072 / 0.625},
 ]
 ADC_COUNTS_PER_VOLT: float = ADC_CONFIGS[0]["counts_per_volt"]
 
