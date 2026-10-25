@@ -68,6 +68,10 @@ def _nodes_from_channels(folder: Path, capture_dir: Path, raw_root: Path) -> lis
             "samples": samples,
             "seconds": (samples / fs) if fs > 0 else 0.0,
             "file": str(Path(path).relative_to(raw_root)).replace("\\", "/"),
+            "noise_marks": [list(mark) for mark in ch.noise_marks],
+            "noise_mark_count": len(ch.noise_marks),
+            "lost_batches": list(ch.metadata.get("lost_batches") or []),
+            "sync": ch.metadata.get("sync"),
         })
     return nodes
 
@@ -114,6 +118,7 @@ def scan_catalog(raw_root: Path) -> dict:
             if not meta:
                 meta = _read_json(folder / "metadata.json")
             nodes = []
+            channels = frd.discover_capture_channels(folder, capture_dir)
             for node in meta.get("nodes", []):
                 # Sólo lo que realmente trajo señal: la metadata lista los 9 nodos
                 # posibles y marcar 8 vacíos como "faltantes" sería ruido.
@@ -121,15 +126,34 @@ def scan_catalog(raw_root: Path) -> dict:
                 if path is None or samples == 0:
                     continue
                 fs = float(node.get("fs") or meta.get("fs") or 0.0)
+                node_index = node.get("index", node.get("node_id"))
+                pcb_id = str(node.get("pcb_id") or node.get("slave_id") or "")
+                channel = next(
+                    (
+                        item for item in channels
+                        if (node_index is not None and item.node_index == node_index)
+                        or (pcb_id and item.pcb_id == pcb_id)
+                    ),
+                    None,
+                )
+                marks = list(channel.noise_marks) if channel is not None else []
                 nodes.append({
-                    "index": node.get("index", node.get("node_id")),
-                    "pcb_id": str(node.get("pcb_id") or node.get("slave_id") or ""),
+                    "index": node_index,
+                    "pcb_id": pcb_id,
                     "role": frd.node_role(node),
                     "hw_type": node.get("hw_type") or "",
                     "fs": fs,
                     "samples": samples,
                     "seconds": (samples / fs) if fs > 0 else 0.0,
                     "file": str(path.relative_to(raw_root)).replace("\\", "/"),
+                    "noise_marks": [list(mark) for mark in marks],
+                    "noise_mark_count": len(marks),
+                    "noise_marks_file": node.get("noise_marks_file"),
+                    "lost_batches": list(node.get("lost_batches") or []),
+                    "sync": node.get("sync"),
+                    "distance_declared_m": (node.get("sync") or {}).get("distance_declared_m"),
+                    "distance_ftm_raw_m": (node.get("sync") or {}).get("distance_ftm_raw_m"),
+                    "distance_ftm_calibrated_m": (node.get("sync") or {}).get("distance_ftm_calibrated_m"),
                 })
             if not nodes:
                 # La metadata no sirvió (sin `nodes`, o sin rutas resolubles).
@@ -144,6 +168,8 @@ def scan_catalog(raw_root: Path) -> dict:
                 "capture": capture_dir.name if capture_dir != folder else "(raíz)",
                 "order": meta.get("capture_index", meta.get("order", 0)),
                 "fs": float(meta.get("fs") or 0.0),
+                "payload": meta.get("payload"),
+                "sync": meta.get("sync"),
                 "nodes": nodes,
                 "has_hammer": "hammer" in roles,
                 "has_geo": "geo" in roles,

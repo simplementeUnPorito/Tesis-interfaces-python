@@ -75,6 +75,7 @@ try:
         filter_settings_signature,
         fk_directional_filter,
         flip_distance_group,
+        format_channel_metadata,
         format_distance_label,
         get_alignment_offset,
         hammer_global_time_signal,
@@ -137,6 +138,7 @@ except ImportError:  # pragma: no cover - script execution from this folder
         filter_settings_signature,
         fk_directional_filter,
         flip_distance_group,
+        format_channel_metadata,
         format_distance_label,
         get_alignment_offset,
         hammer_global_time_signal,
@@ -574,8 +576,11 @@ class FieldReviewWindow(QMainWindow):
         self.notes_edit = QLineEdit()
         self.notes_edit.setPlaceholderText("nota opcional")
         self.notes_edit.editingFinished.connect(self._notes_changed)
+        self.node_metadata_label = QLabel("-")
+        self.node_metadata_label.setWordWrap(True)
         form.addRow("Posicion", self.position_label)
         form.addRow("Distancia m", self.distance_spin)
+        form.addRow("Nodos", self.node_metadata_label)
         form.addRow("", self.accept_check)
         form.addRow("Trigger hammer", self.trigger_label)
         form.addRow("Notas", self.notes_edit)
@@ -1036,6 +1041,10 @@ class FieldReviewWindow(QMainWindow):
         self.distance_spin.setValue(float(ann.distance_m))
         self.accept_check.setChecked(bool(ann.accepted))
         self.notes_edit.setText(ann.notes)
+        self.node_metadata_label.setText(
+            "HAMMER: " + format_channel_metadata(shot.hammer)
+            + "\nGEO: " + format_channel_metadata(shot.geo)
+        )
         self._loading = False
         self._refresh_plot()
         self._update_labels()

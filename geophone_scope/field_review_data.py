@@ -13,6 +13,7 @@ import math
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -21,6 +22,7 @@ from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Iterable
+from zipfile import BadZipFile, ZipFile
 
 import numpy as np
 from scipy.io import savemat
@@ -92,6 +94,9 @@ class ChannelRef:
     position_m: float | None
     invert_signal: bool = False
     label: str = ""
+    noise_marks_file: Path | None = None
+    noise_marks: tuple[tuple[int, int], ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict, compare=False)
 
     def signal_file(self, prefer_filtered: bool = False) -> Path | None:
         if prefer_filtered and self.filt_file is not None:
@@ -188,6 +193,8 @@ class FieldDataset:
     shots: list[FieldShot]
     duplicate_groups: list[DuplicateGroup]
     skipped_folders: list[str] = field(default_factory=list)
+    source_archive: Path | None = None
+    _archive_owner: Any = field(default=None, repr=False, compare=False)
 
     @property
     def duplicate_folder_count(self) -> int:
@@ -196,6 +203,32 @@ class FieldDataset:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _extract_capture_zip(zip_path: Path, destination: Path) -> None:
+    """Extrae un export v4 en una carpeta temporal sin aceptar rutas externas."""
+    try:
+        with ZipFile(zip_path) as zf:
+            try:
+                metadata = json.loads(zf.read("metadata.json").decode("utf-8-sig"))
+            except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("ZIP de captura sin metadata.json v4 válido") from exc
+            if metadata.get("schema") != "geophone_scope_web_zip_v4":
+                raise ValueError(f"esquema de captura no soportado: {metadata.get('schema')!r}")
+            destination.mkdir(parents=True, exist_ok=False)
+            resolved = destination.resolve()
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                name = info.filename.replace("\\", "/")
+                target = (destination / name).resolve()
+                if not target.is_relative_to(resolved):
+                    raise ValueError(f"ruta sospechosa en ZIP: {info.filename}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+    except BadZipFile as exc:
+        raise ValueError(f"ZIP de captura inválido: {exc}") from exc
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -215,7 +248,17 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def discover_dataset(raw_root: str | Path, include_duplicates: bool = False) -> FieldDataset:
-    raw_root = Path(raw_root).resolve()
+    requested_root = Path(raw_root).resolve()
+    archive_owner = None
+    source_archive = None
+    if requested_root.is_file():
+        source_archive = requested_root
+        archive_owner = tempfile.TemporaryDirectory(prefix="geophone_capture_")
+        raw_root = Path(archive_owner.name).resolve()
+        folder = raw_root / safe_filename(requested_root.stem)
+        _extract_capture_zip(requested_root, folder)
+    else:
+        raw_root = requested_root
     if not raw_root.exists():
         raise FileNotFoundError(raw_root)
 
@@ -272,6 +315,8 @@ def discover_dataset(raw_root: str | Path, include_duplicates: bool = False) -> 
         shots=shots,
         duplicate_groups=duplicate_groups,
         skipped_folders=skipped,
+        source_archive=source_archive,
+        _archive_owner=archive_owner,
     )
 
 
@@ -355,13 +400,155 @@ def folder_signal_signature(folder: Path) -> tuple[str, int, int]:
 
 
 def load_signal(channel: ChannelRef, prefer_filtered: bool = False, apply_invert: bool = True) -> np.ndarray:
-    path = channel.signal_file(prefer_filtered=prefer_filtered)
+    stored_filtered = bool(
+        prefer_filtered
+        and channel.filt_file is not None
+        and channel.filt_file.is_file()
+    )
+    path = channel.filt_file if stored_filtered else channel.raw_file
+    if path is None:
+        path = channel.filt_file
     if path is None:
         return np.array([], dtype=np.float32)
     data = np.fromfile(path, dtype="<f4").astype(np.float32, copy=False)
+    if prefer_filtered and not stored_filtered and channel.raw_file is not None:
+        data = reconstruct_filtered_trace(
+            data,
+            channel.fs,
+            channel.metadata,
+            channel.noise_marks,
+        )
     if apply_invert and channel.invert_signal:
         data = -data
     return data
+
+
+def _interpolate_filter_gaps(samples: np.ndarray) -> np.ndarray:
+    """Interpola huecos sólo en la copia que entra a la cadena de filtrado."""
+    values = np.asarray(samples, dtype=np.float64)
+    finite = np.isfinite(values)
+    if np.all(finite):
+        return values.copy()
+    if not np.any(finite):
+        return np.zeros(values.size, dtype=np.float64)
+    indices = np.arange(values.size, dtype=np.float64)
+    return np.interp(indices, indices[finite], values[finite]).astype(np.float64, copy=False)
+
+
+def _marked_windows(flags: np.ndarray, bit: int, margin: int = 2) -> list[tuple[int, int]]:
+    windows: list[list[int]] = []
+    start = -1
+    for index in range(flags.size + 1):
+        active = index < flags.size and bool(int(flags[index]) & bit)
+        if active and start < 0:
+            start = index
+        if not active and start >= 0:
+            low = max(0, start - margin)
+            high = min(flags.size, index + margin)
+            if windows and low <= windows[-1][1]:
+                windows[-1][1] = max(windows[-1][1], high)
+            else:
+                windows.append([low, high])
+            start = -1
+    return [(low, high) for low, high in windows]
+
+
+def _clean_marked_noise(values: np.ndarray, flags: np.ndarray, bit: int) -> np.ndarray:
+    """Aplica el fallback interpolado de la web cuando no viaja la plantilla."""
+    out = np.asarray(values, dtype=np.float64).copy()
+    for low, high in _marked_windows(flags, bit):
+        if low < 1 or high >= out.size:
+            continue
+        count = high - low
+        if count <= 0:
+            continue
+        out[low:high] = np.linspace(out[low - 1], out[high], count + 2)[1:-1]
+    return out
+
+
+def _zero_phase_fir(values: np.ndarray, coeffs: np.ndarray) -> np.ndarray:
+    """Espejo de ``filtFilt`` de la web: reflexión impar y dos FIR causales."""
+    try:
+        from .signal_proc import fir_filter
+    except ImportError:  # pragma: no cover - ejecución como script
+        from signal_proc import fir_filter
+
+    values = np.asarray(values, dtype=np.float64)
+    coeffs = np.asarray(coeffs, dtype=np.float64)
+    if values.size == 0 or coeffs.size == 0:
+        return values.copy()
+    if coeffs.size == 1:
+        return values * float(coeffs[0] ** 2)
+    pad = min(values.size - 1, max(0, 3 * (coeffs.size - 1)))
+    if pad:
+        left = 2.0 * values[0] - values[1 : pad + 1][::-1]
+        right = 2.0 * values[-1] - values[-pad - 1 : -1][::-1]
+        extended = np.concatenate((left, values, right))
+    else:
+        extended = values
+    forward, _ = fir_filter(coeffs, extended)
+    backward, _ = fir_filter(coeffs, forward[::-1])
+    result = backward[::-1]
+    return result[pad : pad + values.size]
+
+
+def reconstruct_filtered_trace(
+    raw: np.ndarray,
+    fs: float,
+    metadata: dict[str, Any] | None,
+    noise_marks: Iterable[tuple[int, int]] = (),
+) -> np.ndarray:
+    """Reconstruye ``filt`` con la configuración congelada por ``export.js``.
+
+    El crudo nunca se modifica. Los NaN se interpolan en esta copia porque los
+    filtros de captura completa no pueden operar a través de un lote perdido.
+    """
+    metadata = metadata or {}
+    work = _interpolate_filter_gaps(raw)
+    if work.size == 0:
+        return work.astype(np.float32)
+
+    # La señal "filtrada" de la web siempre sale sin offset (mediana robusta).
+    work -= float(np.median(work))
+    if bool(metadata.get("notch_enabled")) and fs > 0 and work.size > 1:
+        try:
+            from .signal_proc import harmonic_notch
+        except ImportError:  # pragma: no cover - ejecución como script
+            from signal_proc import harmonic_notch
+        work = harmonic_notch(
+            work,
+            float(fs),
+            float(metadata.get("_notch_f0", metadata.get("notch_f0", 50.0)) or 50.0),
+            max(1, min(12, int(metadata.get("notch_harm", 3) or 3))),
+            2.0,
+        )
+
+    flags = np.zeros(work.size, dtype=np.uint8)
+    for sample, value in noise_marks:
+        if 0 <= int(sample) < flags.size:
+            flags[int(sample)] |= int(value) & 0xFF
+    clean_bits: list[int] = []
+    if bool(metadata.get("clean_i2c")):
+        clean_bits.append(0x08)
+    if bool(metadata.get("clean_sd")):
+        clean_bits.extend((0x01, 0x02))
+    if bool(metadata.get("clean_radio_tx")):
+        clean_bits.append(0x04)
+    if bool(metadata.get("clean_beacon")):
+        clean_bits.extend((0x10, 0x20))
+    for bit in clean_bits:
+        work = _clean_marked_noise(work, flags, bit)
+
+    command = str(metadata.get("fir_cmd") or "").strip()
+    if command and fs > 0:
+        try:
+            from .signal_proc import compile_fir_cmd
+        except ImportError:  # pragma: no cover - ejecución como script
+            from signal_proc import compile_fir_cmd
+        coeffs = compile_fir_cmd(command, float(fs))
+        if coeffs is not None:
+            work = _zero_phase_fir(work, coeffs)
+    return np.asarray(work, dtype=np.float32)
 
 
 def peak_to_peak(samples: np.ndarray) -> float:
@@ -1879,8 +2066,13 @@ def _discover_channels(folder: Path, capture_dir: Path) -> list[ChannelRef]:
             continue
         raw_file = _resolve_node_file(folder, capture_dir, node, "raw_file", "raw_f32le.bin")
         filt_file = _resolve_node_file(folder, capture_dir, node, "filt_file", "filt_f32le.bin")
+        marks_file = _resolve_node_file(folder, capture_dir, node, "noise_marks_file", "noise_marks.csv")
         if raw_file is None and filt_file is None:
             continue
+        node_metadata = dict(node)
+        node_metadata["_notch_f0"] = float(meta.get("notch_f0", 50.0) or 50.0)
+        node_metadata["_capture_sync"] = meta.get("sync")
+        marks = _read_noise_marks(marks_file, node.get("sd_marks"))
         channels.append(
             ChannelRef(
                 role=role,
@@ -1903,6 +2095,9 @@ def _discover_channels(folder: Path, capture_dir: Path) -> list[ChannelRef]:
                     else not bool(node.get("invert_signal", False))
                 ),
                 label=str(node.get("type") or node.get("name") or ""),
+                noise_marks_file=marks_file,
+                noise_marks=marks,
+                metadata=node_metadata,
             )
         )
     if channels:
@@ -1939,6 +2134,11 @@ def _discover_channels_by_dirs(folder: Path, capture_dir: Path) -> list[ChannelR
                 # metadata se asume que el archivo viene sin invertir.
                 invert_signal=(role == "hammer"),
                 label=child.name,
+                noise_marks_file=(child / "noise_marks.csv") if (child / "noise_marks.csv").is_file() else None,
+                noise_marks=_read_noise_marks(
+                    (child / "noise_marks.csv") if (child / "noise_marks.csv").is_file() else None,
+                    None,
+                ),
             )
         )
     return _dedupe_by_slave(channels)
@@ -2003,6 +2203,33 @@ def _resolve_node_file(
     return None
 
 
+def _read_noise_marks(
+    path: Path | None,
+    fallback: Any = None,
+) -> tuple[tuple[int, int], ...]:
+    """Lee ``sample_index,flags,...`` y conserva sólo marcas válidas."""
+    marks: list[tuple[int, int]] = []
+    if path is not None and path.is_file():
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    sample = int(row.get("sample_index", ""))
+                    flags = int(row.get("flags", ""), 0)
+                    if sample >= 0 and flags:
+                        marks.append((sample, flags & 0xFF))
+        except (OSError, TypeError, ValueError):
+            marks = []
+    if not marks and isinstance(fallback, list):
+        for item in fallback:
+            try:
+                sample, flags = int(item[0]), int(item[1]) & 0xFF
+            except (IndexError, TypeError, ValueError):
+                continue
+            if sample >= 0 and flags:
+                marks.append((sample, flags))
+    return tuple(marks)
+
+
 def _capture_order(capture_dir: Path, meta: dict[str, Any]) -> int:
     order = _int_or_none(meta.get("order"))
     if order is not None:
@@ -2059,6 +2286,41 @@ def discover_capture_channels(folder: str | Path, capture_dir: str | Path) -> li
     disparo; esto devuelve lo que haya, para poder graficar igual.
     """
     return _discover_channels(Path(folder), Path(capture_dir))
+
+
+def read_noise_marks(
+    path: str | Path | None,
+    fallback: Any = None,
+) -> tuple[tuple[int, int], ...]:
+    """API pública para las marcas de interferencia del export web."""
+    return _read_noise_marks(Path(path) if path is not None else None, fallback)
+
+
+def format_channel_metadata(channel: ChannelRef) -> str:
+    """Resumen corto para el panel de metadatos de la app de revisión."""
+    meta = channel.metadata
+    sync = meta.get("sync") or {}
+    distances = []
+    for key, label in (
+        ("distance_declared_m", "declarada"),
+        ("distance_ftm_raw_m", "FTM cruda"),
+        ("distance_ftm_calibrated_m", "FTM calibrada"),
+    ):
+        value = sync.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            distances.append(f"{label}={float(value):g} m")
+    lost = meta.get("lost_batches") or []
+    details = [
+        f"{channel.label or channel.role} · PCB {channel.pcb_id or '-'}",
+        f"marcas={len(channel.noise_marks)}",
+        f"lotes perdidos={len(lost)}",
+    ]
+    if distances:
+        details.append(", ".join(distances))
+    mode = (meta.get("_capture_sync") or {}).get("sync_mode")
+    if mode:
+        details.append(f"sync={mode}")
+    return " · ".join(details)
 
 
 def zero_by_pretrigger(signal: np.ndarray, trigger_idx: int, fs: float) -> np.ndarray:
@@ -2160,7 +2422,9 @@ def _zero_by_pretrigger(signal: np.ndarray, trigger_idx: int, fs: float) -> np.n
     end = max(start + 1, trigger_idx - int(round(fs * 0.005)))
     if end > signal.size:
         end = min(signal.size, max(start + 1, trigger_idx))
-    baseline = float(np.median(signal[start:end])) if end > start else float(np.median(signal))
+    window = signal[start:end] if end > start else signal
+    finite = np.asarray(window)[np.isfinite(window)]
+    baseline = float(np.median(finite)) if finite.size else 0.0
     return signal.astype(np.float32, copy=False) - np.float32(baseline)
 
 

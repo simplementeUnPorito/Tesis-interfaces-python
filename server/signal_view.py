@@ -203,7 +203,10 @@ def _channel_payload(
 
     file_path = channel.signal_file(prefer_filtered=prefer_filtered)
     file_rel = str(Path(file_path).relative_to(raw_root)).replace("\\", "/") if file_path else ""
-    used_filtered = bool(prefer_filtered and channel.filt_file is not None)
+    used_filtered = bool(
+        prefer_filtered
+        and (channel.filt_file is not None or channel.raw_file is not None)
+    )
 
     duration_s = (n / channel_fs) if channel_fs > 0 else 0.0
     bucket_dt = (stride / channel_fs) if channel_fs > 0 else 0.0
@@ -214,6 +217,13 @@ def _channel_payload(
         "label": channel.label,
         "file": file_rel,
         "used_filtered": used_filtered,
+        "filter_source": (
+            "stored" if used_filtered and channel.filt_file is not None
+            else ("reconstructed" if used_filtered else "raw")
+        ),
+        "noise_marks": [list(mark) for mark in channel.noise_marks],
+        "lost_batches": list(channel.metadata.get("lost_batches") or []),
+        "sync": channel.metadata.get("sync"),
         "invert_applied": bool(channel.invert_signal),
         "flip_applied": flip_applied,
         "samples": n,

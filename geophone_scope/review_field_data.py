@@ -81,7 +81,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--filtered",
         action="store_true",
-        help="Usar filt_f32le.bin. Default: usa raw_f32le.bin.",
+        help=(
+            "Usar filt_f32le.bin si existe; en exportes raw_metadata_only, "
+            "reconstruir la señal filtrada desde el crudo y sus metadatos."
+        ),
     )
     parser.add_argument(
         "--raw",
