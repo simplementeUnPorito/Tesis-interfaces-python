@@ -8,7 +8,7 @@ import numpy as np
 from geophone_scope import field_review_data as frd
 from geophone_scope.zip_to_mat import zip_to_mat_dict
 from server.catalog import scan_catalog
-from tests.capture_zip_fixture import SAMPLE_COUNT, write_capture_zip
+from tests.capture_zip_fixture import NOISE_SIGNATURES, SAMPLE_COUNT, write_capture_zip
 
 
 def test_fixture_matches_raw_metadata_only_contract(tmp_path) -> None:
@@ -16,6 +16,7 @@ def test_fixture_matches_raw_metadata_only_contract(tmp_path) -> None:
     with ZipFile(zip_path) as zf:
         names = set(zf.namelist())
         meta = json.loads(zf.read("metadata.json"))
+        signatures = json.loads(zf.read("noise_signatures.json"))
 
     assert meta["schema"] == "geophone_scope_web_zip_v4"
     assert meta["payload"] == "raw_metadata_only"
@@ -24,6 +25,8 @@ def test_fixture_matches_raw_metadata_only_contract(tmp_path) -> None:
     assert not any(name.endswith("filt_f32le.bin") for name in names)
     assert not any(name.endswith("raw.csv") or name.endswith("filt.csv") for name in names)
     assert sum(name.endswith("noise_marks.csv") for name in names) == 3
+    assert meta["noise_signatures_file"] == "noise_signatures.json"
+    assert signatures == NOISE_SIGNATURES
 
 
 def test_field_review_loads_zip_and_reconstructs_filtered_trace(tmp_path) -> None:
@@ -43,6 +46,39 @@ def test_field_review_loads_zip_and_reconstructs_filtered_trace(tmp_path) -> Non
     assert channel.noise_marks
     assert channel.metadata["lost_batches"]
     assert channel.metadata["sync"]["distance_ftm_calibrated_m"] == 2.0
+    assert channel.metadata["_noise_signatures"] == NOISE_SIGNATURES
+
+
+def test_embedded_noise_signatures_replace_interpolation_fallback(tmp_path) -> None:
+    current = write_capture_zip(tmp_path / "with-signatures.zip")
+    with ZipFile(current) as source:
+        entries = {name: source.read(name) for name in source.namelist()}
+
+    metadata = json.loads(entries["metadata.json"])
+    metadata.pop("noise_signatures_file")
+    metadata_json = (json.dumps(metadata, indent=2, ensure_ascii=False) + "\n").encode()
+    entries["metadata.json"] = metadata_json
+    entries["maestro/metadata.json"] = metadata_json
+    entries.pop("noise_signatures.json")
+    fallback = tmp_path / "without-signatures.zip"
+    with ZipFile(fallback, "w", compression=ZIP_STORED) as target:
+        for name, contents in entries.items():
+            target.writestr(name, contents)
+
+    templated_dataset = frd.discover_dataset(current)
+    fallback_dataset = frd.discover_dataset(fallback)
+    templated_channel = next(
+        shot.geo for shot in templated_dataset.shots
+        if shot.geo.node_index == 1
+    )
+    fallback_channel = next(
+        shot.geo for shot in fallback_dataset.shots
+        if shot.geo.node_index == 1
+    )
+    templated = frd.load_signal(templated_channel, prefer_filtered=True, apply_invert=False)
+    interpolated = frd.load_signal(fallback_channel, prefer_filtered=True, apply_invert=False)
+
+    assert not np.allclose(templated, interpolated)
 
 
 def test_zip_to_mat_reconstructs_filter_and_exports_new_metadata(tmp_path) -> None:

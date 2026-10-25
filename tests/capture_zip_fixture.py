@@ -15,6 +15,20 @@ FS = 1000.0
 SAMPLES_PER_BATCH = 30
 SAMPLE_COUNT = 240
 
+NOISE_SIGNATURES = {
+    "schema_version": 2,
+    "placa": "fixture-board",
+    "fecha": "2026-10-25",
+    "types": {
+        "I2C": {
+            "pre": 1,
+            "onset": [0.0, 1000.0, 0.0],
+            "units": "counts",
+            "recommended_method": {"method": "template", "parameters": {"offset": False}},
+        }
+    },
+}
+
 
 def _raw_signal(index: int, lost_batches: list[int]) -> np.ndarray:
     time_s = np.arange(SAMPLE_COUNT, dtype=np.float64) / FS
@@ -217,6 +231,7 @@ def write_capture_zip(path: str | Path) -> Path:
         "save_time": "20261025_120000",
         "source": "esp32_master_web_ui",
         "web_app_version": "field-study-42",
+        "noise_signatures_file": "noise_signatures.json",
         "layout": "maestro_metadata_plus_capture_metadata_and_pcb_dirs",
         "id_semantics": {
             "hammer_origin_m": 0,
@@ -247,7 +262,7 @@ def write_capture_zip(path: str | Path) -> Path:
         "capture_summary_csv_file": None,
         "node_summary_csv_file": "combined/nodes.csv",
         "capture_node_summary_csv_file": None,
-        "metadata_files": ["metadata.json", "maestro/metadata.json", "maestro/config.json", "combined/nodes.csv"],
+        "metadata_files": ["metadata.json", "maestro/metadata.json", "maestro/config.json", "noise_signatures.json", "combined/nodes.csv"],
         "captures": [],
         "dtype": "float32",
         "endian": "little",
@@ -298,6 +313,7 @@ def write_capture_zip(path: str | Path) -> Path:
         zf.writestr("metadata.json", metadata_json)
         zf.writestr("maestro/metadata.json", metadata_json)
         zf.writestr("maestro/config.json", json.dumps(master_config, indent=2, ensure_ascii=False) + "\n")
+        zf.writestr("noise_signatures.json", json.dumps(NOISE_SIGNATURES, indent=2, ensure_ascii=False) + "\n")
         zf.writestr("combined/nodes.csv", node_csv.getvalue())
         for name, data in payloads:
             zf.writestr(name, data)

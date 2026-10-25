@@ -453,16 +453,85 @@ def _marked_windows(flags: np.ndarray, bit: int, margin: int = 2) -> list[tuple[
     return [(low, high) for low, high in windows]
 
 
-def _clean_marked_noise(values: np.ndarray, flags: np.ndarray, bit: int) -> np.ndarray:
-    """Aplica el fallback interpolado de la web cuando no viaja la plantilla."""
+def _noise_recommendation(spec: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    recommended = spec.get("recommended_method")
+    if isinstance(recommended, str):
+        return recommended, {}
+    if isinstance(recommended, dict):
+        return str(recommended.get("method") or "interp"), dict(recommended.get("parameters") or {})
+    return str(spec.get("method") or "interp"), dict(spec)
+
+
+def _template_values(spec: dict[str, Any], which: str, volts_per_count: float) -> np.ndarray:
+    direct = spec.get(f"{which}_template")
+    compact = spec.get(which)
+    nested = compact.get("template") if isinstance(compact, dict) else None
+    source = direct if isinstance(direct, list) else compact if isinstance(compact, list) else nested
+    if not isinstance(source, list):
+        return np.array([], dtype=np.float64)
+    return np.asarray([
+        float(value) * volts_per_count if isinstance(value, (int, float)) and math.isfinite(value) else 0.0
+        for value in source
+    ], dtype=np.float64)
+
+
+def _subtract_template(out: np.ndarray, center: int, template: np.ndarray, pre: int) -> None:
+    low = center - pre
+    if template.size == 0 or low < 0 or low + template.size > out.size:
+        return
+    out[low : low + template.size] -= template
+
+
+def _clean_marked_noise(
+    values: np.ndarray,
+    flags: np.ndarray,
+    bit: int,
+    signatures: dict[str, Any] | None = None,
+    type_name: str = "",
+    counts_per_volt: float = 1.0,
+) -> np.ndarray:
+    """Replica la selección plantilla/interpolación de ``noise_clean.js``."""
+    spec = ((signatures or {}).get("types") or {}).get(type_name) or {}
+    method, parameters = _noise_recommendation(spec)
+    if method == "none":
+        return np.asarray(values, dtype=np.float64)
+    if method in {"template", "template_xcorr"}:
+        volts_per_count = 1.0 / counts_per_volt if counts_per_volt > 0 else 1.0
+        onset = _template_values(spec, "onset", volts_per_count)
+        if onset.size:
+            out = np.asarray(values, dtype=np.float64).copy()
+            offset = _template_values(spec, "offset", volts_per_count)
+            pre_value = spec.get("pre", 20)
+            pre = max(0, int(pre_value) if isinstance(pre_value, (int, float)) and math.isfinite(pre_value) else 20)
+            for start, end in _marked_windows(flags, bit, margin=0):
+                _subtract_template(out, start, onset, pre)
+                if parameters.get("offset", True) is not False:
+                    _subtract_template(out, end, offset, pre)
+            return out
+
     out = np.asarray(values, dtype=np.float64).copy()
-    for low, high in _marked_windows(flags, bit):
+    margin_value = parameters.get("margin", spec.get("margin", 2))
+    margin = max(0, int(margin_value) if isinstance(margin_value, (int, float)) and math.isfinite(margin_value) else 0)
+    cubic = method == "cubic" or parameters.get("kind") == "cubic"
+    for low, high in _marked_windows(flags, bit, margin=margin):
         if low < 1 or high >= out.size:
             continue
         count = high - low
         if count <= 0:
             continue
-        out[low:high] = np.linspace(out[low - 1], out[high], count + 2)[1:-1]
+        left = out[low - 1]
+        right = out[high]
+        for index in range(count):
+            t = (index + 1) / (count + 1)
+            if cubic and low >= 2 and high + 1 < out.size:
+                p0, p1, p2, p3 = out[low - 2], left, right, out[high + 1]
+                out[low + index] = 0.5 * (
+                    2 * p1 + (-p0 + p2) * t +
+                    (2 * p0 - 5 * p1 + 4 * p2 - p3) * t**2 +
+                    (-p0 + 3 * p1 - 3 * p2 + p3) * t**3
+                )
+            else:
+                out[low + index] = left + (right - left) * t
     return out
 
 
@@ -527,17 +596,19 @@ def reconstruct_filtered_trace(
     for sample, value in noise_marks:
         if 0 <= int(sample) < flags.size:
             flags[int(sample)] |= int(value) & 0xFF
-    clean_bits: list[int] = []
+    clean_bits: list[tuple[int, str]] = []
     if bool(metadata.get("clean_i2c")):
-        clean_bits.append(0x08)
+        clean_bits.append((0x08, "I2C"))
     if bool(metadata.get("clean_sd")):
-        clean_bits.extend((0x01, 0x02))
+        clean_bits.extend(((0x01, "SD_IO"), (0x02, "SD_SYNC")))
     if bool(metadata.get("clean_radio_tx")):
-        clean_bits.append(0x04)
+        clean_bits.append((0x04, "RADIO_TX"))
     if bool(metadata.get("clean_beacon")):
-        clean_bits.extend((0x10, 0x20))
-    for bit in clean_bits:
-        work = _clean_marked_noise(work, flags, bit)
+        clean_bits.extend(((0x10, "AP_BEACON"), (0x20, "MASTER_RX")))
+    signatures = metadata.get("_noise_signatures")
+    counts_per_volt = float(metadata.get("adc_counts_per_volt") or 1.0)
+    for bit, type_name in clean_bits:
+        work = _clean_marked_noise(work, flags, bit, signatures, type_name, counts_per_volt)
 
     command = str(metadata.get("fir_cmd") or "").strip()
     if command and fs > 0:
@@ -2058,6 +2129,15 @@ def _capture_dirs(folder: Path) -> list[Path]:
 
 def _discover_channels(folder: Path, capture_dir: Path) -> list[ChannelRef]:
     meta = _read_json(capture_dir / "metadata.json")
+    root_meta = _read_json(folder / "metadata.json")
+    signatures_file = meta.get("noise_signatures_file") or root_meta.get("noise_signatures_file")
+    signatures: dict[str, Any] | None = None
+    if isinstance(signatures_file, str) and signatures_file:
+        candidate = (folder / signatures_file).resolve()
+        if candidate.is_relative_to(folder.resolve()) and candidate.is_file():
+            loaded = _read_json(candidate)
+            if isinstance(loaded.get("types"), dict):
+                signatures = loaded
     nodes = meta.get("nodes", [])
     channels: list[ChannelRef] = []
     for node in nodes:
@@ -2072,6 +2152,8 @@ def _discover_channels(folder: Path, capture_dir: Path) -> list[ChannelRef]:
         node_metadata = dict(node)
         node_metadata["_notch_f0"] = float(meta.get("notch_f0", 50.0) or 50.0)
         node_metadata["_capture_sync"] = meta.get("sync")
+        if signatures is not None:
+            node_metadata["_noise_signatures"] = signatures
         marks = _read_noise_marks(marks_file, node.get("sd_marks"))
         channels.append(
             ChannelRef(

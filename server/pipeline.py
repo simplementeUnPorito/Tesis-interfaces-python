@@ -550,6 +550,30 @@ class Pipeline:
                         f"{schema or '(ausente)'}; se esperaba "
                         f"{SUPPORTED_ARCHIVE_SCHEMA}"
                     )
+                signatures_file = metadata.get("noise_signatures_file")
+                if signatures_file is not None:
+                    if signatures_file != "noise_signatures.json":
+                        raise ValueError(
+                            "estructura inesperada: noise_signatures_file debe apuntar "
+                            "a noise_signatures.json en la raíz"
+                        )
+                    signatures_info = normalized.get(signatures_file)
+                    if signatures_info is None:
+                        raise ValueError(
+                            "estructura inesperada: falta noise_signatures.json"
+                        )
+                    try:
+                        signatures = json.loads(
+                            zf.read(signatures_info).decode("utf-8-sig")
+                        )
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise ValueError(
+                            "estructura inesperada: noise_signatures.json no es JSON válido"
+                        ) from exc
+                    if not isinstance(signatures, dict) or not isinstance(signatures.get("types"), dict):
+                        raise ValueError(
+                            "estructura inesperada: noise_signatures.json debe contener types"
+                        )
                 if verify_crc:
                     bad = zf.testzip()
                     if bad:
