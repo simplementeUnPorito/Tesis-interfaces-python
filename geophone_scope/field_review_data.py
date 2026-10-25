@@ -2151,7 +2151,8 @@ def _discover_channels(folder: Path, capture_dir: Path) -> list[ChannelRef]:
             continue
         node_metadata = dict(node)
         node_metadata["_notch_f0"] = float(meta.get("notch_f0", 50.0) or 50.0)
-        node_metadata["_capture_sync"] = meta.get("sync")
+        # La web escribe la sincronia en la metadata raiz del ZIP, no en la de cada captura.
+        node_metadata["_capture_sync"] = meta.get("sync") or root_meta.get("sync")
         if signatures is not None:
             node_metadata["_noise_signatures"] = signatures
         marks = _read_noise_marks(marks_file, node.get("sd_marks"))
