@@ -31,6 +31,16 @@ from scipy.signal import butter, correlate, resample_poly, sosfiltfilt
 
 SCHEMA = "geophone_field_review_v1"
 
+# Latencia SOC→EOC del ADC_DelSig en Single Sample, 18 bits: unas 1271
+# épocas del reloj ADC (256 para llenar sinc4/64 + 1024 de promedio, con el
+# pequeño solapamiento propio del bloque) a 3,072 MHz. La constante representa
+# 413,7 us y debe confirmarse midiendo SOC→EOC con osciloscopio. La muestra
+# efectiva está en el centro de la ventana de promedio; para una señal que
+# además pasó por un FIR lineal, sumar (taps-1)/(2*Fs) a la corrección absoluta.
+# Es común a todos los nodos y por eso nunca se usa para alterar su alineación
+# relativa.
+ADC_SOC_LATENCY_S = 1271.0 / 3_072_000.0
+
 
 def _discover_data_root() -> Path:
     """Resuelve el almacén de datos sin acoplar este repo al superproyecto."""
@@ -2425,14 +2435,25 @@ def align_channels_to_master_grid(
     channels: Iterable[tuple[ChannelRef, np.ndarray]],
     *,
     target_fs: float | None = None,
+    absolute_time_latency_s: float = ADC_SOC_LATENCY_S,
 ) -> tuple[np.ndarray, dict[int | str, np.ndarray]]:
-    """Interpola varios canales sobre la intersección de sus relojes maestros."""
+    """Interpola canales sobre la intersección de sus relojes maestros.
+
+    ``absolute_time_latency_s`` se resta igual a todos los ejes y sólo corrige
+    el origen absoluto. Para datos filtrados, el llamador puede pasar
+    ``ADC_SOC_LATENCY_S + (taps - 1) / (2 * Fs)``. Usar cero para capturas
+    antiguas cuya referencia temporal ya haya sido corregida.
+    """
+    latency_s = float(absolute_time_latency_s)
+    if not math.isfinite(latency_s) or latency_s < 0.0:
+        raise ValueError("absolute_time_latency_s debe ser finita y no negativa")
     prepared: list[tuple[ChannelRef, np.ndarray, np.ndarray]] = []
     for channel, values in channels:
         signal = np.asarray(values, dtype=np.float64)
         if signal.ndim != 1 or signal.size == 0:
             raise ValueError("cada señal debe ser un vector no vacío")
-        prepared.append((channel, signal, master_time_axis(channel, signal.size)))
+        axis = master_time_axis(channel, signal.size) - latency_s * 1_000_000.0
+        prepared.append((channel, signal, axis))
     if not prepared:
         raise ValueError("no hay canales para alinear")
     fs = float(target_fs or min(fit_time_marks(channel.time_marks).fs_hz for channel, _, _ in prepared))

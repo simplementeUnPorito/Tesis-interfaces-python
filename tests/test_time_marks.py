@@ -72,9 +72,18 @@ def test_common_master_grid_aligns_channels_with_different_offsets() -> None:
         [(channel_a, signal_a), (channel_b, signal_b)], target_fs=fs_hz
     )
 
-    assert grid_us[0] == pytest.approx(1_000_500.0)
+    assert grid_us[0] == pytest.approx(
+        1_000_500.0 - frd.ADC_SOC_LATENCY_S * 1_000_000.0
+    )
     assert aligned[channel_a.node_index][0] == pytest.approx(1.0)
     assert aligned[channel_b.node_index][0] == pytest.approx(100.0)
+
+    uncorrected_grid_us, _ = frd.align_channels_to_master_grid(
+        [(channel_a, signal_a), (channel_b, signal_b)],
+        target_fs=fs_hz,
+        absolute_time_latency_s=0.0,
+    )
+    assert uncorrected_grid_us[0] == pytest.approx(1_000_500.0)
 
 
 def test_channel_discovery_loads_time_marks_csv(tmp_path) -> None:
